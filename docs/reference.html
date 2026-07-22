@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Reference — AWR Capacity Predictions</title>
+<meta name="description" content="Reference for AWR Capacity Predictions: the full configuration knob table, caveats verified on 19c, the object index, and teardown.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23b06a0d'/><path d='M16 8L24 23L8 23Z' fill='%23fff'/></svg>">
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  // No-FOUC: apply the persisted theme before first paint.
+  (function(){try{var t=localStorage.getItem("cap-theme");
+    if(t){document.documentElement.setAttribute("data-theme",t);
+      var m=document.querySelector('meta[name="color-scheme"]');if(m)m.content=t;}}catch(e){}})();
+</script>
+</head>
+<body>
+<a class="skip-link visually-hidden" href="#content">Skip to content</a>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">
+      <div class="brand__mark" aria-hidden="true">▲</div>
+      <div>
+        <div class="brand__name">AWR Capacity<br>Predictions</div>
+        <div class="brand__sub">Documentation</div>
+      </div>
+    </a>
+    <nav class="nav" aria-label="Documentation pages">
+      <div class="nav__group">Start</div>
+      <a class="nav-page" href="index.html"><span class="n">01</span> Introduction</a>
+      <div class="nav__group">Guides</div>
+      <a class="nav-page" href="concepts.html"><span class="n">02</span> How it works</a>
+      <a class="nav-page" href="install.html"><span class="n">03</span> Installation</a>
+      <a class="nav-page" href="usage.html"><span class="n">04</span> Usage</a>
+      <a class="nav-page" href="testing.html"><span class="n">05</span> Testing</a>
+      <div class="nav__group">Reference</div>
+      <a class="nav-page" href="reference.html"><span class="n">06</span> Reference</a>
+    </nav>
+    <nav class="toc" id="toc" aria-label="On this page"></nav>
+    <button class="theme-toggle" id="themeBtn" type="button">◐ System</button>
+  </aside>
+
+  <main class="main" id="content" tabindex="-1">
+    <div class="wrap">
+
+      <!-- ===================== HERO ===================== -->
+      <section class="hero" id="reference">
+        <span class="eyebrow">Reference</span>
+        <h1>Reference</h1>
+        <p class="lead">The non-obvious facts, the full knob list, every object the suite creates,
+          and clean teardown — the details you reach for once you know what the tool does.</p>
+      </section>
+
+      <p>Everything here traces to a single source of truth. Thresholds live in
+        <span class="inline">CAP_CONFIG</span>, the object names are exactly what
+        <span class="inline">@install.sql</span> creates, and each caveat was verified on a real
+        19c box. Skim the caveats first — they explain most of what surprises people — then use the
+        knob table and object index as a lookup.</p>
+
+      <!-- ===================== CAVEATS ===================== -->
+      <div class="section-head" id="caveats">
+        <span class="eyebrow">Verified on 19c</span>
+        <h2>Caveats worth knowing</h2>
+        <p>The non-obvious facts, verified on a real 19c box (19.27), that shape what you'll see.</p>
+      </div>
+
+      <div class="callout warn"><span class="ico">!</span><p><strong>AWR retention bounds everything.</strong> Default is 8 days; the 90-day training window needs more. Short retention → <span class="pill crit">INSUFFICIENT_HISTORY</span>, by design.</p></div>
+      <div class="callout"><span class="ico">i</span><p><strong>Block size comes from DBA_HIST_TABLESPACE,</strong> not the datafile view — <span class="inline">DBA_HIST_DATAFILE</span> has no <code>SYSTEM</code> row on stock 19c, which would otherwise drop that tablespace.</p></div>
+      <div class="callout"><span class="ico">i</span><p><strong>REGR_R2 returns 1 for a flat series,</strong> not NULL (NULL only when <em>x</em> variance is zero). So <span class="pill warn">FLAT</span> is detected by <code>slope = 0</code>.</p></div>
+      <div class="callout warn"><span class="ico">!</span><p><strong>ESM is capped at +30 days on 19c.</strong> The horizon hard-caps at 30 steps regardless of series length, so +90/+180/+365 are always REGR-only.</p></div>
+      <div class="callout"><span class="ico">i</span><p><strong>Anomalies key off the growth rate,</strong> not the raw delta. Across an AWR gap, the delta is divided by <code>day_gap</code>, so a multi-day gap is never mistaken for a one-day spike.</p></div>
+      <div class="callout"><span class="ico">i</span><p><strong>Container identity is the composite key.</strong> Analytics key on <span class="inline">(dbid, con_dbid)</span>; <span class="inline">con_dbid</span> separates PDBs whose <code>TS#</code> collide. Cross-DBID series stitching is a v2 item.</p></div>
+      <div class="callout tip"><span class="ico">▸</span><p><strong>Re-install is non-destructive.</strong> Your <span class="inline">CAP_CONFIG</span> overrides and <span class="inline">CAP_ML_MODEL</span> registry survive <span class="inline">@install.sql</span>. Use <span class="inline">@uninstall.sql</span> for a full teardown.</p></div>
+
+      <!-- ===================== CONFIG ===================== -->
+      <div class="section-head" id="config">
+        <span class="eyebrow">Tuning</span>
+        <h2>Configuration knobs</h2>
+        <p>Every threshold lives in <span class="inline">CAP_CONFIG</span>, read by the views through a
+          one-row <span class="inline">cfg</span> CTE. Tuning never means editing SQL.</p>
+      </div>
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">SQL*Plus</span><span class="term__tag in">example</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> UPDATE cap_config SET cfg_value = 0.70 WHERE cfg_name = 'r2_gate';
+<span class="c-prompt">SQL&gt;</span> SELECT * FROM cap_config ORDER BY cfg_name;   <span class="c-cmt">-- the full annotated list</span></pre>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <caption>All 16 shipped knobs and their defaults</caption>
+          <thead><tr><th scope="col">Knob</th><th class="num" scope="col">Default</th><th scope="col">Controls</th></tr></thead>
+          <tbody>
+            <tr><td><span class="k">train_days</span></td><td class="num">90</td><td class="def">Length of the primary linear-fit training window (days).</td></tr>
+            <tr><td><span class="k">recent_days</span></td><td class="num">28</td><td class="def">Secondary "recent" fit window for acceleration detection (drives <code>accel_ratio</code>).</td></tr>
+            <tr><td><span class="k">min_train_days</span></td><td class="num">14</td><td class="def">Minimum <code>REGR_COUNT</code> before a forecast is trusted; below this → <span class="pill crit">INSUFFICIENT_HISTORY</span>.</td></tr>
+            <tr><td><span class="k">r2_gate</span></td><td class="num">0.60</td><td class="def"><code>REGR_R2</code> below this marks a forecast <span class="pill warn">LOW_CONFIDENCE</span>.</td></tr>
+            <tr><td><span class="k">mad_k</span></td><td class="num">3</td><td class="def">MAD multiplier <em>k</em>: <code>|value − median| &gt; k·MAD_σ</code> flags an anomaly.</td></tr>
+            <tr><td><span class="k">mad_window_days</span></td><td class="num">28</td><td class="def">Trailing window length for the rolling median / MAD baseline (days).</td></tr>
+            <tr><td><span class="k">anomaly_report_days</span></td><td class="num">14</td><td class="def">How many trailing days of anomalies the report prints.</td></tr>
+            <tr><td><span class="k">cpu_sat_pct</span></td><td class="num">80</td><td class="def">CPU busy percent treated as saturated for days-to-saturation.</td></tr>
+            <tr><td><span class="k">abs_floor_bytes</span></td><td class="num">104,857,600</td><td class="def">Absolute floor (100&nbsp;MiB) for the tablespace-delta anomaly threshold; guards flat baselines (MAD = 0).</td></tr>
+            <tr><td><span class="k">dow_weeks</span></td><td class="num">8</td><td class="def">Number of prior same-weekday observations forming the CPU seasonal baseline.</td></tr>
+            <tr><td><span class="k">dtf_warn</span></td><td class="num">90</td><td class="def"><code>days_to_full</code> at/below this = <span class="pill warn">WARN</span> in the report.</td></tr>
+            <tr><td><span class="k">dtf_crit</span></td><td class="num">30</td><td class="def"><code>days_to_full</code> at/below this = <span class="pill crit">CRIT</span> in the report.</td></tr>
+            <tr><td><span class="k">tbspc_min_hist</span></td><td class="num">7</td><td class="def">Minimum trailing observations before a tablespace anomaly can flag.</td></tr>
+            <tr><td><span class="k">cpu_min_mad_pct</span></td><td class="num">3</td><td class="def">Floor (whole percent) on CPU <code>MAD_σ</code> so an exactly-flat seasonal baseline still flags a real jump.</td></tr>
+            <tr><td><span class="k">cpu_min_dow_hist</span></td><td class="num">3</td><td class="def">Minimum prior same-weekday observations before a CPU anomaly can flag.</td></tr>
+            <tr><td><span class="k">esm_prediction_step</span></td><td class="num">30</td><td class="def">OML ESM forecast horizon in steps (days). Oracle 19c hard-caps this at 30.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>That's the complete shipped set. <span class="inline">SELECT * FROM cap_config ORDER BY cfg_name</span>
+        prints the same knobs with their annotations straight from the database, including any values you've
+        since overridden.</p>
+
+      <!-- ===================== OBJECT INDEX ===================== -->
+      <div class="section-head" id="objects">
+        <span class="eyebrow">What it creates</span>
+        <h2>Object index</h2>
+        <p>Every object <span class="inline">@install.sql</span> creates, grouped by layer. The
+          <span class="inline">CAPV/CAPD/CAPF/CAPA</span> views only ever SELECT; the two tables are the
+          only persisted state.</p>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <caption>Everything the suite creates</caption>
+          <thead><tr><th scope="col">Prefix / object</th><th scope="col">Kind</th><th scope="col">Purpose</th></tr></thead>
+          <tbody>
+            <tr><td colspan="3"><b><span class="k">CAPV_</span> — seam views (6)</b> · DBA_HIST-shaped, each carrying <code>(dbid, con_dbid)</code></td></tr>
+            <tr><th scope="row"><code>CAPV_SNAPSHOT</code></th><td class="def">view</td><td class="def">AWR snapshot headers and interval times; sets <code>con_dbid := dbid</code> (source has no CON_DBID)</td></tr>
+            <tr><th scope="row"><code>CAPV_TBSPC_USAGE</code></th><td class="def">view</td><td class="def">Per-snapshot tablespace space usage, in DB blocks</td></tr>
+            <tr><th scope="row"><code>CAPV_TABLESPACE</code></th><td class="def">view</td><td class="def">Tablespace dimension; primary source for <code>block_size</code> (populated for every tablespace)</td></tr>
+            <tr><th scope="row"><code>CAPV_DATAFILE</code></th><td class="def">view</td><td class="def">Datafile dimension; block-size fallback only</td></tr>
+            <tr><th scope="row"><code>CAPV_OSSTAT</code></th><td class="def">view</td><td class="def">Host OS stats — BUSY/IDLE (centiseconds) and core counts</td></tr>
+            <tr><th scope="row"><code>CAPV_TIME_MODEL</code></th><td class="def">view</td><td class="def">Time-model DB CPU / DB time (microseconds), per container</td></tr>
+
+            <tr><td colspan="3"><b><span class="k">CAPD_</span> — daily views (4)</b> · one clean row per day</td></tr>
+            <tr><th scope="row"><code>CAPD_TBSPC_DAILY</code></th><td class="def">view</td><td class="def">Last usage sample per day, blocks→bytes, with <code>limit_bytes</code>; UNDO/TEMP excluded</td></tr>
+            <tr><th scope="row"><code>CAPD_TBSPC_DELTA</code></th><td class="def">view</td><td class="def">Day-over-day change with <code>day_gap</code> and <code>used_rate_bpd</code></td></tr>
+            <tr><th scope="row"><code>CAPD_CPU_DAILY</code></th><td class="def">view</td><td class="def">Per-day busy% from cumulative counters, restart/reset-guarded</td></tr>
+            <tr><th scope="row"><code>CAPD_DBTIME_DAILY</code></th><td class="def">view</td><td class="def">Per-day <code>db_cpu_sec</code> / <code>db_time_sec</code> / <code>bg_cpu_sec</code>; <code>db_cpu_per_core</code></td></tr>
+
+            <tr><td colspan="3"><b><span class="k">CAPF_</span> — forecast views</b> · Tier 1 REGR fits (+ Tier 2 ESM)</td></tr>
+            <tr><th scope="row"><code>CAPF_TBSPC_FORECAST</code></th><td class="def">view</td><td class="def">Tier 1 fit per tablespace: slope, projections, <code>days_to_full</code>, quality</td></tr>
+            <tr><th scope="row"><code>CAPF_CPU_TREND</code></th><td class="def">view</td><td class="def">Tier 1 fit for busy% and db_cpu_sec, with days-to-saturation</td></tr>
+            <tr><th scope="row"><code>CAPF_ESM_FORECAST</code></th><td class="def">view</td><td class="def">Tier 2 ESM predictions and 95% bounds, via the package registry</td></tr>
+            <tr><th scope="row"><code>CAPF_COMPARE</code></th><td class="def">view</td><td class="def">Tier 1 vs Tier 2 at the horizons (ESM +30 only)</td></tr>
+
+            <tr><td colspan="3"><b><span class="k">CAPA_</span> — anomaly views</b> · robust median + MAD</td></tr>
+            <tr><th scope="row"><code>CAPA_TBSPC_ANOM</code></th><td class="def">view</td><td class="def">Median + MAD flags on the growth rate over a trailing window</td></tr>
+            <tr><th scope="row"><code>CAPA_CPU_ANOM</code></th><td class="def">view</td><td class="def">Median + MAD flags on a same-weekday seasonal baseline</td></tr>
+
+            <tr><td colspan="3"><b>Tables &amp; package</b> · the only persisted state</td></tr>
+            <tr><th scope="row"><span class="kt">CAP_CONFIG</span></th><td class="def">table</td><td class="def">Tuning knobs (name/value), MERGE-seeded</td></tr>
+            <tr><th scope="row"><span class="kt">CAP_ML_MODEL</span></th><td class="def">table</td><td class="def">Tier 2 OML model registry</td></tr>
+            <tr><th scope="row"><code>cap_forecast_ml</code></th><td class="def">package</td><td class="def">Tier 2 train / forecast (<code>train_all</code>, <code>drop_all</code>, <code>get_forecast</code>)</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- ===================== TEARDOWN ===================== -->
+      <div class="section-head" id="teardown">
+        <span class="eyebrow">Clean removal</span>
+        <h2>Teardown</h2>
+        <p>Clean removal of everything the suite created.</p>
+      </div>
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">SQL*Plus</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> @test/fixture_remove.sql   <span class="c-cmt">-- fixture mode only: drop CAP_FIXTURE_* tables</span>
+<span class="c-prompt">SQL&gt;</span> @uninstall.sql             <span class="c-cmt">-- drop all CAP_* / CAPV_ / CAPD_ / CAPF_ / CAPA_ objects</span>
+<span class="c-prompt">SQL&gt;</span> EXEC cap_forecast_ml.drop_all;  <span class="c-cmt">-- (if trained) remove the OML models</span></pre>
+      </div>
+      <div class="callout tip">
+        <span class="ico">▸</span>
+        <p><strong><span class="inline">@install.sql</span> is non-destructive.</strong> Re-running it
+        preserves your tuning and trained models. <span class="inline">@uninstall.sql</span> is the full
+        teardown — it drops every <span class="inline">CAP_* / CAPV_ / CAPD_ / CAPF_ / CAPA_</span>
+        object.</p>
+      </div>
+
+      <nav class="pager" id="pager" aria-label="Previous and next page"></nav>
+
+      <footer class="foot">
+        AWR Capacity Predictions · in-database capacity forecasting · Oracle 19c floor<br>
+        Documentation generated from <span class="inline">README.md</span> and
+        <span class="inline">docs/design.md</span>.
+      </footer>
+
+    </div><!-- /wrap -->
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

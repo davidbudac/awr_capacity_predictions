@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Testing — AWR Capacity Predictions</title>
+<meta name="description" content="Prove every part of the suite against known answers with the deterministic fixture self-check, then run a local smoke test against live AWR.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23b06a0d'/><path d='M16 8L24 23L8 23Z' fill='%23fff'/></svg>">
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  // No-FOUC: apply the persisted theme before first paint.
+  (function(){try{var t=localStorage.getItem("cap-theme");
+    if(t){document.documentElement.setAttribute("data-theme",t);
+      var m=document.querySelector('meta[name="color-scheme"]');if(m)m.content=t;}}catch(e){}})();
+</script>
+</head>
+<body>
+<a class="skip-link visually-hidden" href="#content">Skip to content</a>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">
+      <div class="brand__mark" aria-hidden="true">▲</div>
+      <div>
+        <div class="brand__name">AWR Capacity<br>Predictions</div>
+        <div class="brand__sub">Documentation</div>
+      </div>
+    </a>
+    <nav class="nav" aria-label="Documentation pages">
+      <div class="nav__group">Start</div>
+      <a class="nav-page" href="index.html"><span class="n">01</span> Introduction</a>
+      <div class="nav__group">Guides</div>
+      <a class="nav-page" href="concepts.html"><span class="n">02</span> How it works</a>
+      <a class="nav-page" href="install.html"><span class="n">03</span> Installation</a>
+      <a class="nav-page" href="usage.html"><span class="n">04</span> Usage</a>
+      <a class="nav-page" href="testing.html"><span class="n">05</span> Testing</a>
+      <div class="nav__group">Reference</div>
+      <a class="nav-page" href="reference.html"><span class="n">06</span> Reference</a>
+    </nav>
+    <nav class="toc" id="toc" aria-label="On this page"></nav>
+    <button class="theme-toggle" id="themeBtn" type="button">◐ System</button>
+  </aside>
+
+  <main class="main" id="content" tabindex="-1">
+    <div class="wrap">
+
+      <!-- ===================== HERO ===================== -->
+      <section class="hero" id="testing">
+        <span class="eyebrow">Walkthrough</span>
+        <h1>Testing</h1>
+        <p class="lead">Two ways to try it. <strong>Track A</strong> proves every part of the suite
+          against known answers with deterministic fixtures; <strong>Track B</strong> runs the exact
+          same code against real AWR.</p>
+      </section>
+
+      <p>Run Track A first — it installs synthetic data whose exact answers are worked out in advance
+        and confirms the tool reproduces them, failing loudly if any number is off. Then Track B points
+        the identical code at your live AWR to confirm it installs and reports end-to-end on a real 19c
+        CDB. Both tracks run on your own 19c test box.</p>
+
+      <!-- ===================== BEFORE YOU START ===================== -->
+      <div class="section-head" id="before">
+        <span class="eyebrow">Walkthrough · test box</span>
+        <h2>Before you start</h2>
+        <p>Two ways to try it, both on your 19c test box. Run Track A first — it proves every part of
+          the tool against known answers; Track B then runs the exact same code against your real AWR.</p>
+      </div>
+
+      <div class="track-pick">
+        <div class="track-card a">
+          <div class="tk">Track A — recommended first</div>
+          <h4>Fixture self-check</h4>
+          <p>Install <span class="inline">fixture</span> mode (fake data) as <b>CAPTEST</b> in
+            <b>PDB1</b>, then run the self-check script. This is how you "test everything yourself":
+            it compares every result against a known-correct answer and <b>fails loudly</b> if any is
+            off. No AWR history required.</p>
+          <div class="meta">
+            <span><b>Where:</b> PDB1 · captest/&lt;password&gt;</span>
+            <span><b>Proves:</b> forecasts, anomalies, CPU guards, ESM</span>
+            <span><b>Time:</b> ~2 minutes</span>
+          </div>
+        </div>
+        <div class="track-card b">
+          <div class="tk">Track B — the real thing</div>
+          <h4>Local smoke on cdb1</h4>
+          <p>Install <span class="inline">local</span> mode as <b>sysdba</b> in <b>CDB$ROOT</b> and
+            generate the report against live AWR. On a stock box expect
+            <span class="pill crit">INSUFFICIENT_HISTORY</span> until you raise retention — which is
+            itself the point: the report degrades loudly.</p>
+          <div class="meta">
+            <span><b>Where:</b> cdb1 · / as sysdba · CDB$ROOT</span>
+            <span><b>Proves:</b> it runs end-to-end on your AWR</span>
+            <span><b>Time:</b> ~1 minute (+ retention wait)</span>
+          </div>
+        </div>
+      </div>
+
+      <h3>Connection facts you'll reuse</h3>
+      <div class="tablewrap">
+        <table>
+          <tbody>
+            <tr><td class="def">SSH to the host</td><td><code>ssh -p &lt;port&gt; oracle@&lt;host&gt;</code></td></tr>
+            <tr><td class="def">Env preamble (every sqlplus)</td><td><code>export ORACLE_SID=cdb1; export ORAENV_ASK=NO; . oraenv &gt;/dev/null 2&gt;&amp;1</code></td></tr>
+            <tr><td class="def">Local mode connect</td><td><code>sqlplus / as sysdba</code>&nbsp; (lands in CDB$ROOT — AWR is here)</td></tr>
+            <tr><td class="def">Fixture mode connect</td><td><code>sqlplus captest/&lt;password&gt;@localhost:1521/pdb1.world</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <span class="ico">@@</span>
+        <p><strong>Always run from the repo root on the host.</strong> SQL*Plus resolves
+        <span class="inline">@@</span> includes relative to the <em>outermost</em> caller on 19c, so
+        <span class="inline">install.sql</span> and <span class="inline">report/report.sql</span>
+        must be launched from <span class="inline">~/awr_capacity_predictions/</span>. That's why
+        step&nbsp;1 syncs the whole tree up first.</p>
+      </div>
+
+      <!-- ===================== TRACK A ===================== -->
+      <div class="section-head" id="track-a">
+        <span class="eyebrow">Walkthrough · Track A</span>
+        <h2>Fixture self-check</h2>
+        <p>Run the tool against fake data with known answers, and confirm forecasting, anomaly
+          detection, the CPU-restart guard, and the optional Tier 2 model all produce exactly the
+          right numbers — end to end, on your test box.</p>
+      </div>
+
+      <div class="steps">
+
+        <!-- step 1 -->
+        <div class="step">
+          <div class="step__rail"><div class="step__n">1</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Sync the repo to the host</h4>
+            <p>From the repo root on your workstation. The relative <span class="inline">@@</span>
+              includes need the tree present on the host; excluding <span class="inline">reports/</span>
+              avoids shipping old spools.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">workstation · bash</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-cmt"># from /home/db/github/awr_capacity_predictions</span>
+rsync -az --delete --exclude='.git/' --exclude='reports/' \
+  ./ oracle@&lt;host&gt;:~/awr_capacity_predictions/ -e 'ssh -p &lt;port&gt;'</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- step 2 -->
+        <div class="step">
+          <div class="step__rail"><div class="step__n">2</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Connect as CAPTEST in PDB1, from the repo root</h4>
+            <p>CAPTEST has <span class="inline">CREATE TABLE/VIEW/TYPE/PROCEDURE</span> and
+              <span class="inline">CREATE MINING MODEL</span> — everything the fixtures, the install,
+              and Tier 2 need.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">test box · bash</span><span class="term__tag in">you run</span></div>
+<pre>ssh -p &lt;port&gt; oracle@&lt;host&gt;
+export ORACLE_SID=cdb1; export ORAENV_ASK=NO; . oraenv &gt;/dev/null 2&gt;&amp;1
+cd ~/awr_capacity_predictions
+sqlplus captest/&lt;password&gt;@localhost:1521/pdb1.world</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- step 3 -->
+        <div class="step">
+          <div class="step__rail"><div class="step__n">3</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Load the fixtures</h4>
+            <p>Creates and fills the <span class="inline">CAP_FIXTURE_*</span> tables with four
+              fake tablespace growth patterns and one CPU pattern — every value hand-calculated,
+              dated relative to today. The known-correct answers are stored alongside in
+              <span class="inline">CAP_FIXTURE_META</span>, so the self-check reads them rather than
+              working them out again.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">SQL*Plus · captest@pdb1</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> @test/fixture_install.sql</pre>
+            </div>
+            <div class="term">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">output</span><span class="term__tag out">expect</span></div>
+<pre>Fixtures loaded: base=2026-03-08 restart=2026-05-07 spike=2026-06-26
+  inj_tue=2026-07-01 Tue probe=2026-07-04 Sat
+<span class="c-dim">Fixtures installed.  Next: @install.sql (seam_mode=fixture), then test/run_test.sql</span></pre>
+            </div>
+            <div class="callout">
+              <span class="ico">i</span>
+              <p>The four series: <b>FIX_LINEAR</b> (exactly 10 MiB/day),
+              <b>FIX_SPIKE</b> (5 MiB/day + a one-time +2 GiB step), <b>FIX_FLAT</b> (constant), and
+              <b>FIX_GAP</b> (60 MiB/day with a deliberate 3-day AWR gap). Plus a CPU counter series
+              with a mid-run restart and an injected +30-point Tuesday. Dates will differ — they're
+              anchored to today.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- step 4 -->
+        <div class="step">
+          <div class="step__rail"><div class="step__n">4</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Install the suite in fixture mode</h4>
+            <p>Point the seam at the fixture tables, then run the layered DDL. The install ends with a
+              validity check that fails loudly if any <span class="inline">CAP*</span> object is invalid.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">SQL*Plus · captest@pdb1</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> DEFINE seam_mode = 'fixture'
+<span class="c-prompt">SQL&gt;</span> @install.sql</pre>
+            </div>
+            <div class="term">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">output</span><span class="term__tag out">expect</span></div>
+<pre>============================================================
+ AWR Capacity Predictions -- install
+============================================================
+ seam_mode  = fixture
+ seam_script= ddl/12_seam_fixture.sql
+ schema     = installing into the current schema
+
+ -- [00] drop any prior install ...
+ -- [05] CAP_CONFIG + seed ...
+ -- [seam] ddl/12_seam_fixture.sql ...
+ -- [20] daily series (CAPD_*) ...
+ -- [30] Tier 1 forecasts (CAPF_*) ...
+ -- [40] anomalies (CAPA_*) ...
+ -- [50] Tier 2 OML ESM (CAP_ML_MODEL + package + CAPF_ESM/COMPARE) ...
+  <span class="c-pass">All CAP* objects valid.</span>
+============================================================
+ Install complete (seam_mode = fixture).
+============================================================</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- step 5 -->
+        <div class="step">
+          <div class="step__rail"><div class="step__n">5</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Run the Tier 1 self-check</h4>
+            <p>Sixteen checks over the fake data — every result compared to its known-correct answer.
+              It prints PASS/FAIL per check and <b>exits with an error code on any failure</b>, so you
+              can wire it straight into CI or a monitoring job.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">SQL*Plus · captest@pdb1</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> @test/run_test.sql</pre>
+            </div>
+            <div class="term">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">output</span><span class="term__tag out">expect</span></div>
+<pre><span class="c-dim">=== FIX_LINEAR forecast ===</span>
+  <span class="c-pass">PASS</span>  LINEAR slope_bpd (bytes/day) ~= 10485760
+  <span class="c-pass">PASS</span>  LINEAR r2 &gt; 0.999
+  <span class="c-pass">PASS</span>  LINEAR days_to_full = 4990
+  <span class="c-pass">PASS</span>  LINEAR quality = OK
+  <span class="c-pass">PASS</span>  LINEAR anomaly count = 0
+<span class="c-dim">=== FIX_SPIKE anomaly ===</span>
+  <span class="c-pass">PASS</span>  SPIKE HIGH count (total) = 1
+  <span class="c-pass">PASS</span>  SPIKE HIGH on spike day = 1
+  <span class="c-pass">PASS</span>  SPIKE LOW count = 0
+<span class="c-dim">=== FIX_FLAT ===</span>
+  <span class="c-pass">PASS</span>  FLAT quality = FLAT
+  <span class="c-pass">PASS</span>  FLAT anomaly count = 0
+<span class="c-dim">=== FIX_GAP (AWR-gap rate normalization) ===</span>
+  <span class="c-pass">PASS</span>  GAP recorded (max day_gap) = 4
+  <span class="c-pass">PASS</span>  GAP no false anomaly (rate-normalized) = 0
+<span class="c-dim">=== CPU restart guard + busy% ===</span>
+  <span class="c-pass">PASS</span>  CPU restart day excluded = 0
+  <span class="c-pass">PASS</span>  CPU probe weekday busy% in [39,41] (got 40)
+<span class="c-dim">=== CPU same-DOW anomaly ===</span>
+  <span class="c-pass">PASS</span>  CPU injected Tuesday flag = HIGH
+  <span class="c-pass">PASS</span>  CPU HIGH count (only injected) = 1
+----------------------------------------
+RESULT: <span class="c-pass">16 passed, 0 failed</span>
+
+All fixture assertions passed.</pre>
+            </div>
+            <div class="callout tip">
+              <span class="ico">▸</span>
+              <p><strong>What each block proves.</strong> Each fake series targets one behavior.
+              LINEAR → the slope, R², and
+              <code>days_to_full=4990</code> land on the exact known answer. SPIKE → exactly one HIGH,
+              on the spike day only. FLAT → graded FLAT, no false anomaly. GAP → the 4-day gap becomes
+              a rate, so no phantom spike. CPU → the restart day is dropped, busy% is exactly 40 on a
+              probe weekday, and only the injected Tuesday flags in the same-weekday view.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- step 6 -->
+        <div class="step">
+          <div class="step__rail"><div class="step__n">6</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Run the Tier 2 (optional ML) self-check</h4>
+            <p>A separate script, because Oracle's built-in ML needs the
+              <span class="inline">CREATE MINING MODEL</span> privilege. It trains the smoothing models
+              and checks the FIX_LINEAR +30-day forecast lands within 5% of the known-correct answer.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">SQL*Plus · captest@pdb1</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> @test/run_test_ml.sql</pre>
+            </div>
+            <div class="term">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">output</span><span class="term__tag out">expect</span></div>
+<pre><span class="c-dim">=== Tier 2 ESM (train + forecast) ===</span>
+  <span class="c-pass">PASS</span>  FIX_LINEAR model trained OK
+  <span class="c-pass">PASS</span>  FIX_LINEAR ESM +30d within 5% (pred=1677721600 exp=1677721600)
+----------------------------------------
+ML assertions passed.
+
+All ML assertions passed.</pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- step 7 -->
+        <div class="step">
+          <div class="step__rail"><div class="step__n">7</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Generate a report against the fixtures</h4>
+            <p>Optional but satisfying — see the real report render with known numbers. Load the
+              presentation defaults first so a bare run never prompts.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">SQL*Plus · captest@pdb1</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> @report/defaults.sql
+<span class="c-prompt">SQL&gt;</span> @report/report.sql</pre>
+            </div>
+            <div class="term">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">reports/cap_report_PDB1_…​.txt</span><span class="term__tag out">expect</span></div>
+<pre>================================================================================
+ AWR CAPACITY PREDICTIONS -- capacity + anomaly report
+================================================================================
+ Database : PDB1
+ Schema   : CAPTEST
+ Config   : days-to-full WARN&lt;=90 CRIT&lt;=30 ; CPU saturation 80%
+ Tier 2   : 3 OML ESM model(s) trained (OK)
+================================================================================
+<span class="c-dim">… section 1: FIX_LINEAR shows days_to_full ≈ 4990 (quality OK)</span>
+<span class="c-dim">… section 3: FIX_SPIKE shows one HIGH anomaly, with median / MAD·k / z</span>
+<span class="c-dim">… section 6: ESM vs REGR at +30 for the trained tablespaces</span></pre>
+            </div>
+            <p>Verify against the known answers: FIX_LINEAR grows 10&nbsp;MiB/day, so the +30-day
+              projection is <b>1,677,721,600 bytes ≈ 1.56&nbsp;GiB</b> and
+              <span class="inline">days_to_full = 4990</span>. FIX_SPIKE contributes exactly one HIGH.</p>
+          </div>
+        </div>
+
+        <!-- step 8 -->
+        <div class="step">
+          <div class="step__rail"><div class="step__n">8</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Tear the fixtures down</h4>
+            <p>Leaves your schema clean. Use <span class="inline">@uninstall.sql</span> too if you want
+              the <span class="inline">CAP_*</span> objects gone as well.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">SQL*Plus · captest@pdb1</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> @test/fixture_remove.sql
+<span class="c-prompt">SQL&gt;</span> @uninstall.sql</pre>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /steps -->
+
+      <div class="callout tip">
+        <span class="ico">▸</span>
+        <p><strong>One-shot version.</strong> To run the whole self-check non-interactively over SSH,
+        feed the same sequence to a heredoc: <span class="inline">sqlplus -S -L
+        captest/&lt;password&gt;@localhost:1521/pdb1.world &lt;&lt;'SQL'</span> containing
+        <span class="inline">@test/fixture_install.sql</span> · <span class="inline">DEFINE seam_mode=fixture</span> ·
+        <span class="inline">@install.sql</span> · <span class="inline">@test/run_test.sql</span> ·
+        <span class="inline">@test/run_test_ml.sql</span>. Both test scripts exit non-zero on failure,
+        so the SSH command's exit status is your pass/fail signal.</p>
+      </div>
+
+      <!-- ===================== TRACK B ===================== -->
+      <div class="section-head" id="track-b">
+        <span class="eyebrow">Walkthrough · Track B</span>
+        <h2>Local smoke on cdb1</h2>
+        <p>The same analytics, now against your live AWR. This confirms the suite installs and reports
+          end-to-end on a real 19c CDB.</p>
+      </div>
+
+      <div class="steps">
+        <div class="step">
+          <div class="step__rail"><div class="step__n">1</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Connect as sysdba in CDB$ROOT</h4>
+            <p>AWR lives at the root container, so local mode installs there. (Repo already synced from
+              Track A step 1 — re-sync if you've edited since.)</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">test box · bash</span><span class="term__tag in">you run</span></div>
+<pre>ssh -p &lt;port&gt; oracle@&lt;host&gt;
+export ORACLE_SID=cdb1; export ORAENV_ASK=NO; . oraenv &gt;/dev/null 2&gt;&amp;1
+cd ~/awr_capacity_predictions
+sqlplus / as sysdba</pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step__rail"><div class="step__n">2</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Check you have Diagnostics Pack</h4>
+            <p>Local mode reads <span class="inline">DBA_HIST_*</span>, which requires the pack. A
+              monitoring schema (not sysdba) would also need <em>direct</em> SELECT grants on those
+              views — not via a role — for the views to compile.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">SQL*Plus · sys@CDB$ROOT</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> SHOW PARAMETER control_management_pack_access</pre>
+            </div>
+            <div class="term">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">output</span><span class="term__tag out">expect</span></div>
+<pre>NAME                               TYPE     VALUE
+---------------------------------- -------- ------------------
+control_management_pack_access     string   <span class="c-key">DIAGNOSTIC+TUNING</span></pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step__rail"><div class="step__n">3</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Install in local mode</h4>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">SQL*Plus · sys@CDB$ROOT</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> DEFINE seam_mode = 'local'
+<span class="c-prompt">SQL&gt;</span> @install.sql</pre>
+            </div>
+            <p>Same layered output as Track A, ending in
+              <span class="c-pass" style="font-family:var(--mono);font-size:13px">All CAP* objects valid.</span>
+              If any view is invalid, the closing check aborts with the exact grant/pack hint.</p>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step__rail"><div class="step__n">4</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Run the report</h4>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">SQL*Plus · sys@CDB$ROOT</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> @report/defaults.sql
+<span class="c-prompt">SQL&gt;</span> @report/report.sql</pre>
+            </div>
+            <div class="callout warn">
+              <span class="ico">!</span>
+              <p><strong>Expect INSUFFICIENT_HISTORY on a stock box.</strong> Default AWR retention is
+              only <b>8 days</b> — far below the 90-day training window — so forecasts degrade loudly
+              and say so. That's correct behavior, not a bug. Watch the
+              <span class="inline">TRAIN_N</span> and <span class="inline">QUALITY</span> columns.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step__rail"><div class="step__n">5</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>For real trends, raise retention — then wait</h4>
+            <p>This only helps <em>future</em> snapshots; history isn't backfilled, so you'll see real
+              forecasts only after enough days accumulate.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">SQL*Plus · sys@CDB$ROOT</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> EXEC DBMS_WORKLOAD_REPOSITORY.MODIFY_SNAPSHOT_SETTINGS(retention =&gt; 90*24*60);</pre>
+            </div>
+            <div class="callout">
+              <span class="ico">i</span>
+              <p><strong>This changes a database setting.</strong> It's a persistent AWR configuration
+              change on the CDB (harmless on a test box, but not read-only). Run it deliberately.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step__rail"><div class="step__n">6</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Optionally train Tier 2, then pull the report home</h4>
+            <p>Once you have history, add the ESM second opinion and re-run the report to populate
+              section 6. Then copy the spooled file back to read it.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">SQL*Plus · sys@CDB$ROOT</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> EXEC cap_forecast_ml.train_all(20);   <span class="c-cmt">-- top-20 tablespaces + CPU</span>
+<span class="c-prompt">SQL&gt;</span> @report/report.sql</pre>
+            </div>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">workstation · bash</span><span class="term__tag in">you run</span></div>
+<pre>rsync -az -e 'ssh -p &lt;port&gt;' \
+  oracle@&lt;host&gt;:~/awr_capacity_predictions/reports/ ./reports/</pre>
+            </div>
+          </div>
+        </div>
+      </div><!-- /steps -->
+
+      <p>For how to read the six sections of the report output, see
+        <a href="usage.html#sections">Usage · Reading the report</a>.</p>
+
+      <nav class="pager" id="pager" aria-label="Previous and next page"></nav>
+
+      <footer class="foot">
+        AWR Capacity Predictions · in-database capacity forecasting · Oracle 19c floor<br>
+        Documentation generated from <span class="inline">README.md</span> and
+        <span class="inline">docs/design.md</span>.
+      </footer>
+
+    </div><!-- /wrap -->
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Usage — AWR Capacity Predictions</title>
+<meta name="description" content="Run the read-only capacity report, read its six sections, add the optional Tier 2 OML forecast, and tune thresholds through CAP_CONFIG.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23b06a0d'/><path d='M16 8L24 23L8 23Z' fill='%23fff'/></svg>">
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  // No-FOUC: apply the persisted theme before first paint.
+  (function(){try{var t=localStorage.getItem("cap-theme");
+    if(t){document.documentElement.setAttribute("data-theme",t);
+      var m=document.querySelector('meta[name="color-scheme"]');if(m)m.content=t;}}catch(e){}})();
+</script>
+</head>
+<body>
+<a class="skip-link visually-hidden" href="#content">Skip to content</a>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">
+      <div class="brand__mark" aria-hidden="true">▲</div>
+      <div>
+        <div class="brand__name">AWR Capacity<br>Predictions</div>
+        <div class="brand__sub">Documentation</div>
+      </div>
+    </a>
+    <nav class="nav" aria-label="Documentation pages">
+      <div class="nav__group">Start</div>
+      <a class="nav-page" href="index.html"><span class="n">01</span> Introduction</a>
+      <div class="nav__group">Guides</div>
+      <a class="nav-page" href="concepts.html"><span class="n">02</span> How it works</a>
+      <a class="nav-page" href="install.html"><span class="n">03</span> Installation</a>
+      <a class="nav-page" href="usage.html"><span class="n">04</span> Usage</a>
+      <a class="nav-page" href="testing.html"><span class="n">05</span> Testing</a>
+      <div class="nav__group">Reference</div>
+      <a class="nav-page" href="reference.html"><span class="n">06</span> Reference</a>
+    </nav>
+    <nav class="toc" id="toc" aria-label="On this page"></nav>
+    <button class="theme-toggle" id="themeBtn" type="button">◐ System</button>
+  </aside>
+
+  <main class="main" id="content" tabindex="-1">
+    <div class="wrap">
+
+      <!-- ===================== HERO ===================== -->
+      <section class="hero" id="usage">
+        <span class="eyebrow">Guide</span>
+        <h1>Usage</h1>
+        <p class="lead">Generate the read-only report, read it, optionally add the Tier 2 second
+          opinion, and tune everything through config rather than SQL.</p>
+      </section>
+
+      <p>The whole workflow is four moves: run one script from the repo root, read its six sections
+        top to bottom, add the optional OML forecast when you want a second opinion, and turn every
+        threshold through <span class="inline">CAP_CONFIG</span>. Nothing here writes to your AWR data.</p>
+
+      <!-- ===================== RUN ===================== -->
+      <div class="section-head" id="run">
+        <span class="eyebrow">Generate</span>
+        <h2>Run the report</h2>
+        <p>One script, run from the repo root. A bare run never prompts and spools a plain-text file.</p>
+      </div>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">SQL*Plus</span><span class="term__tag in">you run</span></div>
+<pre>sqlplus / as sysdba              <span class="c-cmt">-- or any monitoring schema</span>
+<span class="c-prompt">SQL&gt;</span> @report/defaults.sql
+<span class="c-prompt">SQL&gt;</span> @report/report.sql</pre>
+      </div>
+
+      <p>Launch it from the <b>repo root</b>: SQL*Plus resolves <span class="inline">@@</span> includes
+        relative to the outermost caller on 19c, so <span class="inline">report/report.sql</span> must
+        be started from the repository directory. <span class="inline">report.sql</span> auto-loads
+        <span class="inline">report/defaults.sql</span>, so a bare run never prompts, and it spools to
+        <span class="inline">reports/cap_report_&lt;db&gt;_&lt;ts&gt;.txt</span>. The report is
+        <b>read-only</b> — it only <code>SELECT</code>s, and creates or modifies no database object.
+        Identity comes from <span class="inline">SYS_CONTEXT</span>, so no <span class="inline">V$</span>
+        or catalog privileges are needed.</p>
+
+      <div class="callout tip">
+        <span class="ico">▸</span>
+        <p><strong>Presentation lives in one file.</strong> To change
+        <span class="inline">top_n</span>, <span class="inline">anomaly_days</span>, or
+        <span class="inline">show_esm</span>, edit <span class="inline">report/defaults.sql</span> — the
+        single source of truth for presentation. Everything else is analytics config (see below).</p>
+      </div>
+
+      <!-- ===================== HTML REPORT ===================== -->
+      <div class="section-head" id="html">
+        <span class="eyebrow">Generate · alternative</span>
+        <h2>HTML report</h2>
+        <p>A sibling driver renders the same six sections as one self-contained HTML dashboard
+          instead of plain text — open the spooled file directly in a browser.</p>
+      </div>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">SQL*Plus</span><span class="term__tag in">you run</span></div>
+<pre>sqlplus / as sysdba              <span class="c-cmt">-- run from the repo root</span>
+<span class="c-prompt">SQL&gt;</span> @report/report_html.sql     <span class="c-cmt">-- spools reports/cap_report_&lt;db&gt;_&lt;ts&gt;.html</span></pre>
+      </div>
+
+      <p><span class="inline">report/report_html.sql</span> shares the same defaults file, the same
+        knobs, and the same <b>read-only</b> guarantee as the text report — the HTML is assembled in one
+        PL/SQL block via <span class="inline">DBMS_OUTPUT</span> and captured by <span class="inline">SPOOL</span>.
+        It opens with a plain-English <em>“At a glance”</em> banner that says up front whether any
+        tablespace, the whole database, or CPU is heading for trouble, then adds severity badges, quality
+        pills, inline fill bars, and inline-SVG growth/trend charts (per-tablespace history + REGR projection
+        + ESM&nbsp;+30 point and CI + limit line + anomaly markers; per-<span class="inline">con_dbid</span>
+        host&nbsp;busy% and DB&nbsp;CPU charts with a saturation line). Every jargon column header carries a
+        plain-English tooltip, and a collapsible glossary defines the terms — all rendered as plain
+        <code>&lt;svg&gt;</code> with no JS chart library and no external assets, plus a sticky section nav
+        and light/dark theming.</p>
+
+      <!-- ===================== READING THE REPORT ===================== -->
+      <div class="section-head" id="sections">
+        <span class="eyebrow">Interpret</span>
+        <h2>Reading the report</h2>
+        <p>Six sections, top to bottom. Every section consumes only the
+          <span class="inline">CAPF_*</span> / <span class="inline">CAPA_*</span> views.</p>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>#</th><th>Section</th><th>What to read</th></tr></thead>
+          <tbody>
+            <tr><td class="num">1</td><td><b>Days-to-full ranking</b></td><td class="def">Top-N tablespaces by <code>days_to_full</code>. <span class="pill warn">WARN</span> under 90 days, <span class="pill crit">CRIT</span> under 30. An <code>accel_ratio</code> &gt; 1.5 means growth is accelerating.</td></tr>
+            <tr><td class="num">2</td><td><b>Tablespace forecast</b></td><td class="def">Current / +30 / +90 / +180 GB, with R² and quality — and ESM +30 when models exist.</td></tr>
+            <tr><td class="num">3</td><td><b>Tablespace anomalies</b></td><td class="def">Last N days, each row fully justified: value, median, MAD·k threshold, robust z.</td></tr>
+            <tr><td class="num">4</td><td><b>CPU trend</b></td><td class="def">busy% current / slope / days-to-80%, plus the DB CPU-seconds trend.</td></tr>
+            <tr><td class="num">5</td><td><b>CPU anomalies</b></td><td class="def">Same-day-of-week MAD baseline — weekly seasonality handled deterministically.</td></tr>
+            <tr><td class="num">6</td><td><b>ESM compare</b></td><td class="def">Tier 2 vs Tier 1 at +30. With <code>show_esm=AUTO</code> and no models, prints a one-line hint instead.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- ===================== TIER 2 ===================== -->
+      <div class="section-head" id="tier2">
+        <span class="eyebrow">Optional · Tier 2</span>
+        <h2>Tier 2 (OML ESM) — optional</h2>
+        <p>Train one Oracle Machine Learning model per series for a seasonality-aware second opinion,
+          then re-run the report to populate section 6.</p>
+      </div>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">SQL*Plus</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> EXEC cap_forecast_ml.train_all(20);   <span class="c-cmt">-- top-20 tablespaces + CPU series</span>
+<span class="c-prompt">SQL&gt;</span> @report/report.sql                     <span class="c-cmt">-- then section 6 shows ESM vs REGR</span></pre>
+      </div>
+
+      <p>Training needs the <span class="inline">CREATE MINING MODEL</span> privilege (free in all
+        editions since Dec 2019). <span class="inline">cap_forecast_ml.drop_all</span> removes the
+        models again. A weekly <span class="inline">DBMS_SCHEDULER</span> retrain job is documented
+        (shipped commented-out) in <span class="inline">docs/design.md</span>.</p>
+
+      <div class="callout warn">
+        <span class="ico">!</span>
+        <p><strong>Tier 2 only ever reaches +30 days.</strong> Oracle 19c hard-caps
+        <span class="inline">EXSM_PREDICTION_STEP</span> at 30, so ESM forecasts stop at +30; the
+        +90 / +180 / +365 columns in <span class="inline">CAPF_COMPARE</span> are always REGR-only. The
+        package caps the step automatically.</p>
+      </div>
+
+      <!-- ===================== CONFIG ===================== -->
+      <div class="section-head" id="config">
+        <span class="eyebrow">Tune</span>
+        <h2>Configuration</h2>
+        <p>Every threshold lives in <span class="inline">CAP_CONFIG</span>, read by the views through a
+          one-row <span class="inline">cfg</span> CTE. Tuning never means editing SQL.</p>
+      </div>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">SQL*Plus</span><span class="term__tag in">example</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> UPDATE cap_config SET cfg_value = 0.70 WHERE cfg_name = 'r2_gate';
+<span class="c-prompt">SQL&gt;</span> SELECT * FROM cap_config ORDER BY cfg_name;   <span class="c-cmt">-- the full annotated list</span></pre>
+      </div>
+
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Knob</th><th class="num">Default</th><th>Controls</th></tr></thead>
+          <tbody>
+            <tr><td><span class="k">train_days</span></td><td class="num">90</td><td class="def">primary fit window</td></tr>
+            <tr><td><span class="k">recent_days</span></td><td class="num">28</td><td class="def">"recent" fit window (for accel_ratio)</td></tr>
+            <tr><td><span class="k">min_train_days</span></td><td class="num">14</td><td class="def">below this → INSUFFICIENT_HISTORY</td></tr>
+            <tr><td><span class="k">r2_gate</span></td><td class="num">0.60</td><td class="def">below this → LOW_CONFIDENCE</td></tr>
+            <tr><td><span class="k">mad_k</span></td><td class="num">3</td><td class="def">MAD-sigma multiplier for anomaly threshold</td></tr>
+            <tr><td><span class="k">mad_window_days</span></td><td class="num">28</td><td class="def">trailing anomaly baseline window</td></tr>
+            <tr><td><span class="k">cpu_sat_pct</span></td><td class="num">80</td><td class="def">CPU saturation target for days-to-sat</td></tr>
+            <tr><td><span class="k">abs_floor_bytes</span></td><td class="num">100 MiB</td><td class="def">min growth/day to flag (flat-baseline guard)</td></tr>
+            <tr><td><span class="k">dow_weeks</span></td><td class="num">8</td><td class="def">same-weekday baseline depth for CPU anomalies</td></tr>
+            <tr><td><span class="k">dtf_warn / dtf_crit</span></td><td class="num">90 / 30</td><td class="def">days-to-full WARN / CRIT thresholds</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>For the non-obvious behaviours these knobs interact with — AWR retention, the flat-series
+        <code>REGR_R2</code> quirk, block-size sourcing, the ESM cap — and the full index of every
+        object the suite creates, see the <a href="reference.html">Reference</a> page.</p>
+
+      <nav class="pager" id="pager" aria-label="Previous and next page"></nav>
+
+      <footer class="foot">
+        AWR Capacity Predictions · in-database capacity forecasting · Oracle 19c floor<br>
+        Documentation generated from <span class="inline">README.md</span> and
+        <span class="inline">docs/design.md</span>.
+      </footer>
+
+    </div><!-- /wrap -->
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

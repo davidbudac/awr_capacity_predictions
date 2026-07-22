@@ -1,0 +1,206 @@
+--
+-- test/fixture_install.sql -- deterministic CAP_FIXTURE_* data for run_test.sql.
+-- =====================================================================
+-- Creates and fills the CAP_FIXTURE_* tables the fixture seam (ddl/12) points
+-- CAPV_* at. Everything is exact and anchored to TRUNC(SYSDATE) so the forecast
+-- windows (which use SYSDATE) line up, but nothing is random -- every asserted
+-- number is a closed form. A CAP_FIXTURE_META table records the expected values
+-- + key dates so run_test.sql reads them instead of re-deriving (no drift).
+--
+-- Series (fake dbid/con_dbid 42424242 so it never collides with real AWR):
+--   FIX_LINEAR : exactly 10 MiB/day growth, 8 KiB blocks, 50 GiB maxsize.
+--   FIX_SPIKE  :  5 MiB/day + a one-time +2 GiB step at day 110.
+--   FIX_FLAT   : constant usage (zero variance -> quality FLAT).
+--   CPU        : 40% weekday / 20% weekend busy, one restart at day 60
+--                (startup_time change + counter reset), one +30pt Tuesday.
+--
+-- Run this BEFORE @install.sql with seam_mode=fixture (the seam views need the
+-- tables to exist), then run test/run_test.sql.
+--
+SET DEFINE OFF
+SET SERVEROUTPUT ON SIZE UNLIMITED
+WHENEVER SQLERROR EXIT FAILURE
+
+-- ---- drop any prior fixtures ----
+DECLARE
+    TYPE nl IS TABLE OF VARCHAR2(30);
+    v nl := nl('CAP_FIXTURE_SNAPSHOT','CAP_FIXTURE_TBSPC_USAGE','CAP_FIXTURE_TABLESPACE',
+              'CAP_FIXTURE_DATAFILE','CAP_FIXTURE_OSSTAT','CAP_FIXTURE_TIME_MODEL','CAP_FIXTURE_META');
+BEGIN
+    FOR i IN 1 .. v.COUNT LOOP
+        BEGIN EXECUTE IMMEDIATE 'DROP TABLE ' || v(i) || ' PURGE';
+        EXCEPTION WHEN OTHERS THEN IF SQLCODE != -942 THEN RAISE; END IF; END;
+    END LOOP;
+END;
+/
+
+CREATE TABLE cap_fixture_snapshot (
+    dbid NUMBER, con_dbid NUMBER, instance_number NUMBER, snap_id NUMBER,
+    begin_interval_time TIMESTAMP, end_interval_time TIMESTAMP, startup_time TIMESTAMP);
+CREATE TABLE cap_fixture_tbspc_usage (
+    dbid NUMBER, con_dbid NUMBER, snap_id NUMBER, tablespace_id NUMBER,
+    tablespace_size NUMBER, tablespace_maxsize NUMBER, tablespace_usedsize NUMBER);
+CREATE TABLE cap_fixture_tablespace (
+    dbid NUMBER, con_dbid NUMBER, tablespace_id NUMBER,
+    tablespace_name VARCHAR2(30), contents VARCHAR2(30), block_size NUMBER);
+CREATE TABLE cap_fixture_datafile (
+    dbid NUMBER, con_dbid NUMBER, tablespace_id NUMBER, block_size NUMBER);
+CREATE TABLE cap_fixture_osstat (
+    dbid NUMBER, con_dbid NUMBER, instance_number NUMBER, snap_id NUMBER,
+    stat_name VARCHAR2(64), value NUMBER);
+CREATE TABLE cap_fixture_time_model (
+    dbid NUMBER, con_dbid NUMBER, instance_number NUMBER, snap_id NUMBER,
+    stat_name VARCHAR2(64), value NUMBER);
+CREATE TABLE cap_fixture_meta (
+    mkey VARCHAR2(30) PRIMARY KEY, dval DATE, nval NUMBER, sval VARCHAR2(100));
+
+DECLARE
+    c_dbid   CONSTANT NUMBER := 42424242;
+    c_con    CONSTANT NUMBER := 42424242;
+    c_inst   CONSTANT NUMBER := 1;
+    c_nd     CONSTANT PLS_INTEGER := 120;         -- day indices 0..120 (121 snaps)
+    c_bs     CONSTANT NUMBER := 8192;
+    c_restart CONSTANT PLS_INTEGER := 60;
+    c_spike  CONSTANT PLS_INTEGER := 110;
+    c_tot_cs CONSTANT NUMBER := 4 * 86400 * 100;  -- 34,560,000 cs/day (4 CPUs)
+    -- 50 GiB as a literal NUMBER: 50*1024*1024*1024 as integer-literal
+    -- arithmetic overflows PLS_INTEGER (>2^31) before the NUMBER assignment.
+    c_50g    CONSTANT NUMBER := 53687091200;
+    v_base   DATE := TRUNC(SYSDATE) - c_nd;
+    v_start1 TIMESTAMP := CAST(v_base - 5 AS TIMESTAMP);
+    v_start2 TIMESTAMP := CAST(v_base + c_restart AS TIMESTAMP);
+    v_max50g NUMBER := c_50g / c_bs;   -- 6,553,600 blocks
+    v_start  TIMESTAMP;
+    v_used   NUMBER;
+    v_busy   NUMBER := 0;
+    v_idle   NUMBER := 0;
+    v_dbcpu  NUMBER := 0;
+    v_dbtime NUMBER := 0;
+    v_bg     NUMBER := 0;
+    v_inj    PLS_INTEGER;
+    v_probe  PLS_INTEGER;
+
+    FUNCTION dow(p_i PLS_INTEGER) RETURN PLS_INTEGER IS       -- 0=Mon .. 6=Sun
+    BEGIN RETURN MOD(TRUNC(v_base + p_i) - DATE '2020-01-06', 7); END;
+
+    FUNCTION fbusy(p_i PLS_INTEGER) RETURN NUMBER IS
+    BEGIN
+        IF p_i = v_inj THEN RETURN 0.70;
+        ELSIF dow(p_i) >= 5 THEN RETURN 0.20;
+        ELSE RETURN 0.40; END IF;
+    END;
+
+    PROCEDURE osstat(p_snap NUMBER, p_name VARCHAR2, p_val NUMBER) IS
+    BEGIN
+        INSERT INTO cap_fixture_osstat
+        VALUES (c_dbid, c_con, c_inst, p_snap, p_name, p_val);
+    END;
+    PROCEDURE tmodel(p_snap NUMBER, p_name VARCHAR2, p_val NUMBER) IS
+    BEGIN
+        INSERT INTO cap_fixture_time_model
+        VALUES (c_dbid, c_con, c_inst, p_snap, p_name, p_val);
+    END;
+BEGIN
+    -- Injected Tuesday = the LATEST Tuesday (dow=1) in range, so no later
+    -- same-weekday baseline is polluted by it. Probe = a plain weekday.
+    v_inj := NULL;
+    FOR i IN REVERSE 90 .. c_nd LOOP
+        IF MOD(TRUNC(v_base + i) - DATE '2020-01-06', 7) = 1 THEN v_inj := i; EXIT; END IF;
+    END LOOP;
+    v_probe := NULL;
+    FOR i IN REVERSE 61 .. (c_nd - 1) LOOP
+        IF MOD(TRUNC(v_base + i) - DATE '2020-01-06', 7) < 5 AND i <> v_inj THEN
+            v_probe := i; EXIT;
+        END IF;
+    END LOOP;
+
+    -- ---- dimensions ----
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 10, 'FIX_LINEAR', 'PERMANENT', c_bs);
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 11, 'FIX_SPIKE',  'PERMANENT', c_bs);
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 12, 'FIX_FLAT',   'PERMANENT', c_bs);
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 13, 'FIX_GAP',    'PERMANENT', c_bs);
+    INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 10, c_bs);
+    INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 11, c_bs);
+    INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 12, c_bs);
+    INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 13, c_bs);
+
+    -- ---- per-day series ----
+    FOR i IN 0 .. c_nd LOOP
+        v_start := CASE WHEN i < c_restart THEN v_start1 ELSE v_start2 END;
+        INSERT INTO cap_fixture_snapshot
+        VALUES (c_dbid, c_con, c_inst, 1000 + i,
+                CAST(v_base + i + 22/24 AS TIMESTAMP),
+                CAST(v_base + i + 23/24 AS TIMESTAMP), v_start);
+
+        -- FIX_LINEAR : 10 MiB/day = 1280 blocks/day, base 100 MiB (12800 blocks)
+        v_used := 1280 * i + 12800;
+        INSERT INTO cap_fixture_tbspc_usage
+        VALUES (c_dbid, c_con, 1000 + i, 10, v_used, v_max50g, v_used);
+
+        -- FIX_SPIKE : 5 MiB/day = 640 blocks/day + one +2 GiB (262144 blocks) step
+        v_used := 640 * i + 6400 + CASE WHEN i >= c_spike THEN 262144 ELSE 0 END;
+        INSERT INTO cap_fixture_tbspc_usage
+        VALUES (c_dbid, c_con, 1000 + i, 11, v_used, v_max50g, v_used);
+
+        -- FIX_FLAT : constant 400 MiB (51200 blocks), no autoextend (maxsize 0)
+        INSERT INTO cap_fixture_tbspc_usage
+        VALUES (c_dbid, c_con, 1000 + i, 12, 51200, 0, 51200);
+
+        -- FIX_GAP : 60 MiB/day = 7680 blocks/day, but with a 3-day AWR gap
+        -- (days 100-102 have NO usage sample). The post-gap day (103) sees a
+        -- 4-day, 240 MiB jump; the per-day RATE (60 MiB) must NOT flag. Without
+        -- gap normalization the 240 MiB raw delta would exceed the 100 MiB floor
+        -- and false-flag. Exercises the CAPD_TBSPC_DELTA day_gap / rate fix.
+        IF i NOT BETWEEN 100 AND 102 THEN
+            v_used := 7680 * i + 6400;
+            INSERT INTO cap_fixture_tbspc_usage
+            VALUES (c_dbid, c_con, 1000 + i, 13, v_used, v_max50g, v_used);
+        END IF;
+
+        -- ---- CPU counters (cumulative centiseconds), reset at restart ----
+        IF i = c_restart THEN
+            v_busy := 0; v_idle := 0; v_dbcpu := 0; v_dbtime := 0; v_bg := 0;
+        END IF;
+        v_busy := v_busy + fbusy(i) * c_tot_cs;
+        v_idle := v_idle + (1 - fbusy(i)) * c_tot_cs;
+        osstat(1000 + i, 'BUSY_TIME', v_busy);
+        osstat(1000 + i, 'IDLE_TIME', v_idle);
+        osstat(1000 + i, 'NUM_CPUS', 4);
+        osstat(1000 + i, 'NUM_CPU_CORES', 4);
+
+        -- ---- DB time model (cumulative microseconds), reset with the restart ----
+        v_dbcpu  := v_dbcpu  + fbusy(i) * 1000 * 1000000;   -- db_cpu_sec  = fbusy*1000
+        v_dbtime := v_dbtime + fbusy(i) * 1200 * 1000000;   -- db_time_sec = fbusy*1200
+        v_bg     := v_bg     + 50 * 1000000;                -- bg 50 s/day
+        tmodel(1000 + i, 'DB CPU', v_dbcpu);
+        tmodel(1000 + i, 'DB time', v_dbtime);
+        tmodel(1000 + i, 'background cpu time', v_bg);
+    END LOOP;
+
+    -- ---- expected values / key dates for run_test.sql ----
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBID', c_dbid);
+    INSERT INTO cap_fixture_meta (mkey, dval) VALUES ('BASE_DAY',    v_base);
+    INSERT INTO cap_fixture_meta (mkey, dval) VALUES ('LAST_DAY',    v_base + c_nd);
+    INSERT INTO cap_fixture_meta (mkey, dval) VALUES ('SPIKE_DAY',   v_base + c_spike);
+    INSERT INTO cap_fixture_meta (mkey, dval) VALUES ('RESTART_DAY', v_base + c_restart);
+    INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('INJECTED_TUE', v_base + v_inj, v_inj);
+    INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('PROBE_DAY',    v_base + v_probe, v_probe);
+    -- FIX_LINEAR closed forms
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('LINEAR_SLOPE', 10485760);              -- bytes/day
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('LINEAR_CUR',   1280 * c_nd * 8192 + 104857600);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('LINEAR_LIMIT', c_50g);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('LINEAR_DTF',
+        FLOOR((c_50g - (1280 * c_nd * 8192 + 104857600)) / 10485760));                          -- 4990
+    INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('LINEAR_PRED30_DAY',
+        v_base + c_nd + 30, (1280 * c_nd * 8192 + 104857600) + 30 * 10485760);                 -- 1,677,721,600
+    COMMIT;
+
+    DBMS_OUTPUT.PUT_LINE('Fixtures loaded: base=' || TO_CHAR(v_base,'YYYY-MM-DD')
+        || ' restart=' || TO_CHAR(v_base + c_restart,'YYYY-MM-DD')
+        || ' spike=' || TO_CHAR(v_base + c_spike,'YYYY-MM-DD')
+        || ' inj_tue=' || TO_CHAR(v_base + v_inj,'YYYY-MM-DD Dy')
+        || ' probe=' || TO_CHAR(v_base + v_probe,'YYYY-MM-DD Dy'));
+END;
+/
+
+PROMPT Fixtures installed.  Next: @install.sql (seam_mode=fixture), then test/run_test.sql

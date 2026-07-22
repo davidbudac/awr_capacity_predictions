@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Introduction — AWR Capacity Predictions</title>
+<meta name="description" content="In-database capacity forecasting and deterministic anomaly detection for Oracle 19c, driven entirely by AWR history — no external ML stack, no agent, no data export.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23b06a0d'/><path d='M16 8L24 23L8 23Z' fill='%23fff'/></svg>">
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  // No-FOUC: apply the persisted theme before first paint.
+  (function(){try{var t=localStorage.getItem("cap-theme");
+    if(t){document.documentElement.setAttribute("data-theme",t);
+      var m=document.querySelector('meta[name="color-scheme"]');if(m)m.content=t;}}catch(e){}})();
+</script>
+</head>
+<body>
+<a class="skip-link visually-hidden" href="#content">Skip to content</a>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">
+      <div class="brand__mark" aria-hidden="true">▲</div>
+      <div>
+        <div class="brand__name">AWR Capacity<br>Predictions</div>
+        <div class="brand__sub">Documentation</div>
+      </div>
+    </a>
+    <nav class="nav" aria-label="Documentation pages">
+      <div class="nav__group">Start</div>
+      <a class="nav-page" href="index.html"><span class="n">01</span> Introduction</a>
+      <div class="nav__group">Guides</div>
+      <a class="nav-page" href="concepts.html"><span class="n">02</span> How it works</a>
+      <a class="nav-page" href="install.html"><span class="n">03</span> Installation</a>
+      <a class="nav-page" href="usage.html"><span class="n">04</span> Usage</a>
+      <a class="nav-page" href="testing.html"><span class="n">05</span> Testing</a>
+      <div class="nav__group">Reference</div>
+      <a class="nav-page" href="reference.html"><span class="n">06</span> Reference</a>
+    </nav>
+    <nav class="toc" id="toc" aria-label="On this page"></nav>
+    <button class="theme-toggle" id="themeBtn" type="button">◐ System</button>
+  </aside>
+
+  <main class="main" id="content" tabindex="-1">
+    <div class="wrap">
+
+      <!-- ===================== HERO ===================== -->
+      <section class="hero" id="overview">
+        <span class="eyebrow">In-database · Oracle 19c floor · read-only</span>
+        <h1>Capacity forecasting that lives inside the database.</h1>
+        <p class="lead">SQL-level growth forecasting and deterministic anomaly detection driven
+          entirely by AWR history — <strong>no external ML stack, no agent, no data export</strong>.
+          Just views, one small config table, an OML package, and a read-only SQL*Plus text report.</p>
+        <div class="chips">
+          <span class="chip amber"><b>5</b>&nbsp;view layers</span>
+          <span class="chip"><b>6</b>&nbsp;seam views</span>
+          <span class="chip amber"><b>2</b>&nbsp;persisted tables</span>
+          <span class="chip"><b>2</b>&nbsp;forecast engines</span>
+          <span class="chip amber">read-only against AWR</span>
+          <span class="chip">safe to re-run</span>
+        </div>
+      </section>
+
+      <p>This suite turns the performance history Oracle already collects (AWR) into forward-looking
+        capacity answers, without moving a single row out of the database. Everything runs as SQL and
+        PL/SQL you can read, and every number it prints can be reconstructed by hand. Start here for the
+        big picture, then follow the guides to install it, run it, and prove it against known answers.</p>
+
+      <!-- ===================== WHAT IT ANSWERS ===================== -->
+      <div class="section-head" id="what">
+        <span class="eyebrow">The point</span>
+        <h2>Three questions it answers</h2>
+        <p>Per tablespace and per container — the operational questions that actually page you.</p>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <caption>What the suite produces</caption>
+          <thead><tr><th scope="col">Question</th><th scope="col">What it produces</th><th scope="col">Source</th></tr></thead>
+          <tbody>
+            <tr><td><b>Tablespace growth</b></td><td>Projected size at +30 / +90 / +180 / +365 days, plus <code>days_to_full</code></td><td class="def">DBA_HIST_TBSPC_SPACE_USAGE</td></tr>
+            <tr><td><b>CPU trend</b></td><td>Host busy % and DB CPU seconds, with days-to-saturation</td><td class="def">DBA_HIST_OSSTAT · SYS_TIME_MODEL</td></tr>
+            <tr><td><b>Anomalies</b></td><td>Median + MAD flags, each reproducible by hand (value, median, k·σ, robust z)</td><td class="def">daily deltas</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- ===================== THE BIG IDEA ===================== -->
+      <div class="section-head" id="idea">
+        <span class="eyebrow">How it works, in one idea</span>
+        <h2>Write the analytics once, swap the data source underneath</h2>
+        <p>The whole design hangs on a single trick called the <em>seam</em>.</p>
+      </div>
+      <p>Every calculation reads from a thin layer of six views prefixed
+        <span class="inline">CAPV_</span>, shaped to look just like Oracle's AWR data dictionary.
+        Nothing above them ever touches the real <span class="inline">DBA_HIST_*</span> tables directly.
+        That single layer is the <b>seam</b>: to change where the data comes from, you swap
+        <em>one</em> install file — and the identical SQL then runs against this database's live AWR, a
+        central fleet warehouse, or synthetic test fixtures, producing the same math and the same report
+        either way. It's the database equivalent of pointing a hostname at a different server.</p>
+      <div class="callout tip">
+        <span class="ico">▸</span>
+        <p><strong>The one idea to hold onto.</strong> Point the seam at real AWR to report on
+        production; point it at fixtures — fake data whose exact answers are worked out in advance — to
+        prove the tool is correct. Same code either way. The
+        <a href="concepts.html">How it works</a> page walks the full pipeline built on top of it.</p>
+      </div>
+
+      <!-- ===================== TWO ENGINES ===================== -->
+      <div class="section-head" id="engines">
+        <span class="eyebrow">Forecasting</span>
+        <h2>Two engines, side by side</h2>
+        <p>A fully auditable baseline, and an optional seasonality-aware second opinion.</p>
+      </div>
+      <div class="split" style="gap:16px">
+        <div class="track-card a" style="border-top-color:var(--accent)">
+          <div class="tk">Tier 1 · always on</div>
+          <h4>Pure SQL — a straight trend line</h4>
+          <p>Standard linear regression (<code>REGR_*</code>). Every forecast is just slope × days plus
+            a starting point, and every anomaly is explained by its median and MAD — so you can check
+            any number by hand. Nothing to train, nothing hidden.</p>
+          <div class="meta"><span><b>Reaches:</b> +30 / +90 / +180 / +365 days</span>
+            <span><b>Needs:</b> nothing beyond the views</span></div>
+        </div>
+        <div class="track-card b">
+          <div class="tk">Tier 2 · optional</div>
+          <h4>OML ESM — exponential smoothing</h4>
+          <p>One Oracle Machine Learning model per series via <code>DBMS_DATA_MINING</code>. Tablespaces
+            use Holt (trend); CPU uses additive Winters (weekly seasonality). Shown against Tier 1 in
+            the report.</p>
+          <div class="meta"><span><b>Reaches:</b> +30 only — 19c hard-caps the horizon at 30 steps</span>
+            <span><b>Needs:</b> <span class="inline">CREATE MINING MODEL</span></span></div>
+        </div>
+      </div>
+
+      <!-- ===================== SAFE BY DESIGN ===================== -->
+      <div class="section-head" id="safe">
+        <span class="eyebrow">Trust</span>
+        <h2>Safe by design</h2>
+        <p>Two properties make this comfortable to install on a database you care about.</p>
+      </div>
+      <div class="callout">
+        <span class="ico">i</span>
+        <p><strong>Read-only against your data.</strong> The report and all
+        <span class="inline">CAPV / CAPD / CAPF / CAPA</span> views only ever <code>SELECT</code>. The
+        suite writes exactly two tables of its own — <span class="inline">CAP_CONFIG</span> (tuning
+        knobs) and <span class="inline">CAP_ML_MODEL</span> (the Tier 2 registry) — and nothing else.</p>
+      </div>
+      <div class="callout tip">
+        <span class="ico">▸</span>
+        <p><strong>Safe to re-run.</strong> Re-running the installer is idempotent and non-destructive:
+        your config overrides and trained models survive <span class="inline">@install.sql</span>. A
+        full teardown is a single <span class="inline">@uninstall.sql</span>.</p>
+      </div>
+
+      <!-- ===================== NEXT ===================== -->
+      <div class="section-head" id="next">
+        <span class="eyebrow">Read next</span>
+        <h2>Where to go from here</h2>
+        <p>Understand the design, or jump straight to getting it running.</p>
+      </div>
+      <div class="cardgrid">
+        <a class="card" href="concepts.html">
+          <div class="k">02 · Concepts</div>
+          <h3>How it works</h3>
+          <p>The seam, the five-layer pipeline, and the two engines in depth.</p>
+          <div class="go">Read the architecture →</div>
+        </a>
+        <a class="card" href="install.html">
+          <div class="k">03 · Guide</div>
+          <h3>Installation</h3>
+          <p>Prerequisites, the three modes, and a clean install in minutes.</p>
+          <div class="go">Install it →</div>
+        </a>
+        <a class="card" href="usage.html">
+          <div class="k">04 · Guide</div>
+          <h3>Usage</h3>
+          <p>Run the report, read its six sections, tune the knobs, add Tier 2.</p>
+          <div class="go">Run the report →</div>
+        </a>
+        <a class="card" href="testing.html">
+          <div class="k">05 · Guide</div>
+          <h3>Testing</h3>
+          <p>Prove every part against known answers with the fixture self-check.</p>
+          <div class="go">Try it yourself →</div>
+        </a>
+      </div>
+
+      <nav class="pager" id="pager" aria-label="Previous and next page"></nav>
+
+      <footer class="foot">
+        AWR Capacity Predictions · in-database capacity forecasting · Oracle 19c floor<br>
+        Documentation generated from <span class="inline">README.md</span> and
+        <span class="inline">docs/design.md</span>.
+      </footer>
+
+    </div><!-- /wrap -->
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

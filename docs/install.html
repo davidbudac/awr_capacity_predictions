@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Installation — AWR Capacity Predictions</title>
+<meta name="description" content="Install AWR Capacity Predictions on Oracle 19c: prerequisites, the three seam modes, a clean local install, warehouse mode, and the AWR retention caveat.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23b06a0d'/><path d='M16 8L24 23L8 23Z' fill='%23fff'/></svg>">
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  // No-FOUC: apply the persisted theme before first paint.
+  (function(){try{var t=localStorage.getItem("cap-theme");
+    if(t){document.documentElement.setAttribute("data-theme",t);
+      var m=document.querySelector('meta[name="color-scheme"]');if(m)m.content=t;}}catch(e){}})();
+</script>
+</head>
+<body>
+<a class="skip-link visually-hidden" href="#content">Skip to content</a>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">
+      <div class="brand__mark" aria-hidden="true">▲</div>
+      <div>
+        <div class="brand__name">AWR Capacity<br>Predictions</div>
+        <div class="brand__sub">Documentation</div>
+      </div>
+    </a>
+    <nav class="nav" aria-label="Documentation pages">
+      <div class="nav__group">Start</div>
+      <a class="nav-page" href="index.html"><span class="n">01</span> Introduction</a>
+      <div class="nav__group">Guides</div>
+      <a class="nav-page" href="concepts.html"><span class="n">02</span> How it works</a>
+      <a class="nav-page" href="install.html"><span class="n">03</span> Installation</a>
+      <a class="nav-page" href="usage.html"><span class="n">04</span> Usage</a>
+      <a class="nav-page" href="testing.html"><span class="n">05</span> Testing</a>
+      <div class="nav__group">Reference</div>
+      <a class="nav-page" href="reference.html"><span class="n">06</span> Reference</a>
+    </nav>
+    <nav class="toc" id="toc" aria-label="On this page"></nav>
+    <button class="theme-toggle" id="themeBtn" type="button">◐ System</button>
+  </aside>
+
+  <main class="main" id="content" tabindex="-1">
+    <div class="wrap">
+
+      <!-- ===================== HERO ===================== -->
+      <section class="hero" id="install">
+        <span class="eyebrow">Guide</span>
+        <h1>Installation</h1>
+        <p class="lead">Install it where the data source is visible, run the layered DDL, and you're
+          done in minutes. The installer is <strong>idempotent and non-destructive</strong> — safe to
+          re-run against a database you care about.</p>
+      </section>
+
+      <p>There is nothing to download beyond this repository and no external runtime to stand up. You
+        pick a <span class="inline">seam_mode</span>, connect where that mode's data lives, and run
+        <span class="inline">@install.sql</span> — it builds every <span class="inline">CAP*</span>
+        object and verifies it compiled. This page is the generic, portable procedure; for the
+        step-by-step walkthrough on the author's 19c test box, see <a href="testing.html">Testing</a>.</p>
+
+      <!-- ===================== PREREQUISITES ===================== -->
+      <div class="section-head" id="prerequisites">
+        <span class="eyebrow">Before you start</span>
+        <h2>Prerequisites</h2>
+        <p>A short list, and most of it only applies to local mode against live AWR.</p>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <caption>What each mode needs</caption>
+          <thead><tr><th scope="col">Prerequisite</th><th scope="col">Needed for</th><th scope="col">Detail</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><b>Oracle Database 19c</b></td>
+              <td class="def">all modes</td>
+              <td class="def">19c is the floor. The suite uses no 21c/23c syntax (notably no standalone
+                <span class="inline">WINDOW</span> clause — every window call is inline
+                <code>OVER (PARTITION BY … ORDER BY …)</code>), so it installs unchanged on 19c and up.</td>
+            </tr>
+            <tr>
+              <td><b>Diagnostics Pack</b></td>
+              <td class="def">local mode</td>
+              <td class="def"><span class="kt">DBA_HIST_*</span> is Diagnostics Pack territory. Check
+                <span class="inline">CONTROL_MANAGEMENT_PACK_ACCESS</span> is
+                <code>DIAGNOSTIC+TUNING</code> before installing local mode.</td>
+            </tr>
+            <tr>
+              <td><b>Direct SELECT on DBA_HIST_*</b></td>
+              <td class="def">local mode</td>
+              <td class="def">Granted <b>directly</b>, not via a role — view compilation ignores
+                role-granted privileges, so the <span class="k">CAPV_</span> seam views won't compile
+                without direct grants on the underlying <span class="kt">DBA_HIST_*</span> views.</td>
+            </tr>
+            <tr>
+              <td><b>CREATE MINING MODEL</b></td>
+              <td class="def">Tier 2 (optional)</td>
+              <td class="def">Only for the OML ESM engine. Free in all editions since Dec 2019. Tier 1
+                (pure-SQL <code>REGR_*</code>) needs nothing beyond the views.</td>
+            </tr>
+            <tr>
+              <td><b>Run from the repo root</b></td>
+              <td class="def">all modes</td>
+              <td class="def"><span class="inline">install.sql</span> and
+                <span class="inline">report/report.sql</span> use relative
+                <span class="inline">@@</span> includes — launch them from the repository root.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout">
+        <span class="ico">@@</span>
+        <p><strong>Always run from the repo root.</strong> SQL*Plus resolves
+        <span class="inline">@@</span> includes relative to the <em>outermost</em> caller on 19c, so
+        <span class="inline">install.sql</span> and <span class="inline">report/report.sql</span>
+        must be launched from the top of the repository (they reference their pieces as
+        <span class="inline">@@ddl/…</span> / <span class="inline">@@report/…</span>). Start elsewhere
+        and the includes won't resolve.</p>
+      </div>
+
+      <!-- ===================== MODES ===================== -->
+      <div class="section-head" id="modes">
+        <span class="eyebrow">The seam</span>
+        <h2>Three modes</h2>
+        <p>One idea makes install portable: all analytics read from the six <span class="k">CAPV_</span>
+          seam views, and <span class="inline">seam_mode</span> chooses what they point at.</p>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <caption>seam_mode — what it points at, and where to install it</caption>
+          <thead><tr><th scope="col">seam_mode</th><th scope="col">Source</th><th scope="col">Install as</th><th scope="col">Notes</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><span class="k">local</span></td>
+              <td class="def"><span class="kt">DBA_HIST_*</span></td>
+              <td class="def">sysdba in <span class="inline">CDB$ROOT</span></td>
+              <td class="def">Needs the Diagnostics Pack + direct SELECT grants on the DBA_HIST views.</td>
+            </tr>
+            <tr>
+              <td><span class="k">warehouse</span></td>
+              <td class="def"><span class="kt">AWRV_*</span> seam views</td>
+              <td class="def">Warehouse owner (<span class="inline">AWRWH</span>), or a schema with
+                SELECT on the AWRV_* views</td>
+              <td class="def">Presents every collected database, keyed on
+                <span class="inline">(dbid, con_dbid)</span>.</td>
+            </tr>
+            <tr>
+              <td><span class="k">fixture</span></td>
+              <td class="def"><span class="kt">CAP_FIXTURE_*</span></td>
+              <td class="def">Any schema with CREATE privileges</td>
+              <td class="def">Test hook — run <span class="inline">test/fixture_install.sql</span> first
+                (see <a href="testing.html">Testing</a>).</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- ===================== LOCAL ===================== -->
+      <div class="section-head" id="local">
+        <span class="eyebrow">Install</span>
+        <h2>Local mode</h2>
+        <p>The common case: point the seam at this database's live AWR. Connect as
+          <span class="inline">sysdba</span> in <span class="inline">CDB$ROOT</span> — that's where
+          AWR lives — define the mode, and run the installer.</p>
+      </div>
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">sqlplus · CDB$ROOT</span><span class="term__tag in">you run</span></div>
+<pre>sqlplus / as sysdba          <span class="c-cmt">-- lands in CDB$ROOT, where AWR lives</span>
+<span class="c-prompt">SQL&gt;</span> DEFINE seam_mode = 'local'
+<span class="c-prompt">SQL&gt;</span> @install.sql</pre>
+      </div>
+      <p><span class="inline">install.sql</span> runs the layered DDL in order —
+        <span class="inline">00_drop</span> → <span class="inline">05_config</span> →
+        <span class="inline">seam</span> → <span class="inline">20_daily</span> →
+        <span class="inline">30_forecast</span> → <span class="inline">40_anomaly</span> →
+        <span class="inline">50_ml</span> — and ends with a validity check that <b>fails loudly</b> if
+        any <span class="inline">CAP*</span> object came out invalid.</p>
+      <div class="term">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">output</span><span class="term__tag out">expect</span></div>
+<pre>============================================================
+ AWR Capacity Predictions -- install
+============================================================
+ seam_mode  = local
+ seam_script= ddl/10_seam_local.sql
+ schema     = installing into the current schema
+
+ -- [00] drop any prior install ...
+ -- [05] CAP_CONFIG + seed ...
+ -- [seam] ddl/10_seam_local.sql ...
+ -- [20] daily series (CAPD_*) ...
+ -- [30] Tier 1 forecasts (CAPF_*) ...
+ -- [40] anomalies (CAPA_*) ...
+ -- [50] Tier 2 OML ESM (CAP_ML_MODEL + package + CAPF_ESM/COMPARE) ...
+  <span class="c-pass">All CAP* objects valid.</span>
+============================================================
+ Install complete (seam_mode = local).
+============================================================</pre>
+      </div>
+
+      <!-- ===================== WAREHOUSE ===================== -->
+      <div class="section-head" id="warehouse">
+        <span class="eyebrow">Install</span>
+        <h2>Warehouse mode</h2>
+        <p>Point the seam at a central fleet collector instead of this database's own AWR — the same
+          code, reporting across many databases at once.</p>
+      </div>
+      <p>Install where the <span class="kt">AWRV_*</span> views are visible: as the warehouse owner
+        (<span class="inline">AWRWH</span>), or a schema with direct SELECT on them.
+        <span class="inline">ddl/11_seam_warehouse.sql</span> re-maps the
+        <span class="k">CAPV_</span> views onto those <span class="kt">AWRV_*</span> views, so warehouse
+        mode is <b>byte-identical downstream</b> to local mode — same math, same report. The warehouse
+        presents every collected database (one target reads as one DB, many targets as a fleet report),
+        and every row carries its <span class="inline">con_dbid</span> so containers never collide.</p>
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">sqlplus · AWRWH</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-cmt">-- connected as the warehouse owner (or a schema with SELECT on AWRV_*)</span>
+<span class="c-prompt">SQL&gt;</span> DEFINE seam_mode = 'warehouse'
+<span class="c-prompt">SQL&gt;</span> @install.sql</pre>
+      </div>
+
+      <!-- ===================== REINSTALL ===================== -->
+      <div class="section-head" id="reinstall">
+        <span class="eyebrow">Re-running it</span>
+        <h2>Idempotent, non-destructive re-install</h2>
+        <p>Re-running the installer is safe: it rebuilds the views but never wipes what you've tuned or
+          trained.</p>
+      </div>
+      <div class="callout tip">
+        <span class="ico">▸</span>
+        <p><strong>Your overrides and models survive.</strong> Re-running
+        <span class="inline">@install.sql</span> preserves both persisted tables —
+        <span class="inline">CAP_CONFIG</span> overrides and the
+        <span class="inline">CAP_ML_MODEL</span> registry (and its OML models). The
+        <span class="inline">00_drop</span> step deliberately leaves those two tables alone, and the
+        config <code>MERGE</code> only seeds keys that are missing, so it never overwrites a value you
+        changed. For a full teardown, use <span class="inline">@uninstall.sql</span>.</p>
+      </div>
+
+      <!-- ===================== RETENTION ===================== -->
+      <div class="section-head" id="retention">
+        <span class="eyebrow">The one caveat that bites</span>
+        <h2>AWR retention bounds everything</h2>
+        <p>Forecasts are only as long as the history behind them — and stock retention is short.</p>
+      </div>
+      <div class="callout warn">
+        <span class="ico">!</span>
+        <p><strong>Default retention is only 8 days.</strong> That's far below the 90-day training
+        window, so on a stock box local-mode forecasts degrade to
+        <span class="pill crit">INSUFFICIENT_HISTORY</span> (<span class="inline">TRAIN_N</span>
+        &lt; <span class="inline">min_train_days</span>) and say so loudly. That is correct behaviour,
+        not a bug — the report refuses to project a trend it can't yet see.</p>
+      </div>
+      <p>To get real trends, raise AWR retention (here, to 90 days, expressed in minutes):</p>
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">sqlplus · CDB$ROOT</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> EXEC DBMS_WORKLOAD_REPOSITORY.MODIFY_SNAPSHOT_SETTINGS(retention =&gt; 90*24*60);</pre>
+      </div>
+      <div class="callout">
+        <span class="ico">i</span>
+        <p><strong>This one is a real change to Oracle.</strong> Unlike everything else in this suite —
+        which only ever <code>SELECT</code>s — <span class="inline">MODIFY_SNAPSHOT_SETTINGS</span> is
+        a persistent AWR configuration change. It also only affects <em>future</em> snapshots: past
+        history is not backfilled, so the training window fills in from the day you raise retention
+        forward.</p>
+      </div>
+      <p>With that done, head to <a href="usage.html">Usage</a> to run the report and read its six
+        sections — or prove every part against known answers with the fixture self-check on
+        <a href="testing.html">Testing</a> first.</p>
+
+      <nav class="pager" id="pager" aria-label="Previous and next page"></nav>
+
+      <footer class="foot">
+        AWR Capacity Predictions · in-database capacity forecasting · Oracle 19c floor<br>
+        Documentation generated from <span class="inline">README.md</span> and
+        <span class="inline">docs/design.md</span>.
+      </footer>
+
+    </div><!-- /wrap -->
+  </main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>
