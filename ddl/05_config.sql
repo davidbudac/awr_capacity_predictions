@@ -55,6 +55,7 @@ USING (
     UNION ALL SELECT 'esm_prediction_step',  30,        'OML ESM forecast horizon in steps (days). Oracle 19c hard-caps this at 30.'                            FROM dual
     UNION ALL SELECT 'nearfull_warn_pct',    90,        'Percent-used at/above which a tablespace raises a near-full-now WARN (any forecast quality).'          FROM dual
     UNION ALL SELECT 'nearfull_crit_pct',    97,        'Percent-used at/above which a tablespace raises a near-full-now CRIT (any forecast quality).'          FROM dual
+    UNION ALL SELECT 'backtest_holdout_days',28,        'Holdout window (days) CAPF_BACKTEST fits before and scores against; <=30 lets ESM cover it on 19c.'    FROM dual
 ) s
 ON (c.cfg_name = s.cfg_name)
 WHEN NOT MATCHED THEN

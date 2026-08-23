@@ -16,6 +16,9 @@
 --                  near-full NOW -> M7.1 ranking + TBSPC_NEARFULL alert).
 --   FIX_FILLING  : 10 MiB/day against a small maxsize -> days_to_full = 20
 --                  (TBSPC_FULL CRIT alert), pct 86.7% (below near-full).
+--   FIX_ZIGZAG   : 10 MiB/day +-20 MiB alternating -- deterministic residuals
+--                  for the M9.1 prediction-interval + M9.4 backtest closed
+--                  forms (expectations computed in-loop below).
 --   CPU          : 40% weekday / 20% weekend busy, one restart at day 60
 --                  (startup_time change + counter reset), one +30pt Tuesday.
 --   CONTAINER    : FIXCDB root row + one synthetic FIXPDB1 row (M7.2 labels).
@@ -130,12 +133,14 @@ BEGIN
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 13, 'FIX_GAP',      'PERMANENT', c_bs);
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 14, 'FIX_NEARFULL', 'PERMANENT', c_bs);
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 15, 'FIX_FILLING',  'PERMANENT', c_bs);
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 16, 'FIX_ZIGZAG',   'PERMANENT', c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 10, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 11, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 12, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 13, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 14, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 15, c_bs);
+    INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 16, c_bs);
 
     -- Container naming (M7.2): the row every fixture series resolves through
     -- (con_dbid = dbid -> label is the db_name alone), plus one synthetic PDB
@@ -184,6 +189,17 @@ BEGIN
         v_used := 1280 * i + 12800;
         INSERT INTO cap_fixture_tbspc_usage
         VALUES (c_dbid, c_con, 1000 + i, 15, v_used, 192000, v_used);
+
+        -- FIX_ZIGZAG : 10 MiB/day trend + alternating +-20 MiB (2560 blocks)
+        -- around the line -- a deterministic "noisy" series whose OLS sums are
+        -- closed forms, exercising the M9.1 prediction-interval and M9.4
+        -- backtest arithmetic with NON-degenerate residuals (FIX_LINEAR's
+        -- residuals are all zero, which only proves bands collapse).
+        -- Deltas alternate +50 / -30 MiB: well inside the anomaly threshold
+        -- (k*MAD of the alternating baseline), so it never flags.
+        v_used := 12800 + 1280 * i + CASE WHEN MOD(i, 2) = 0 THEN 2560 ELSE -2560 END;
+        INSERT INTO cap_fixture_tbspc_usage
+        VALUES (c_dbid, c_con, 1000 + i, 16, v_used, v_max50g, v_used);
 
         -- FIX_GAP : 60 MiB/day = 7680 blocks/day, but with a 3-day AWR gap
         -- (days 100-102 have NO usage sample). The post-gap day (103) sees a
@@ -238,6 +254,78 @@ BEGIN
         FLOOR((192000 - (1280 * c_nd + 12800)) * c_bs / 10485760));                             -- 20
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('FILLING_PCT',
         ROUND(100 * (1280 * c_nd + 12800) / 192000, 1));                                        -- 86.7
+
+    -- ---- M9.1/M9.4 expectations for FIX_ZIGZAG, computed from first
+    -- principles in exact NUMBER arithmetic over the SAME windows the views
+    -- use: forecast fit = the last train_days (90) days (i 31..120); backtest
+    -- fit = the 90 days ending at the 28-day-holdout cutoff (i 3..92), scored
+    -- against the held-out days (i 93..120). Same closed forms as
+    -- ddl/30_forecast_views.sql / CAPF_BACKTEST, including the
+    -- t ~ 1.96 + 2.4/df approximation -- that formula is part of the
+    -- contract. Assumes shipped defaults (train_days=90,
+    -- backtest_holdout_days=28). Fitting in i-space is exact: day_n is
+    -- i + constant, and slope/SSE/projections are shift-invariant.
+    DECLARE
+        n     PLS_INTEGER;
+        sx    NUMBER; sy NUMBER; sxx NUMBER; sxy NUMBER; syy NUMBER;
+        bxx   NUMBER; bxy NUMBER;                    -- centered sums
+        slope NUMBER; icept NUMBER; sse NUMBER; rse NUMBER; tv NUMBER;
+        sci   NUMBER; x0 NUMBER; half NUMBER; y NUMBER; hr NUMBER;
+        mape  NUMBER; bias NUMBER; pred NUMBER;
+        FUNCTION zz(p_i PLS_INTEGER) RETURN NUMBER IS
+        BEGIN
+            RETURN (12800 + 1280 * p_i
+                    + CASE WHEN MOD(p_i, 2) = 0 THEN 2560 ELSE -2560 END) * c_bs;
+        END;
+    BEGIN
+        -- forecast-window fit + 95% intervals (i = 31..120)
+        n := 0; sx := 0; sy := 0; sxx := 0; sxy := 0; syy := 0;
+        FOR i IN 31 .. 120 LOOP
+            y := zz(i);
+            n := n + 1; sx := sx + i; sy := sy + y;
+            sxx := sxx + i * i; sxy := sxy + i * y; syy := syy + y * y;
+        END LOOP;
+        bxx   := sxx - sx * sx / n;
+        bxy   := sxy - sx * sy / n;
+        slope := bxy / bxx;
+        icept := sy / n - slope * (sx / n);
+        sse   := (syy - sy * sy / n) - bxy * bxy / bxx;
+        rse   := SQRT(GREATEST(0, sse) / (n - 2));
+        tv    := 1.96 + 2.4 / (n - 2);
+        sci   := tv * rse / SQRT(bxx);
+        x0    := c_nd + 30;
+        half  := tv * rse * SQRT(1 + 1 / n + POWER(x0 - sx / n, 2) / bxx);
+        hr    := c_50g - zz(c_nd);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_SLOPE',  slope);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_P30',    icept + slope * x0);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_P30_LO', icept + slope * x0 - half);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_P30_HI', icept + slope * x0 + half);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_DTF',    FLOOR(hr / slope));
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_DTF_LO', FLOOR(hr / (slope + sci)));
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_DTF_HI',
+            CASE WHEN slope - sci > 0 THEN FLOOR(hr / (slope - sci)) END);
+
+        -- backtest REGR fit (i = 3..92), scored on the holdout (i = 93..120)
+        n := 0; sx := 0; sy := 0; sxx := 0; sxy := 0;
+        FOR i IN 3 .. 92 LOOP
+            y := zz(i);
+            n := n + 1; sx := sx + i; sy := sy + y;
+            sxx := sxx + i * i; sxy := sxy + i * y;
+        END LOOP;
+        bxx   := sxx - sx * sx / n;
+        bxy   := sxy - sx * sy / n;
+        slope := bxy / bxx;
+        icept := sy / n - slope * (sx / n);
+        mape := 0; bias := 0;
+        FOR i IN 93 .. 120 LOOP
+            y    := zz(i);
+            pred := icept + slope * i;
+            mape := mape + ABS(pred - y) / y;
+            bias := bias + (pred - y) / y;
+        END LOOP;
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_BT_MAPE', mape / 28 * 100);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_BT_BIAS', bias / 28 * 100);
+    END;
     COMMIT;
 
     DBMS_OUTPUT.PUT_LINE('Fixtures loaded: base=' || TO_CHAR(v_base,'YYYY-MM-DD')

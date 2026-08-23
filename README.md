@@ -7,13 +7,17 @@ package, and a read-only SQL\*Plus text report.
 
 What it answers:
 
-- **Tablespace growth** — projected size at +30/+90/+180/+365 days and
-  `days_to_full`, per tablespace, per container.
+- **Tablespace growth** — projected size at +30/+90/+180/+365 days (with 95%
+  prediction bands) and `days_to_full` with a worst/best-case range
+  ("120 days, worst case 80"), per tablespace, per container.
 - **CPU trend** — host busy% (from `DBA_HIST_OSSTAT`) and DB CPU seconds (from
-  `DBA_HIST_SYS_TIME_MODEL`), with days-to-saturation.
+  `DBA_HIST_SYS_TIME_MODEL`), with days-to-saturation (+ range).
 - **Anomalies** — deterministic median + MAD flags that are reproducible by
   hand: every flag exposes value, baseline median, MAD-sigma, the k·sigma
   threshold, and a robust z-score.
+- **Which engine to trust** — `CAPF_BACKTEST` replays the recent past
+  (holdout) and scores each forecasting engine's MAPE/bias against what
+  actually happened.
 
 Two forecasting engines run side by side:
 
@@ -113,8 +117,9 @@ in one PL/SQL block via `DBMS_OUTPUT`, captured by `SPOOL`). Open the spooled
 ## Tier 2 (OML ESM) — optional
 
 ```sql
-EXEC cap_forecast_ml.train_all(20);   -- top-20 tablespaces + CPU series
--- then re-run report/report.sql to see ESM vs REGR in section 6
+EXEC cap_forecast_ml.train_all(20);      -- top-20 tablespaces + CPU series
+EXEC cap_forecast_ml.train_backtest(20); -- optional: holdout twins for section 6c
+-- then re-run report/report.sql to see ESM vs REGR (and the backtest) in section 6
 ```
 
 Needs `CREATE MINING MODEL` (free in all editions since Dec 2019).
@@ -134,7 +139,7 @@ Key knobs: `train_days` (90), `recent_days` (28), `min_train_days` (14),
 `r2_gate` (0.60), `mad_k` (3), `mad_window_days` (28), `cpu_sat_pct` (80),
 `abs_floor_bytes` (100 MiB), `dow_weeks` (8), `dtf_warn`/`dtf_crit` (90/30),
 `nearfull_warn_pct`/`nearfull_crit_pct` (90/97), `anomaly_report_days` (14,
-the `CAPR_ALERTS` anomaly window).
+the `CAPR_ALERTS` anomaly window), `backtest_holdout_days` (28).
 Run `SELECT * FROM cap_config ORDER BY cfg_name;` for the full annotated list.
 
 ## Alerting / integration
@@ -162,8 +167,8 @@ Deterministic fixture harness — no randomness, all closed-form:
 @test/fixture_install.sql
 DEFINE seam_mode = 'fixture'
 @install.sql
-@test/run_test.sql        -- 31 assertions; exits non-zero on any failure
-@test/run_test_ml.sql     -- Tier 2 ESM assertion (needs CREATE MINING MODEL)
+@test/run_test.sql        -- 51 assertions; exits non-zero on any failure
+@test/run_test_ml.sql     -- Tier 2 ESM + backtest assertions (needs CREATE MINING MODEL)
 ```
 
 Fixtures: `FIX_LINEAR` (exact 10 MiB/day → slope, R², days_to_full checked to
@@ -171,10 +176,21 @@ the byte), `FIX_SPIKE` (one +2 GiB jump → exactly one HIGH on that day),
 `FIX_FLAT` (constant → quality FLAT, no anomaly), `FIX_GAP` (a 3-day AWR gap →
 rate-normalized, no false flag), `FIX_NEARFULL` (constant at exactly 97% of
 maxsize → near-full ranking + CRIT alert despite a FLAT fit), `FIX_FILLING`
-(20 days of headroom → `TBSPC_FULL` CRIT alert), CPU counters with a
-mid-series restart (excluded) + an injected +30-point Tuesday (flags in the
-same-weekday view), and `FIXCDB`/`FIXPDB1` container rows (label assertions).
-Cleanup: `@test/fixture_remove.sql`.
+(20 days of headroom → `TBSPC_FULL` CRIT alert), `FIX_ZIGZAG` (linear trend
+with alternating ±20 MiB residuals → the M9.1 prediction-interval and M9.4
+backtest numbers are asserted against first-principles closed forms), CPU
+counters with a mid-series restart (excluded) + an injected +30-point Tuesday
+(flags in the same-weekday view), and `FIXCDB`/`FIXPDB1` container rows
+(label assertions). Cleanup: `@test/fixture_remove.sql`.
+
+### Real workload (optional)
+
+The fixture harness proves the arithmetic; it cannot prove the toolkit reads a
+live database sensibly. `bench/` is a swingbench harness that drives a shaped
+daily load (OLTP growth + DSS CPU + weekend contrast + an injectable anomaly)
+against a test database, so the forecast and anomaly views get genuine AWR
+history to work on. See [`bench/README.md`](bench/README.md). Nothing in the
+suite depends on it.
 
 ## Caveats
 

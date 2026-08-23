@@ -62,7 +62,8 @@ CREATE OR REPLACE PACKAGE BODY cap_forecast_ml AS
                           p_seasonality  IN NUMBER,
                           p_data_query   IN CLOB,
                           p_target_col   IN VARCHAR2,
-                          p_trained_thru IN DATE) IS
+                          p_trained_thru IN DATE,
+                          p_purpose      IN VARCHAR2 DEFAULT 'FORECAST') IS
         l_set   DBMS_DATA_MINING.SETTING_LIST;
         l_err   VARCHAR2(200);
         l_rows  PLS_INTEGER;
@@ -82,13 +83,13 @@ CREATE OR REPLACE PACKAGE BODY cap_forecast_ml AS
             series_kind = p_series_kind, dbid = p_dbid, con_dbid = p_con_dbid,
             series_key = p_series_key, exsm_model = p_exsm_model,
             seasonality = p_seasonality, trained_through = p_trained_thru,
-            trained_at = SYSDATE, status = 'TRAINING'
+            trained_at = SYSDATE, status = 'TRAINING', purpose = p_purpose
         WHEN NOT MATCHED THEN INSERT
             (model_name, series_kind, dbid, con_dbid, series_key, exsm_model,
-             seasonality, trained_through, trained_at, status)
+             seasonality, trained_through, trained_at, status, purpose)
             VALUES
             (p_model, p_series_kind, p_dbid, p_con_dbid, p_series_key, p_exsm_model,
-             p_seasonality, p_trained_thru, SYSDATE, 'TRAINING');
+             p_seasonality, p_trained_thru, SYSDATE, 'TRAINING', p_purpose);
         COMMIT;
 
         -- Drop any prior model of this name (ignore "does not exist").
@@ -191,6 +192,76 @@ CREATE OR REPLACE PACKAGE BODY cap_forecast_ml AS
         train_tablespaces(p_top_n);
         train_cpu;
     END train_all;
+
+    -- ----------------------------------------------------------------
+    -- M9.4: purpose=BACKTEST twins, trained with the holdout HIDDEN.
+    -- Same series selection as the forecast trainers; each data_query gets an
+    -- extra "day_dt <= cutoff" predicate (cutoff = series last day - holdout)
+    -- and trained_through records the cutoff, so the models' forecast rows
+    -- land inside the holdout for CAPF_BACKTEST to score. Distinct CBT*
+    -- prefixes keep the twins' names apart from the CAP* forecast models.
+    -- Note the 19c step caps in build_model: ESM may cover fewer than
+    -- holdout_days forecast days; CAPF_BACKTEST scores whatever is covered.
+    -- ----------------------------------------------------------------
+    PROCEDURE train_backtest(p_top_n        IN NUMBER DEFAULT 20,
+                             p_holdout_days IN NUMBER DEFAULT NULL) IS
+        v_hold   NUMBER := NVL(p_holdout_days, cfg_num('backtest_holdout_days', 28));
+        v_model  VARCHAR2(30);
+        v_q      CLOB;
+        v_key    VARCHAR2(4000);
+        v_cut    DATE;
+        v_min    NUMBER := cfg_num('min_train_days', 14);
+    BEGIN
+        -- tablespaces
+        FOR r IN (
+            SELECT dbid, con_dbid, tablespace_name, last_day, train_n
+            FROM   capf_tbspc_forecast
+            WHERE  train_n >= v_min
+            ORDER  BY CASE WHEN days_to_full IS NULL THEN 1 ELSE 0 END,
+                      days_to_full ASC,
+                      cur_used DESC
+            FETCH FIRST p_top_n ROWS ONLY
+        ) LOOP
+            v_key   := r.tablespace_name;
+            v_cut   := r.last_day - v_hold;
+            v_model := model_name_for('CBTT', r.dbid, r.con_dbid, v_key);
+            v_q := 'SELECT day_dt, used_bytes FROM capd_tbspc_daily'
+                || ' WHERE dbid=' || r.dbid
+                || ' AND con_dbid=' || r.con_dbid
+                || ' AND tablespace_name=''' || REPLACE(v_key, '''', '''''') || ''''
+                || ' AND day_dt <= DATE ''' || TO_CHAR(v_cut, 'YYYY-MM-DD') || '''';
+            build_model(v_model, 'TBSPC', r.dbid, r.con_dbid, v_key,
+                        'EXSM_HOLT', NULL, v_q, 'USED_BYTES', v_cut, 'BACKTEST');
+        END LOOP;
+
+        -- host busy%
+        FOR r IN (SELECT dbid, con_dbid, MAX(day_dt) last_day
+                  FROM capd_cpu_daily WHERE busy_pct IS NOT NULL
+                  GROUP BY dbid, con_dbid) LOOP
+            v_cut   := r.last_day - v_hold;
+            v_model := model_name_for('CBTC', r.dbid, r.con_dbid, 'BUSY_PCT');
+            v_q := 'SELECT day_dt, busy_pct FROM capd_cpu_daily'
+                || ' WHERE dbid=' || r.dbid || ' AND con_dbid=' || r.con_dbid
+                || ' AND busy_pct IS NOT NULL'
+                || ' AND day_dt <= DATE ''' || TO_CHAR(v_cut, 'YYYY-MM-DD') || '''';
+            build_model(v_model, 'CPU', r.dbid, r.con_dbid, 'BUSY_PCT',
+                        'EXSM_ADDWINTERS', 7, v_q, 'BUSY_PCT', v_cut, 'BACKTEST');
+        END LOOP;
+
+        -- DB CPU seconds/day
+        FOR r IN (SELECT dbid, con_dbid, MAX(day_dt) last_day
+                  FROM capd_dbtime_daily WHERE db_cpu_sec IS NOT NULL
+                  GROUP BY dbid, con_dbid) LOOP
+            v_cut   := r.last_day - v_hold;
+            v_model := model_name_for('CBTD', r.dbid, r.con_dbid, 'DB_CPU_SEC');
+            v_q := 'SELECT day_dt, db_cpu_sec FROM capd_dbtime_daily'
+                || ' WHERE dbid=' || r.dbid || ' AND con_dbid=' || r.con_dbid
+                || ' AND db_cpu_sec IS NOT NULL'
+                || ' AND day_dt <= DATE ''' || TO_CHAR(v_cut, 'YYYY-MM-DD') || '''';
+            build_model(v_model, 'DBCPU', r.dbid, r.con_dbid, 'DB_CPU_SEC',
+                        'EXSM_ADDWINTERS', 7, v_q, 'DB_CPU_SEC', v_cut, 'BACKTEST');
+        END LOOP;
+    END train_backtest;
 
     -- ----------------------------------------------------------------
     PROCEDURE drop_all IS

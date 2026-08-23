@@ -6,10 +6,13 @@
 -- tuning comes from CAP_CONFIG through a one-row `cfg` CTE.
 --
 --   CAPF_TBSPC_FORECAST -- per tablespace: bytes/day slope, R^2, +30/90/180/365
---                          day projections, days_to_full, recent-vs-full
+--                          day projections with 95% prediction bands
+--                          (proj_*_lo/hi), days_to_full with a worst/best-case
+--                          range (days_to_full_lo/hi, M9.1), recent-vs-full
 --                          acceleration ratio, and a quality grade.
 --   CAPF_CPU_TREND      -- per (host busy%, DB CPU sec) series: slope, R^2,
---                          projections, days_to_saturation, quality.
+--                          projections (+95% bands), days_to_saturation
+--                          (+lo/hi range), quality.
 --
 -- day_n is an integer day index off a fixed epoch (DATE '2020-01-01') rather
 -- than a raw date number, so slopes are in "per day" and are stable/auditable.
@@ -65,10 +68,54 @@ WITH cfg AS (
                REGR_SLOPE(dd.used_bytes, dd.day_n)     AS slope,
                REGR_INTERCEPT(dd.used_bytes, dd.day_n) AS icept,
                REGR_R2(dd.used_bytes, dd.day_n)        AS r2,
-               REGR_COUNT(dd.used_bytes, dd.day_n)     AS n
+               REGR_COUNT(dd.used_bytes, dd.day_n)     AS n,
+               -- Sums for the M9.1 prediction intervals (all hand-auditable):
+               REGR_SXX(dd.used_bytes, dd.day_n)       AS sxx,
+               REGR_SYY(dd.used_bytes, dd.day_n)       AS syy,
+               REGR_SXY(dd.used_bytes, dd.day_n)       AS sxy,
+               REGR_AVGX(dd.used_bytes, dd.day_n)      AS xbar
         FROM   dd CROSS JOIN cfg
         WHERE  dd.day_dt > dd.last_day - cfg.train_days
         GROUP  BY dd.dbid, dd.con_dbid, dd.tablespace_name
+     ),
+     -- ------------------------------------------------------------------
+     -- M9.1 prediction-interval arithmetic (95%), classic OLS closed forms:
+     --   SSE       = SYY - SXY^2/SXX          (residual sum of squares)
+     --   resid_se  = sqrt(SSE / (n-2))        (residual standard error)
+     --   tval      = 1.96 + 2.4/(n-2)         (t_{.975,df} approximation, good
+     --                                         to ~1% for df>=10; min_train_days
+     --                                         guarantees df >= 12 before a
+     --                                         forecast is trusted)
+     --   half_h    = tval * resid_se * sqrt(1 + 1/n + (x0-xbar)^2/SXX)
+     --               at x0 = last_day_n + h   (NEW-observation interval)
+     --   slope_ci  = tval * resid_se / sqrt(SXX)   (half-width of slope CI)
+     -- GREATEST(0,...) guards a tiny negative SSE from floating rounding.
+     -- A perfectly linear (or flat) series has SSE = 0, so its bands collapse
+     -- onto the point projection -- asserted by the FIX_LINEAR fixture.
+     -- ------------------------------------------------------------------
+     stat AS (
+        SELECT f.*,
+               CASE WHEN f.n > 2 AND f.sxx > 0
+                    THEN SQRT(GREATEST(0, f.syy - f.sxy * f.sxy / f.sxx) / (f.n - 2))
+               END AS resid_se,
+               CASE WHEN f.n > 2 THEN 1.96 + 2.4 / (f.n - 2) END AS tval
+        FROM   fit f
+     ),
+     -- CASE-guarded: resid_se is NULL exactly when sxx = 0 (single-day series)
+     -- or n <= 2, and the sxx divisions must not be evaluated then (ORA-01476).
+     band AS (
+        SELECT s.*,
+               CASE WHEN s.resid_se IS NOT NULL THEN
+                 s.tval * s.resid_se * SQRT(1 + 1/s.n + POWER(s.last_day_n +  30 - s.xbar, 2) / s.sxx) END AS half_30,
+               CASE WHEN s.resid_se IS NOT NULL THEN
+                 s.tval * s.resid_se * SQRT(1 + 1/s.n + POWER(s.last_day_n +  90 - s.xbar, 2) / s.sxx) END AS half_90,
+               CASE WHEN s.resid_se IS NOT NULL THEN
+                 s.tval * s.resid_se * SQRT(1 + 1/s.n + POWER(s.last_day_n + 180 - s.xbar, 2) / s.sxx) END AS half_180,
+               CASE WHEN s.resid_se IS NOT NULL THEN
+                 s.tval * s.resid_se * SQRT(1 + 1/s.n + POWER(s.last_day_n + 365 - s.xbar, 2) / s.sxx) END AS half_365,
+               CASE WHEN s.resid_se IS NOT NULL THEN
+                 s.tval * s.resid_se / SQRT(s.sxx) END                                                     AS slope_ci
+        FROM   stat s
      ),
      rfit AS (
         SELECT dd.dbid, dd.con_dbid, dd.tablespace_name,
@@ -105,9 +152,31 @@ SELECT f.dbid,
        f.icept + f.slope * (f.last_day_n + 90)            AS proj_90_bytes,
        f.icept + f.slope * (f.last_day_n + 180)           AS proj_180_bytes,
        f.icept + f.slope * (f.last_day_n + 365)           AS proj_365_bytes,
+       -- M9.1: 95% prediction bands on each projection ...
+       f.icept + f.slope * (f.last_day_n + 30)  - f.half_30   AS proj_30_lo,
+       f.icept + f.slope * (f.last_day_n + 30)  + f.half_30   AS proj_30_hi,
+       f.icept + f.slope * (f.last_day_n + 90)  - f.half_90   AS proj_90_lo,
+       f.icept + f.slope * (f.last_day_n + 90)  + f.half_90   AS proj_90_hi,
+       f.icept + f.slope * (f.last_day_n + 180) - f.half_180  AS proj_180_lo,
+       f.icept + f.slope * (f.last_day_n + 180) + f.half_180  AS proj_180_hi,
+       f.icept + f.slope * (f.last_day_n + 365) - f.half_365  AS proj_365_lo,
+       f.icept + f.slope * (f.last_day_n + 365) + f.half_365  AS proj_365_hi,
+       f.slope_ci                                             AS slope_ci_bpd,
        CASE WHEN f.slope > 0
             THEN FLOOR((c.limit_bytes - c.cur_used) / f.slope)
        END                                                AS days_to_full,
+       -- ... and a range on days_to_full from the slope's 95% CI.
+       -- lo = WORST case (fastest plausible growth, fills soonest).
+       -- hi = BEST case, NULL when the slow edge of the CI is <= 0
+       -- ("might never fill at the low end of plausible growth").
+       -- NB: no trailing semicolon in these comments -- SQL*Plus would
+       -- treat it as the statement terminator mid-view.
+       CASE WHEN f.slope > 0 AND f.slope_ci IS NOT NULL
+            THEN FLOOR((c.limit_bytes - c.cur_used) / (f.slope + f.slope_ci))
+       END                                                AS days_to_full_lo,
+       CASE WHEN f.slope > 0 AND f.slope_ci IS NOT NULL AND f.slope - f.slope_ci > 0
+            THEN FLOOR((c.limit_bytes - c.cur_used) / (f.slope - f.slope_ci))
+       END                                                AS days_to_full_hi,
        r.recent_slope                                     AS recent_slope_bpd,
        CASE WHEN f.slope <> 0
             THEN r.recent_slope / f.slope
@@ -117,7 +186,7 @@ SELECT f.dbid,
             WHEN f.r2 < cfg.r2_gate            THEN 'LOW_CONFIDENCE'
             ELSE 'OK'
        END                                                AS quality
-FROM   fit f
+FROM   band f
 JOIN   cur  c ON c.dbid = f.dbid AND c.con_dbid = f.con_dbid
              AND c.tablespace_name = f.tablespace_name
 LEFT   JOIN rfit r ON r.dbid = f.dbid AND r.con_dbid = f.con_dbid
@@ -164,10 +233,34 @@ WITH cfg AS (
                REGR_SLOPE(dd.val, dd.day_n)    AS slope,
                REGR_INTERCEPT(dd.val, dd.day_n) AS icept,
                REGR_R2(dd.val, dd.day_n)       AS r2,
-               REGR_COUNT(dd.val, dd.day_n)    AS n
+               REGR_COUNT(dd.val, dd.day_n)    AS n,
+               REGR_SXX(dd.val, dd.day_n)      AS sxx,
+               REGR_SYY(dd.val, dd.day_n)      AS syy,
+               REGR_SXY(dd.val, dd.day_n)      AS sxy,
+               REGR_AVGX(dd.val, dd.day_n)     AS xbar
         FROM   dd CROSS JOIN cfg
         WHERE  dd.day_dt > dd.last_day - cfg.train_days
         GROUP  BY dd.dbid, dd.con_dbid, dd.metric
+     ),
+     -- M9.1 interval arithmetic -- same closed forms as CAPF_TBSPC_FORECAST
+     -- (see the comment block there for the formulas and guards).
+     stat AS (
+        SELECT f.*,
+               CASE WHEN f.n > 2 AND f.sxx > 0
+                    THEN SQRT(GREATEST(0, f.syy - f.sxy * f.sxy / f.sxx) / (f.n - 2))
+               END AS resid_se,
+               CASE WHEN f.n > 2 THEN 1.96 + 2.4 / (f.n - 2) END AS tval
+        FROM   fit f
+     ),
+     band AS (
+        SELECT s.*,
+               CASE WHEN s.resid_se IS NOT NULL THEN
+                 s.tval * s.resid_se * SQRT(1 + 1/s.n + POWER(s.last_day_n + 30 - s.xbar, 2) / s.sxx) END AS half_30,
+               CASE WHEN s.resid_se IS NOT NULL THEN
+                 s.tval * s.resid_se * SQRT(1 + 1/s.n + POWER(s.last_day_n + 90 - s.xbar, 2) / s.sxx) END AS half_90,
+               CASE WHEN s.resid_se IS NOT NULL THEN
+                 s.tval * s.resid_se / SQRT(s.sxx) END                                                    AS slope_ci
+        FROM   stat s
      ),
      cur AS (
         SELECT dbid, con_dbid, metric,
@@ -184,16 +277,31 @@ SELECT f.dbid,
        f.r2,
        f.icept + f.slope * (f.last_day_n + 30)      AS proj_30,
        f.icept + f.slope * (f.last_day_n + 90)      AS proj_90,
+       -- M9.1: 95% prediction bands + days_to_sat range (same semantics as
+       -- CAPF_TBSPC_FORECAST: lo = worst case / soonest, hi = best case,
+       -- hi NULL when the slow edge of the slope CI is <= 0).
+       f.icept + f.slope * (f.last_day_n + 30) - f.half_30 AS proj_30_lo,
+       f.icept + f.slope * (f.last_day_n + 30) + f.half_30 AS proj_30_hi,
+       f.icept + f.slope * (f.last_day_n + 90) - f.half_90 AS proj_90_lo,
+       f.icept + f.slope * (f.last_day_n + 90) + f.half_90 AS proj_90_hi,
+       f.slope_ci                                   AS slope_ci_per_day,
        -- GREATEST(0,...): if current busy% already exceeds the saturation
        -- threshold, report 0 (saturated now) rather than a negative "days".
        CASE WHEN f.metric = 'BUSY_PCT' AND f.slope > 0
             THEN GREATEST(0, FLOOR((cfg.cpu_sat_pct - c.cur_val) / f.slope))
        END                                          AS days_to_sat,
+       CASE WHEN f.metric = 'BUSY_PCT' AND f.slope > 0 AND f.slope_ci IS NOT NULL
+            THEN GREATEST(0, FLOOR((cfg.cpu_sat_pct - c.cur_val) / (f.slope + f.slope_ci)))
+       END                                          AS days_to_sat_lo,
+       CASE WHEN f.metric = 'BUSY_PCT' AND f.slope > 0 AND f.slope_ci IS NOT NULL
+                 AND f.slope - f.slope_ci > 0
+            THEN GREATEST(0, FLOOR((cfg.cpu_sat_pct - c.cur_val) / (f.slope - f.slope_ci)))
+       END                                          AS days_to_sat_hi,
        CASE WHEN f.n  < cfg.min_train_days     THEN 'INSUFFICIENT_HISTORY'
             WHEN f.slope = 0 OR f.r2 IS NULL   THEN 'FLAT'
             WHEN f.r2 < cfg.r2_gate            THEN 'LOW_CONFIDENCE'
             ELSE 'OK'
        END                                          AS quality
-FROM   fit f
+FROM   band f
 JOIN   cur c ON c.dbid = f.dbid AND c.con_dbid = f.con_dbid AND c.metric = f.metric
 CROSS  JOIN cfg;

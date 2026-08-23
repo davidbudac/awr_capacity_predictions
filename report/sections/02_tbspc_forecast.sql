@@ -6,6 +6,8 @@ PROMPT
 PROMPT == 2. TABLESPACE FORECAST (GB): current / +30 / +90 / +180, plus ESM +30 ==
 PROMPT    QUALITY: OK | LOW_CONFIDENCE (R2<gate) | FLAT (no growth) | INSUFFICIENT_HISTORY.
 PROMPT    ESM (Tier 2) only reaches +30 on 19c (hard horizon cap); +90/180 are REGR.
+PROMPT    180_LO/180_HI: 95% prediction band on the +180 projection (widest printed
+PROMPT    horizon); the +30/+90/+365 bands are in CAPF_TBSPC_FORECAST (proj_*_lo/hi).
 
 COLUMN db_pdb          FORMAT A20         HEADING 'DB/PDB'
 COLUMN tablespace_name FORMAT A16         HEADING 'TABLESPACE'
@@ -14,6 +16,8 @@ COLUMN cur_gb          FORMAT 99990.00     HEADING 'CUR_GB'
 COLUMN p30             FORMAT 99990.00     HEADING '+30_GB'
 COLUMN p90             FORMAT 99990.00     HEADING '+90_GB'
 COLUMN p180            FORMAT 99990.00     HEADING '+180_GB'
+COLUMN p180_lo         FORMAT 99990.00     HEADING '180_LO'
+COLUMN p180_hi         FORMAT 99990.00     HEADING '180_HI'
 COLUMN r2              FORMAT 90.999        HEADING 'R2'
 COLUMN quality         FORMAT A20          HEADING 'QUALITY'
 COLUMN esm30           FORMAT 99990.00     HEADING 'ESM+30'
@@ -25,6 +29,8 @@ SELECT NVL(cn.db_pdb, TO_CHAR(f.con_dbid)) AS db_pdb,
        f.proj_30_bytes  / 1073741824 AS p30,
        f.proj_90_bytes  / 1073741824 AS p90,
        f.proj_180_bytes / 1073741824 AS p180,
+       f.proj_180_lo    / 1073741824 AS p180_lo,
+       f.proj_180_hi    / 1073741824 AS p180_hi,
        f.r2,
        f.quality,
        (SELECT c.value / 1073741824 FROM capf_compare c

@@ -65,10 +65,13 @@ every new number (see `test/run_test.sql`).
 
 ## M9 — Forecast quality (Tier 1)
 
-- [ ] **M9.1 Prediction intervals.** From `REGR_SXX/SXY/SYY` → residual SE →
-      95% bands on `+30/90/180/365` and a **range on `days_to_full`**
-      ("120 days, worst case 80"). Stays hand-auditable. Expose as
-      `proj_*_lo/hi`, `days_to_full_lo/hi`; report shows the range.
+- [x] **M9.1 Prediction intervals.** Done: `REGR_SXX/SXY/SYY/AVGX` → residual
+      SE → 95% bands (`proj_*_lo/hi`) + `days_to_full_lo/hi` /
+      `days_to_sat_lo/hi` ranges on both CAPF views (t approximated as
+      `1.96 + 2.4/df`, part of the contract). Reports show the range (1a/4
+      WORST/BEST columns, section 2 +180 band, HTML RANGE columns + worst-case
+      card line). `FIX_ZIGZAG` fixture asserts the closed forms; `FIX_LINEAR`
+      asserts bands collapse at zero residuals.
 - [ ] **M9.2 Robust slope.** Theil–Sen (pairwise slopes via self-join +
       `MEDIAN`, O(n²) ≈ 4k pairs at 90 days) alongside OLS; knob
       `slope_method = OLS | THEILSEN`. Fixture: `FIX_SPIKE`/a purge series must
@@ -76,11 +79,14 @@ every new number (see `test/run_test.sql`).
 - [ ] **M9.3 Change-point reset.** Restart the training window after the most
       recent large negative delta (LOW anomaly / `|delta| > x·MAD`) so a
       post-purge series isn't fit across the cliff. Knob `reset_on_shrink`.
-- [ ] **M9.4 Backtest / holdout accuracy.** `CAPF_BACKTEST`: fit on
-      `last_day - holdout_days`, compare to actual last `holdout_days` → MAPE /
-      bias per series per engine (REGR and ESM). Surface in section 6 as
-      "which engine was right last month"; use it to pick ESM model type
-      (M10.1).
+- [x] **M9.4 Backtest / holdout accuracy.** Done: `CAPF_BACKTEST` (in
+      `ddl/50_ml.sql`) scores each engine against the held-out last
+      `backtest_holdout_days` (knob, 28): REGR recomputed in pure SQL (always
+      available), ESM via `cap_forecast_ml.train_backtest` — purpose=BACKTEST
+      twin models (CBT* names, new `CAP_ML_MODEL.purpose` column, exposed via
+      `CAPF_ESM_BACKTEST`, never leak into `CAPF_ESM_FORECAST`/`CAPF_COMPARE`).
+      Section 6c (text + HTML) shows MAPE/bias per engine + BETTER verdict.
+      Feeds ESM model-type selection in M10.4.
 - [ ] **M9.5 Tablespace limit overrides / exclusions.** `CAP_TBSPC_OVERRIDE
       (dbid, con_dbid, tablespace_name, limit_bytes, exclude_flag)`: autoextend
       `maxsize` is not real headroom when the filesystem / ASM DG is smaller;

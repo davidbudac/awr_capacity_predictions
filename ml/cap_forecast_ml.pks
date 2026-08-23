@@ -27,7 +27,16 @@ CREATE OR REPLACE PACKAGE cap_forecast_ml AS
     -- Convenience: train_tablespaces(p_top_n) then train_cpu.
     PROCEDURE train_all(p_top_n IN NUMBER DEFAULT 20);
 
-    -- Drop every OML model this package created and clear CAP_ML_MODEL.
+    -- M9.4 backtest: train purpose=BACKTEST twins of the same series with the
+    -- last p_holdout_days (default: CAP_CONFIG backtest_holdout_days) of data
+    -- HELD OUT, so CAPF_BACKTEST can score their forecasts against the real
+    -- values. Separate model names (CBT* prefixes); never appear in
+    -- CAPF_ESM_FORECAST / CAPF_COMPARE. Re-run after data grows to refresh.
+    PROCEDURE train_backtest(p_top_n        IN NUMBER DEFAULT 20,
+                             p_holdout_days IN NUMBER DEFAULT NULL);
+
+    -- Drop every OML model this package created (both purposes) and clear
+    -- CAP_ML_MODEL.
     PROCEDURE drop_all;
 
     -- Pipe the per-day fit+forecast for one registered model out of its dynamic

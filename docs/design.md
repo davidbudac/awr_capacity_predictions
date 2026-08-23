@@ -94,6 +94,18 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   report highlights accelerating growth).
 - Projections are `intercept + slope·(last_day_n + h)` for h ∈ {30,90,180,365}.
 - `days_to_full = FLOOR((limit − cur_used) / slope)` when `slope > 0`.
+- **Prediction intervals (M9.1)**, classic OLS closed forms so everything stays
+  hand-auditable: `SSE = SYY − SXY²/SXX`, `resid_se = √(SSE/(n−2))`, and each
+  projection gets a 95% new-observation band `± t·resid_se·√(1 + 1/n +
+  (x₀−x̄)²/SXX)` (`proj_*_lo/hi`). The slope's CI half-width
+  (`t·resid_se/√SXX`, exposed as `slope_ci_bpd`) yields the
+  `days_to_full_lo/hi` range: lo = worst case (fastest plausible growth),
+  hi NULL = the slow edge of the CI is ≤ 0 ("might never fill"). There is no
+  t-distribution in SQL, so `t ≈ 1.96 + 2.4/df` — within ~1% for df ≥ 10, and
+  `min_train_days` guarantees df ≥ 12 before a forecast is trusted. The
+  approximation is part of the contract (the fixture installer computes
+  expectations with the same formula). A perfectly linear or flat series has
+  SSE = 0, so its bands collapse onto the point projection.
 - **Quality** (priority order): `INSUFFICIENT_HISTORY` (`REGR_COUNT <
   min_train_days`) → `FLAT` (`slope = 0`, or `R² IS NULL`) → `LOW_CONFIDENCE`
   (`R² < r2_gate`) → `OK`. Note the `FLAT` definition: Oracle's `REGR_R2`
@@ -150,6 +162,18 @@ no partitioned ESM) via `DBMS_DATA_MINING.CREATE_MODEL2(mining_function =>
   (stale `trained_through`) is never compared against a current-dated REGR
   point. Model names hash `(dbid | con_dbid | series_key)` so a cross-database
   `con_dbid` collision cannot overwrite another database's model.
+- **Backtest (M9.4)**: `train_backtest` builds `purpose = 'BACKTEST'` twin
+  models (CBT* name prefixes) whose training data stops
+  `backtest_holdout_days` (28) before each series' last day, so their forecast
+  rows land inside the holdout where real values exist. `CAPF_ESM_FORECAST` /
+  `CAPF_COMPARE` filter `purpose = 'FORECAST'`, so the twins never leak into
+  the report's forecasts. `CAPF_BACKTEST` then scores both engines over the
+  holdout — REGR is re-fit in pure SQL on the same truncated window (works
+  with zero models trained) — as `mape_pct` / `bias_pct` per series per
+  engine, surfaced as report section 6c ("which engine was right"). ESM may
+  cover fewer than holdout_days days (30-step cap + the rows/4 floor);
+  `n_days` records actual coverage. This feeds ESM model-type selection
+  (M10.4).
 
 ### Retraining (shipped commented-out for v1 minimalism)
 

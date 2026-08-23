@@ -1541,6 +1541,7 @@ BEGIN
            cur_used    / 1073741824 AS cur_gb,
            limit_bytes / 1073741824 AS lim_gb,
            days_to_full,
+           days_to_full_lo,
            r2
     FROM   capf_tbspc_forecast
     WHERE  quality = 'OK'
@@ -1559,6 +1560,12 @@ BEGIN
       || '">' || v_conf || '</span>'
       || info_icon('based on how closely past growth follows a straight line') || '</h4>');
     p('<div class="g-date">around ' || TO_CHAR(SYSDATE + r.days_to_full, 'FMMonth YYYY') || '</div>');
+    -- M9.1: worst-case (soonest plausible) fill date from the slope CI, shown
+    -- only when it is meaningfully sooner than the central estimate.
+    IF r.days_to_full_lo IS NOT NULL AND r.days_to_full_lo < r.days_to_full THEN
+      p('<div class="g-line">worst case: in ' || time_phrase(r.days_to_full_lo)
+        || ' (' || TO_CHAR(SYSDATE + r.days_to_full_lo, 'FMMonth YYYY') || ')</div>');
+    END IF;
     IF r.lim_gb IS NOT NULL THEN
       p('<div class="g-line">using ' || TO_CHAR(r.cur_gb, 'FM999999990.0')
         || ' of ' || TO_CHAR(r.lim_gb, 'FM999999990.0') || ' GB today</div>');
@@ -1676,6 +1683,8 @@ BEGIN
            pct_used,
            slope_bpd   / 1024 / 1024        AS slope_mb,
            days_to_full,
+           days_to_full_lo,
+           days_to_full_hi,
            CASE WHEN days_to_full <= dtf_crit THEN 'CRIT'
                 WHEN days_to_full <= dtf_warn THEN 'WARN'
                 ELSE 'ok'  END              AS sev,
@@ -1693,6 +1702,7 @@ BEGIN
         || '<th>FILL</th>'
         || '<th class="num">MB/DAY' || info_icon('the average megabytes this tablespace grows per day')
         || '</th><th class="num">DAYS_FULL' || info_icon('estimated days until it reaches its allocated limit at the current rate')
+        || '</th><th class="num">RANGE' || info_icon('worst-to-best case days-to-full from the statistical uncertainty of the growth rate; never = it may not fill at the slow end')
         || '</th><th>SEV' || info_icon('how urgent this is: CRIT is within the critical window, WARN within the warning window')
         || '</th><th>QUALITY' || info_icon('reliability of the estimate -- only OK is a dependable forecast')
         || '</th><th class="num">ACCEL' || info_icon('above 1.5 means growth is speeding up') || '</th>'
@@ -1705,6 +1715,10 @@ BEGIN
                         CASE r.sev WHEN 'CRIT' THEN 'crit' WHEN 'WARN' THEN 'warn' ELSE '' END) || '</td>'
       || '<td class="num">' || nz(r.slope_mb, 'FM9999990.000') || '</td>'
       || '<td class="num">' || nz(r.days_to_full, 'FM99999990') || '</td>'
+      || '<td class="num">'
+      || CASE WHEN r.days_to_full_lo IS NULL THEN '&ndash;'
+              ELSE TO_CHAR(r.days_to_full_lo, 'FM99999990') || '&ndash;'
+                   || NVL(TO_CHAR(r.days_to_full_hi, 'FM99999990'), 'never') END || '</td>'
       || '<td>' || sev_pill(r.sev) || '</td>'
       || '<td>' || quality_pill(r.quality) || '</td>'
       || '<td class="num">' || nz(r.accel, 'FM990.00') || '</td></tr>');
@@ -1929,6 +1943,8 @@ BEGIN
            f.proj_30_bytes  / 1073741824 AS p30,
            f.proj_90_bytes  / 1073741824 AS p90,
            f.proj_180_bytes / 1073741824 AS p180,
+           f.proj_180_lo    / 1073741824 AS p180_lo,
+           f.proj_180_hi    / 1073741824 AS p180_hi,
            f.r2,
            f.quality,
            (SELECT c.value / 1073741824 FROM capf_compare c
@@ -1944,7 +1960,9 @@ BEGIN
         || '<th class="num">TRAIN_N' || info_icon('how many days of history the estimate is based on -- more is better')
         || '</th><th class="num">CUR_GB</th>'
         || '<th class="num">+30_GB</th><th class="num">+90_GB</th><th class="num">+180_GB</th>'
-        || '<th class="num">R2' || info_icon('how closely growth follows a straight line: 1.00 = perfectly steady, near 0 = erratic')
+        || '<th class="num">180_LO</th><th class="num">180_HI'
+        || info_icon('95% prediction band on the +180-day projection; the actual value should land between LO and HI 95 times out of 100 if growth stays like the recent past')
+        || '</th><th class="num">R2' || info_icon('how closely growth follows a straight line: 1.00 = perfectly steady, near 0 = erratic')
         || '</th><th>QUALITY' || info_icon('our own reliability grade for this estimate -- hover the colored labels below')
         || '</th><th class="num">ESM+30' || info_icon('a second, machine-learning estimate of the size 30 days from now -- usually the most accurate short-term number when present')
         || '</th></tr></thead><tbody>');
@@ -1956,6 +1974,8 @@ BEGIN
       || '<td class="num">' || nz(r.p30) || '</td>'
       || '<td class="num">' || nz(r.p90) || '</td>'
       || '<td class="num">' || nz(r.p180) || '</td>'
+      || '<td class="num">' || nz(r.p180_lo) || '</td>'
+      || '<td class="num">' || nz(r.p180_hi) || '</td>'
       || '<td class="num">' || nz(r.r2, 'FM90.000') || '</td>'
       || '<td>' || quality_pill(r.quality) || '</td>'
       || '<td class="num">' || nz(r.esm30) || '</td></tr>');
@@ -2181,6 +2201,8 @@ BEGIN
            slope_per_day  AS slope_day,
            r2,
            days_to_sat    AS days_sat,
+           days_to_sat_lo,
+           days_to_sat_hi,
            quality
     FROM   capf_cpu_trend
     ORDER  BY con_dbid, metric
@@ -2191,6 +2213,7 @@ BEGIN
         || '<th class="num">SLOPE/DAY' || info_icon('how much this metric moves per day on average')
         || '</th><th class="num">R2</th>'
         || '<th class="num">DAYS_SAT' || info_icon('estimated days until host CPU reaches the saturation threshold')
+        || '</th><th class="num">RANGE' || info_icon('worst-to-best case days-to-saturation from the statistical uncertainty of the trend; never = it may not saturate at the slow end')
         || '</th><th>QUALITY</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
@@ -2205,6 +2228,10 @@ BEGIN
       || '<td class="num">' || nz(r.r2, 'FM90.000') || '</td>'
       || '<td class="num' || (CASE WHEN r.days_sat IS NOT NULL AND r.days_sat <= dtf_warn THEN ' sev-warn' END)
          || '">' || nz(r.days_sat, 'FM99999990') || '</td>'
+      || '<td class="num">'
+      || CASE WHEN r.days_to_sat_lo IS NULL THEN '&ndash;'
+              ELSE TO_CHAR(r.days_to_sat_lo, 'FM99999990') || '&ndash;'
+                   || NVL(TO_CHAR(r.days_to_sat_hi, 'FM99999990'), 'never') END || '</td>'
       || '<td>' || quality_pill(r.quality) || '</td></tr>');
   END LOOP;
   IF any_rows THEN
@@ -2344,6 +2371,51 @@ BEGIN
       p('</tbody></table>');
     ELSE
       p('<div class="empty-note">No CPU ESM/REGR comparison rows found.</div>');
+    END IF;
+
+    ------------------------------------------------------------------
+    -- 6c. Backtest (M9.4): which engine was right over the held-out
+    -- window. Mirrors report/sections/06_esm_compare.sql exactly.
+    ------------------------------------------------------------------
+    p('<h3 style="font-size:13px;margin:16px 0 6px">6c. Backtest &mdash; which engine was right '
+      || info_icon('each engine forecast the recent held-out window from data before it; MAPE is the average percent miss vs what actually happened, BIAS above zero means it over-forecast. ESM column fills after EXEC cap_forecast_ml.train_backtest')
+      || '</h3>');
+    any_rows := FALSE;
+    FOR r IN (
+      SELECT f.dbid, f.con_dbid, f.series_kind, f.series_key,
+             TO_CHAR(MIN(f.cutoff_day), 'YYYY-MM-DD')             AS cutoff_day,
+             MAX(CASE WHEN f.engine = 'REGR' THEN f.mape_pct END) AS regr_mape,
+             MAX(CASE WHEN f.engine = 'REGR' THEN f.bias_pct END) AS regr_bias,
+             MAX(CASE WHEN f.engine = 'ESM'  THEN f.mape_pct END) AS esm_mape,
+             MAX(CASE WHEN f.engine = 'ESM'  THEN f.bias_pct END) AS esm_bias
+      FROM   capf_backtest f
+      GROUP  BY f.dbid, f.con_dbid, f.series_kind, f.series_key
+      ORDER  BY f.con_dbid, f.series_kind, f.series_key
+    ) LOOP
+      IF NOT any_rows THEN
+        p('<table class="tbl"><thead><tr>'
+          || '<th>DB/PDB</th><th>KIND</th><th>SERIES</th><th>CUTOFF</th>'
+          || '<th class="num">REGR_MAPE%</th><th class="num">REGR_BIAS%</th>'
+          || '<th class="num">ESM_MAPE%</th><th class="num">ESM_BIAS%</th>'
+          || '<th>BETTER</th></tr></thead><tbody>');
+        any_rows := TRUE;
+      END IF;
+      p('<tr><td>' || esc(db_label(r.dbid, r.con_dbid)) || '</td>'
+        || '<td>' || esc(r.series_kind) || '</td><td>' || esc(r.series_key) || '</td>'
+        || '<td>' || r.cutoff_day || '</td>'
+        || '<td class="num">' || nz(r.regr_mape, 'FM99990.00') || '</td>'
+        || '<td class="num">' || nz(r.regr_bias, 'FMS99990.00') || '</td>'
+        || '<td class="num">' || nz(r.esm_mape, 'FM99990.00') || '</td>'
+        || '<td class="num">' || nz(r.esm_bias, 'FMS99990.00') || '</td>'
+        || '<td>' || CASE WHEN r.regr_mape IS NULL OR r.esm_mape IS NULL THEN '&ndash;'
+                          WHEN r.esm_mape < r.regr_mape THEN '<span class="pill pill-ok">ESM</span>'
+                          ELSE '<span class="pill pill-ok">REGR</span>' END || '</td></tr>');
+    END LOOP;
+    IF any_rows THEN
+      p('</tbody></table>');
+    ELSE
+      p('<div class="empty-note">No backtest rows yet (needs enough history before the holdout window; '
+        || 'ESM rows appear after <code>EXEC cap_forecast_ml.train_backtest</code>).</div>');
     END IF;
   END IF;
   p('</section>');

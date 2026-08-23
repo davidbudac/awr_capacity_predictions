@@ -19,6 +19,7 @@ DECLARE
     d30     DATE;
     v_exp   NUMBER;
     v_pred  NUMBER;
+    v_n     PLS_INTEGER;
 
     PROCEDURE pass(p VARCHAR2) IS BEGIN DBMS_OUTPUT.PUT_LINE('  PASS  ' || p); END;
     PROCEDURE fail(p VARCHAR2) IS BEGIN g_fail := g_fail + 1; DBMS_OUTPUT.PUT_LINE('* FAIL  ' || p); END;
@@ -47,6 +48,31 @@ BEGIN
     EXCEPTION
         WHEN NO_DATA_FOUND THEN
             fail('FIX_LINEAR ESM +30d row missing (day ' || TO_CHAR(d30,'YYYY-MM-DD') || ')');
+    END;
+
+    DBMS_OUTPUT.PUT_LINE('=== M9.4 ESM backtest (train_backtest + CAPF_BACKTEST) ===');
+    cap_forecast_ml.train_backtest(20);
+
+    -- Backtest twins must never leak into the forecast surface.
+    SELECT COUNT(*) INTO v_n FROM capf_esm_forecast WHERE model_name LIKE 'CBT%';
+    IF v_n = 0 THEN pass('no BACKTEST model leaks into CAPF_ESM_FORECAST');
+    ELSE fail('BACKTEST models visible in CAPF_ESM_FORECAST: ' || v_n); END IF;
+
+    -- Holt on a perfectly linear series held out 28 days: near-exact forecast.
+    -- n_days may be < 28 (19c 30-step cap and the rows/4 conservative floor).
+    BEGIN
+        SELECT n_days, mape_pct INTO v_n, v_pred
+        FROM   capf_backtest
+        WHERE  series_key = 'FIX_LINEAR' AND engine = 'ESM';
+        IF v_n >= 1 AND v_pred < 1 THEN
+            pass('FIX_LINEAR ESM backtest MAPE < 1% over ' || v_n
+                 || ' held-out day(s) (mape=' || ROUND(v_pred, 4) || '%)');
+        ELSE
+            fail('FIX_LINEAR ESM backtest: n_days=' || v_n || ' mape=' || v_pred);
+        END IF;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN
+            fail('FIX_LINEAR ESM backtest row missing from CAPF_BACKTEST');
     END;
 
     DBMS_OUTPUT.PUT_LINE('----------------------------------------');

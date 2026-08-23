@@ -24,7 +24,7 @@ for making changes safely.
 `install.sql` includes, in order: `ddl/00_drop` → `05_config` → the seam
 (`10`/`11`/`12` by `seam_mode`) → `20_daily` → `30_forecast` → `40_anomaly` →
 `45_report_views` (CAPR_CONTAINER + CAPR_ALERTS) → `50_ml` (which pulls
-`ml/cap_forecast_ml.pks/.pkb` and builds the ESM views).
+`ml/cap_forecast_ml.pks/.pkb` and builds the ESM views + CAPF_BACKTEST).
 Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomaly →
 `CAPR_` integration (display labels + pollable alerts).
 
@@ -36,6 +36,11 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
   line. Never end a PROMPT with a hyphen (that killed the report header once).
 - **`&&seam_mode` prompts if undefined** — non-interactive callers must
   `DEFINE seam_mode` up front or a heredoc line gets consumed as the answer.
+- **A `--` comment line ending in `;` terminates the statement buffer** in
+  plain-SQL context (SQL*Plus doesn't parse comments when scanning for the
+  terminator), truncating a CREATE VIEW mid-statement with a baffling
+  ORA-00936 pointing at the comment. Safe inside PL/SQL blocks (`/`
+  terminates those). Bit us in ddl/30 (M9.1).
 - **`@@` includes resolve relative to the OUTERMOST caller** on 19c, so run
   `install.sql` / `report/report.sql` from the repo root and use full paths
   (`@@ddl/...`, `@@report/sections/...`).
@@ -57,6 +62,14 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
 - `DBA_HIST_PDB_INSTANCE` (19c) carries `CON_DBID` + `PDB_NAME` and includes a
   `CDB$ROOT` row whose `con_dbid` equals the CDB dbid — `CAPV_CONTAINER` leans
   on that; the `DBA_HIST_DATABASE_INSTANCE` branch only matters for non-CDBs.
+- M9.1 intervals use `t ~ 1.96 + 2.4/df` (no t-distribution in SQL; good to
+  ~1% for df>=10, and min_train_days guarantees df>=12). The FIXTURE INSTALLER
+  computes expected bands with the same formula — it is part of the contract;
+  change both together or FIX_ZIGZAG assertions break.
+- Backtest ESM twins (`train_backtest`) share the 19c 30-step cap AND the
+  `FLOOR(rows/4)` floor, so they may cover fewer than holdout_days forecast
+  days (fixture: 93 rows -> 23 of 28). `CAPF_BACKTEST.n_days` reports actual
+  coverage; don't assert full-holdout coverage for ESM.
 
 ## Testing on a 19c test database
 

@@ -13,6 +13,8 @@ PROMPT
 PROMPT == 1a. TABLESPACES BY DAYS-TO-FULL (any quality; top &top_n) ==
 PROMPT     SEV: CRIT<=&dtf_crit days, WARN<=&dtf_warn days. ACCEL>1.5 = growth accelerating.
 PROMPT     Trust the estimate per QUALITY (only OK is reliable).
+PROMPT     WORST/BEST: days-to-full range from the 95% CI on the growth slope
+PROMPT     (WORST = plausibly fastest fill; BEST empty = might never fill).
 
 COLUMN db_pdb          FORMAT A20           HEADING 'DB/PDB'
 COLUMN tablespace_name FORMAT A18           HEADING 'TABLESPACE'
@@ -21,6 +23,8 @@ COLUMN cur_gb          FORMAT 99990.00      HEADING 'CUR_GB'
 COLUMN limit_gb        FORMAT 99990.00      HEADING 'LIMIT_GB'
 COLUMN slope_mb        FORMAT 999990.000    HEADING 'MB/DAY'
 COLUMN days_to_full    FORMAT 99999990      HEADING 'DAYS_FULL'
+COLUMN dtf_worst       FORMAT 99999990      HEADING 'WORST'
+COLUMN dtf_best        FORMAT 99999990      HEADING 'BEST'
 COLUMN sev             FORMAT A4            HEADING 'SEV'
 COLUMN quality         FORMAT A20           HEADING 'QUALITY'
 COLUMN accel           FORMAT 990.00        HEADING 'ACCEL'
@@ -32,6 +36,8 @@ SELECT NVL(c.db_pdb, TO_CHAR(f.con_dbid)) AS db_pdb,
        f.limit_bytes / 1024 / 1024 / 1024 AS limit_gb,
        f.slope_bpd   / 1024 / 1024        AS slope_mb,
        f.days_to_full,
+       f.days_to_full_lo                  AS dtf_worst,
+       f.days_to_full_hi                  AS dtf_best,
        CASE WHEN f.days_to_full <= &dtf_crit THEN 'CRIT'
             WHEN f.days_to_full <= &dtf_warn THEN 'WARN'
             ELSE 'ok'  END                AS sev,

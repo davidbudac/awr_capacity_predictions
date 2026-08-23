@@ -25,6 +25,8 @@ DECLARE
 
     v_n     PLS_INTEGER;
     v_num   NUMBER;
+    v_num2  NUMBER;
+    v_num3  NUMBER;
     v_str   VARCHAR2(40);
     v_r2    NUMBER;
 
@@ -132,6 +134,55 @@ BEGIN
     chk_int('FILLING TBSPC_FULL CRIT alert raised', v_n, 1);
     SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'TBSPC_FULL';
     chk_int('TBSPC_FULL alerts only for FIX_FILLING', v_n, 1);
+
+    DBMS_OUTPUT.PUT_LINE('=== M9.1 intervals: FIX_LINEAR (zero residuals -> bands collapse) ===');
+    SELECT proj_30_bytes, proj_30_lo, proj_30_hi
+      INTO v_num, v_num2, v_num3
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
+    chk_close('LINEAR proj_30_lo = proj_30', v_num2, v_num, 0.000001);
+    chk_close('LINEAR proj_30_hi = proj_30', v_num3, v_num, 0.000001);
+    SELECT days_to_full_lo, days_to_full_hi INTO v_num, v_num2
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
+    -- headroom/slope is EXACTLY 4990.0 here, so a rounding epsilon on the
+    -- collapsed slope CI may legitimately FLOOR the worst case to 4989.
+    chk_true('LINEAR days_to_full_lo in [4989,4990] (got ' || v_num || ')',
+             v_num BETWEEN n_dtf - 1 AND n_dtf);
+    chk_true('LINEAR days_to_full_hi in [4990,4991] (got ' || v_num2 || ')',
+             v_num2 BETWEEN n_dtf AND n_dtf + 1);
+
+    DBMS_OUTPUT.PUT_LINE('=== M9.1 intervals: FIX_ZIGZAG (closed-form residuals) ===');
+    SELECT slope_bpd, proj_30_bytes, quality INTO v_num, v_num2, v_str
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_ZIGZAG';
+    chk_close('ZIGZAG slope_bpd',       v_num,  meta_n('ZZ_SLOPE'),  0.000001);
+    chk_close('ZIGZAG proj_30_bytes',   v_num2, meta_n('ZZ_P30'),    0.000001);
+    chk_str  ('ZIGZAG quality', v_str, 'OK');
+    SELECT proj_30_lo, proj_30_hi INTO v_num, v_num2
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_ZIGZAG';
+    chk_close('ZIGZAG proj_30_lo',      v_num,  meta_n('ZZ_P30_LO'), 0.000001);
+    chk_close('ZIGZAG proj_30_hi',      v_num2, meta_n('ZZ_P30_HI'), 0.000001);
+    SELECT days_to_full, days_to_full_lo, days_to_full_hi INTO v_num, v_num2, v_num3
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_ZIGZAG';
+    chk_int('ZIGZAG days_to_full',    v_num,  meta_n('ZZ_DTF'));
+    chk_int('ZIGZAG days_to_full_lo', v_num2, meta_n('ZZ_DTF_LO'));
+    chk_int('ZIGZAG days_to_full_hi', v_num3, meta_n('ZZ_DTF_HI'));
+    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
+      WHERE tablespace_name = 'FIX_ZIGZAG' AND anomaly_flag IS NOT NULL;
+    chk_int('ZIGZAG anomaly count', v_n, 0);
+
+    DBMS_OUTPUT.PUT_LINE('=== M9.4 backtest (REGR engine, pure SQL) ===');
+    SELECT n_train, n_days, mape_pct, bias_pct INTO v_n, v_num, v_num2, v_num3
+      FROM capf_backtest
+      WHERE series_key = 'FIX_LINEAR' AND engine = 'REGR';
+    chk_int ('LINEAR backtest n_train', v_n, 90);
+    chk_int ('LINEAR backtest n_days', v_num, 28);
+    chk_true('LINEAR backtest MAPE ~ 0 (got ' || v_num2 || ')', ABS(v_num2) < 0.000001);
+    chk_true('LINEAR backtest bias ~ 0 (got ' || v_num3 || ')', ABS(v_num3) < 0.000001);
+    SELECT n_days, mape_pct, bias_pct INTO v_n, v_num, v_num2
+      FROM capf_backtest
+      WHERE series_key = 'FIX_ZIGZAG' AND engine = 'REGR';
+    chk_int  ('ZIGZAG backtest n_days', v_n, 28);
+    chk_close('ZIGZAG backtest MAPE%', v_num,  meta_n('ZZ_BT_MAPE'), 0.0001);
+    chk_close('ZIGZAG backtest BIAS%', v_num2, meta_n('ZZ_BT_BIAS'), 0.0001);
 
     DBMS_OUTPUT.PUT_LINE('=== CAPR_CONTAINER labels (M7.2) ===');
     SELECT db_pdb INTO v_str FROM capr_container

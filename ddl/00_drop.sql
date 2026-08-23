@@ -23,7 +23,9 @@ DECLARE
     v_views name_list := name_list(
         'CAPR_ALERTS',
         'CAPR_CONTAINER',
+        'CAPF_BACKTEST',
         'CAPF_COMPARE',
+        'CAPF_ESM_BACKTEST',
         'CAPF_ESM_FORECAST',
         'CAPA_CPU_ANOM',
         'CAPA_TBSPC_ANOM',
