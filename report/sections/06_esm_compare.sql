@@ -12,7 +12,7 @@ PROMPT    +90/180/365 are REGR-only.
 PROMPT
 PROMPT  6a. Tablespaces (GB):
 
-COLUMN con_dbid   FORMAT 99999999999 HEADING 'CON_DBID'
+COLUMN db_pdb     FORMAT A20          HEADING 'DB/PDB'
 COLUMN series_key FORMAT A16          HEADING 'TABLESPACE'
 COLUMN h          FORMAT 9990          HEADING 'HORIZON'
 COLUMN regr       FORMAT 99990.00      HEADING 'REGR_GB'
@@ -20,15 +20,18 @@ COLUMN esm        FORMAT 99990.00      HEADING 'ESM_GB'
 COLUMN esm_lo     FORMAT 99990.00      HEADING 'ESM_LO'
 COLUMN esm_hi     FORMAT 99990.00      HEADING 'ESM_HI'
 
-SELECT con_dbid, series_key, horizon_days AS h,
-       MAX(CASE WHEN engine='REGR' THEN value END)       / 1073741824 AS regr,
-       MAX(CASE WHEN engine='ESM'  THEN value END)       / 1073741824 AS esm,
-       MAX(CASE WHEN engine='ESM'  THEN lower_bound END) / 1073741824 AS esm_lo,
-       MAX(CASE WHEN engine='ESM'  THEN upper_bound END) / 1073741824 AS esm_hi
-FROM   capf_compare
-WHERE  series_kind = 'TBSPC'
-GROUP  BY dbid, con_dbid, series_key, horizon_days
-ORDER  BY con_dbid, series_key, horizon_days;
+SELECT NVL(MAX(cn.db_pdb), TO_CHAR(f.con_dbid)) AS db_pdb,
+       f.series_key, f.horizon_days AS h,
+       MAX(CASE WHEN f.engine='REGR' THEN f.value END)       / 1073741824 AS regr,
+       MAX(CASE WHEN f.engine='ESM'  THEN f.value END)       / 1073741824 AS esm,
+       MAX(CASE WHEN f.engine='ESM'  THEN f.lower_bound END) / 1073741824 AS esm_lo,
+       MAX(CASE WHEN f.engine='ESM'  THEN f.upper_bound END) / 1073741824 AS esm_hi
+FROM   capf_compare f
+LEFT   JOIN capr_container cn
+  ON   cn.dbid = f.dbid AND cn.con_dbid = f.con_dbid
+WHERE  f.series_kind = 'TBSPC'
+GROUP  BY f.dbid, f.con_dbid, f.series_key, f.horizon_days
+ORDER  BY f.con_dbid, f.series_key, f.horizon_days;
 
 PROMPT
 PROMPT  6b. CPU (busy% / DB CPU sec):
@@ -39,12 +42,15 @@ COLUMN esm        FORMAT 99999990.00  HEADING 'ESM'
 COLUMN esm_lo     FORMAT 99999990.00  HEADING 'ESM_LO'
 COLUMN esm_hi     FORMAT 99999990.00  HEADING 'ESM_HI'
 
-SELECT con_dbid, series_key, horizon_days AS h,
-       MAX(CASE WHEN engine='REGR' THEN value END)       AS regr,
-       MAX(CASE WHEN engine='ESM'  THEN value END)       AS esm,
-       MAX(CASE WHEN engine='ESM'  THEN lower_bound END) AS esm_lo,
-       MAX(CASE WHEN engine='ESM'  THEN upper_bound END) AS esm_hi
-FROM   capf_compare
-WHERE  series_kind = 'CPU'
-GROUP  BY dbid, con_dbid, series_key, horizon_days
-ORDER  BY con_dbid, series_key, horizon_days;
+SELECT NVL(MAX(cn.db_pdb), TO_CHAR(f.con_dbid)) AS db_pdb,
+       f.series_key, f.horizon_days AS h,
+       MAX(CASE WHEN f.engine='REGR' THEN f.value END)       AS regr,
+       MAX(CASE WHEN f.engine='ESM'  THEN f.value END)       AS esm,
+       MAX(CASE WHEN f.engine='ESM'  THEN f.lower_bound END) AS esm_lo,
+       MAX(CASE WHEN f.engine='ESM'  THEN f.upper_bound END) AS esm_hi
+FROM   capf_compare f
+LEFT   JOIN capr_container cn
+  ON   cn.dbid = f.dbid AND cn.con_dbid = f.con_dbid
+WHERE  f.series_kind = 'CPU'
+GROUP  BY f.dbid, f.con_dbid, f.series_key, f.horizon_days
+ORDER  BY f.con_dbid, f.series_key, f.horizon_days;

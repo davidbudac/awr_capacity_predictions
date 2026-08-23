@@ -43,7 +43,7 @@ USING (
     UNION ALL SELECT 'r2_gate',              0.60,      'REGR_R2 below this marks a forecast LOW_CONFIDENCE.'                                                   FROM dual
     UNION ALL SELECT 'mad_k',                3,         'MAD multiplier k: |value-median| > k*MAD_sigma flags an anomaly.'                                     FROM dual
     UNION ALL SELECT 'mad_window_days',      28,        'Trailing window length for the rolling median/MAD baseline (days).'                                   FROM dual
-    UNION ALL SELECT 'anomaly_report_days',  14,        'How many trailing days of anomalies the report prints.'                                               FROM dual
+    UNION ALL SELECT 'anomaly_report_days',  14,        'Trailing-days window of anomalies CAPR_ALERTS raises (the report''s own window is the anomaly_days DEFINE).' FROM dual
     UNION ALL SELECT 'cpu_sat_pct',          80,        'CPU busy percent treated as saturated for days-to-saturation.'                                        FROM dual
     UNION ALL SELECT 'abs_floor_bytes',      104857600, 'Absolute floor (100 MiB) for tablespace-delta anomaly threshold; guards flat baselines (MAD=0).'      FROM dual
     UNION ALL SELECT 'dow_weeks',            8,         'Number of prior same-weekday observations forming the CPU seasonal baseline.'                          FROM dual
@@ -53,6 +53,8 @@ USING (
     UNION ALL SELECT 'cpu_min_mad_pct',      3,         'Floor (whole percent) on CPU MAD_sigma so an exactly-flat seasonal baseline still flags a real jump.' FROM dual
     UNION ALL SELECT 'cpu_min_dow_hist',     3,         'Minimum prior same-weekday observations before a CPU anomaly can flag.'                                FROM dual
     UNION ALL SELECT 'esm_prediction_step',  30,        'OML ESM forecast horizon in steps (days). Oracle 19c hard-caps this at 30.'                            FROM dual
+    UNION ALL SELECT 'nearfull_warn_pct',    90,        'Percent-used at/above which a tablespace raises a near-full-now WARN (any forecast quality).'          FROM dual
+    UNION ALL SELECT 'nearfull_crit_pct',    97,        'Percent-used at/above which a tablespace raises a near-full-now CRIT (any forecast quality).'          FROM dual
 ) s
 ON (c.cfg_name = s.cfg_name)
 WHEN NOT MATCHED THEN

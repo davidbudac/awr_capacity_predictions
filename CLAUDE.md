@@ -23,8 +23,10 @@ for making changes safely.
 
 `install.sql` includes, in order: `ddl/00_drop` → `05_config` → the seam
 (`10`/`11`/`12` by `seam_mode`) → `20_daily` → `30_forecast` → `40_anomaly` →
-`50_ml` (which pulls `ml/cap_forecast_ml.pks/.pkb` and builds the ESM views).
-Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomaly.
+`45_report_views` (CAPR_CONTAINER + CAPR_ALERTS) → `50_ml` (which pulls
+`ml/cap_forecast_ml.pks/.pkb` and builds the ESM views).
+Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomaly →
+`CAPR_` integration (display labels + pollable alerts).
 
 ## SQL\*Plus gotchas that already bit us
 
@@ -52,6 +54,9 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
   PREDICTION, LOWER, UPPER`. `get_forecast` reads the last five.
 - Host CPU (OSSTAT) records under the CDB `con_dbid`; time-model DB CPU is
   per-container. `db_cpu_per_core` divides by summed OSSTAT core counts.
+- `DBA_HIST_PDB_INSTANCE` (19c) carries `CON_DBID` + `PDB_NAME` and includes a
+  `CDB$ROOT` row whose `con_dbid` equals the CDB dbid — `CAPV_CONTAINER` leans
+  on that; the `DBA_HIST_DATABASE_INSTANCE` branch only matters for non-CDBs.
 
 ## Testing on a 19c test database
 

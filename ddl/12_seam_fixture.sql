@@ -44,3 +44,7 @@ FROM   cap_fixture_osstat;
 CREATE OR REPLACE VIEW capv_time_model AS
 SELECT dbid, con_dbid, instance_number, snap_id, stat_name, value
 FROM   cap_fixture_time_model;
+
+CREATE OR REPLACE VIEW capv_container AS
+SELECT dbid, con_dbid, db_name, con_name
+FROM   cap_fixture_container;

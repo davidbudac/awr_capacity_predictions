@@ -46,6 +46,8 @@ COLUMN cap_path NEW_VALUE cap_path NOPRINT
 COLUMN dtf_warn NEW_VALUE dtf_warn NOPRINT
 COLUMN dtf_crit NEW_VALUE dtf_crit NOPRINT
 COLUMN cpu_sat  NEW_VALUE cpu_sat  NOPRINT
+COLUMN nf_warn  NEW_VALUE nf_warn  NOPRINT
+COLUMN nf_crit  NEW_VALUE nf_crit  NOPRINT
 COLUMN esm_ok   NEW_VALUE esm_ok   NOPRINT
 COLUMN esm_file NEW_VALUE esm_file NOPRINT
 
@@ -62,10 +64,12 @@ SELECT SYS_CONTEXT('USERENV','DB_NAME')
          || TO_CHAR(SYSDATE,'YYYYMMDDHH24MI') || '.txt'                       AS cap_path
 FROM   dual;
 
-SELECT (SELECT cfg_value FROM cap_config WHERE cfg_name='dtf_warn')    AS dtf_warn,
-       (SELECT cfg_value FROM cap_config WHERE cfg_name='dtf_crit')    AS dtf_crit,
-       (SELECT cfg_value FROM cap_config WHERE cfg_name='cpu_sat_pct') AS cpu_sat,
-       (SELECT COUNT(*)  FROM cap_ml_model WHERE status='OK')          AS esm_ok
+SELECT (SELECT cfg_value FROM cap_config WHERE cfg_name='dtf_warn')          AS dtf_warn,
+       (SELECT cfg_value FROM cap_config WHERE cfg_name='dtf_crit')          AS dtf_crit,
+       (SELECT cfg_value FROM cap_config WHERE cfg_name='cpu_sat_pct')       AS cpu_sat,
+       (SELECT cfg_value FROM cap_config WHERE cfg_name='nearfull_warn_pct') AS nf_warn,
+       (SELECT cfg_value FROM cap_config WHERE cfg_name='nearfull_crit_pct') AS nf_crit,
+       (SELECT COUNT(*)  FROM cap_ml_model WHERE status='OK')                AS esm_ok
 FROM   dual;
 
 -- Section 6 dispatch:
@@ -96,6 +100,7 @@ PROMPT        QUALITY. INSUFFICIENT_HISTORY means fewer than the configured mini
 PROMPT        training days; raise DBMS_WORKLOAD_REPOSITORY retention for real trends.
 PROMPT ================================================================================
 
+@@report/sections/00_at_a_glance.sql
 @@report/sections/01_days_to_full.sql
 @@report/sections/02_tbspc_forecast.sql
 @@report/sections/03_tbspc_anomalies.sql

@@ -77,6 +77,8 @@ PROMPT -- [30] Tier 1 forecasts (CAPF_*) ...
 @@ddl/30_forecast_views.sql
 PROMPT -- [40] anomalies (CAPA_*) ...
 @@ddl/40_anomaly_views.sql
+PROMPT -- [45] integration/report layer (CAPR_CONTAINER + CAPR_ALERTS) ...
+@@ddl/45_report_views.sql
 PROMPT -- [50] Tier 2 OML ESM (CAP_ML_MODEL + package + CAPF_ESM/COMPARE) ...
 @@ddl/50_ml.sql
 
@@ -98,7 +100,8 @@ BEGIN
             OR object_name LIKE 'CAPV\_%' ESCAPE '\'
             OR object_name LIKE 'CAPD\_%' ESCAPE '\'
             OR object_name LIKE 'CAPF\_%' ESCAPE '\'
-            OR object_name LIKE 'CAPA\_%' ESCAPE '\')
+            OR object_name LIKE 'CAPA\_%' ESCAPE '\'
+            OR object_name LIKE 'CAPR\_%' ESCAPE '\')
         ORDER BY object_name
     ) LOOP
         v_bad := v_bad + 1;

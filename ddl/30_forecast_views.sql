@@ -92,6 +92,12 @@ SELECT f.dbid,
        f.n                                                AS train_n,
        c.cur_used,
        c.limit_bytes,
+       -- How full RIGHT NOW, independent of any fit: the report's "near-full
+       -- now" ranking keys off this so a 97%-full tablespace is never hidden
+       -- by a LOW_CONFIDENCE/INSUFFICIENT_HISTORY fit (M7.1).
+       CASE WHEN c.limit_bytes > 0
+            THEN ROUND(100 * c.cur_used / c.limit_bytes, 1)
+       END                                                AS pct_used,
        f.slope                                            AS slope_bpd,
        f.icept,
        f.r2,

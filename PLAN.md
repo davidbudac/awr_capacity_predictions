@@ -13,20 +13,22 @@ every new number (see `test/run_test.sql`).
 
 ## M7 — Report usability (text + HTML)
 
-- [ ] **M7.1 Don't hide near-full tablespaces.** `report/sections/01_days_to_full.sql`
-      filters `quality='OK'`, so a 97%-full `LOW_CONFIDENCE` /
-      `INSUFFICIENT_HISTORY` tablespace never appears. Add `PCT_USED`, show
-      non-OK rows with a quality marker, and add a "near-full now" ranking
-      (by `cur_used/limit_bytes`) independent of fit quality. Mirror in
-      `report_html.sql` (at-a-glance + prediction cards).
-- [ ] **M7.2 Container / database names instead of raw `con_dbid`.** New seam
-      view `CAPV_CONTAINER (dbid, con_dbid, db_name, con_name)` in all three
-      seam files (local: `DBA_HIST_PDB_INSTANCE` + `DBA_HIST_DATABASE_INSTANCE`;
-      warehouse: target/container dims; fixture: static rows). Every section
-      prints `DB / PDB`; fleet reports become readable.
-- [ ] **M7.3 At-a-glance block for the text report.** Counts of CRIT/WARN
-      tablespaces, CPU days-to-sat, anomalies in the last N days — built from
-      `CAPR_ALERTS` (M8.1) so text/HTML agree.
+- [x] **M7.1 Don't hide near-full tablespaces.** Done: `pct_used` added to
+      `CAPF_TBSPC_FORECAST`; section 1a ranks days-to-full across all
+      qualities with a QUALITY marker; new 1b "near-full now" ranking by
+      `PCT_USED` (knobs `nearfull_warn_pct`/`nearfull_crit_pct`, 90/97);
+      mirrored in `report_html.sql` (banner items, glance cards, section 1
+      tables). Fixtures `FIX_NEARFULL`/`FIX_FILLING` assert it.
+- [x] **M7.2 Container / database names instead of raw `con_dbid`.** Done:
+      `CAPV_CONTAINER` in all three seams (local: `DBA_HIST_PDB_INSTANCE` —
+      which names CDB$ROOT too — + `DBA_HIST_DATABASE_INSTANCE` fallback;
+      warehouse: new `awrv_container` over `awrw_dbid`/`awrw_target`, con_name
+      NULL until a PDB-name dim exists; fixture: `CAP_FIXTURE_CONTAINER`).
+      `CAPR_CONTAINER.db_pdb` computes the label once; every text/HTML section
+      prints `DB/PDB`.
+- [x] **M7.3 At-a-glance block for the text report.** Done: section 0 in
+      `report.sql` (counts + alert list) built from `CAPR_ALERTS`, same view
+      the HTML banner reads.
 - [ ] **M7.4 Bound sections 2 and 6.** Apply `top_n` / "growing or ≥ X GB"
       filter so a 500-tablespace DB doesn't print 500 + 2000 rows. New knob
       `report_min_gb`.
@@ -36,17 +38,20 @@ every new number (see `test/run_test.sql`).
 - [ ] **M7.6 Positional report args.** `@report/report.sql [top_n] [anomaly_days] [show_esm]`
       with `defaults.sql` as fallback (COLUMN NEW_VALUE default trick for
       unset `&1..&3`); no more editing `defaults.sql`.
-- [ ] **M7.7 Cleanups.** Remove the dead `CAP_CONFIG.anomaly_report_days`
-      (report uses the `anomaly_days` DEFINE) — keep one; `TO_CHAR(..,'FM')`
-      the header knobs (`WARN<=        90`); label GiB consistently; cap/NULL
-      `accel_ratio` when `|slope|` is below a floor.
+- [ ] **M7.7 Cleanups.** ~~Remove the dead `CAP_CONFIG.anomaly_report_days`~~
+      (no longer dead: M8.1's `CAPR_ALERTS` uses it as the alert window; the
+      report `anomaly_days` DEFINE stays presentation-only — both kept, docs
+      say which is which); `TO_CHAR(..,'FM')` the header knobs
+      (`WARN<=        90`); label GiB consistently; cap/NULL `accel_ratio`
+      when `|slope|` is below a floor.
 
 ## M8 — Integration surface
 
-- [ ] **M8.1 `CAPR_ALERTS` view.** One row per issue: `severity, kind
-      (TBSPC_FULL | TBSPC_ANOM | CPU_SAT | CPU_ANOM | ...), dbid, con_dbid,
-      series_key, metric values, message`. Pollable by OEM metric extensions /
-      Zabbix / Nagios / a scheduler job. Read-only like everything else.
+- [x] **M8.1 `CAPR_ALERTS` view.** Done (`ddl/45_report_views.sql`): one row
+      per issue — `severity/sev_rank, kind (TBSPC_FULL | TBSPC_NEARFULL |
+      TBSPC_ANOM | CPU_SAT | CPU_ANOM), dbid, con_dbid, db_pdb, series_key,
+      day_dt, value, threshold, unit, message`. Anomaly kinds window on the
+      `anomaly_report_days` knob. Read-only; fixture-asserted.
 - [ ] **M8.2 `CAPR_*` report views.** Move every section's SELECT into a view
       so `report.sql` and `report_html.sql` only *format* — removes the
       duplicated-SQL drift risk README admits for the HTML driver.

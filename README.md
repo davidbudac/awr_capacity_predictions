@@ -22,17 +22,19 @@ Two forecasting engines run side by side:
 - **Tier 2 — OML ESM** (`DBMS_DATA_MINING`, exponential smoothing) for a
   seasonality-aware second opinion, compared against Tier 1 in the report.
 
-## Architecture — five view layers over a portable seam
+## Architecture — six view layers over a portable seam
 
 ```
 CAPV_*  seam        DBA_HIST-shaped views  (local | warehouse | fixture source)
-  |
+  |                 incl. CAPV_CONTAINER: (dbid, con_dbid) -> DB / PDB names
 CAPD_*  daily       one clean row per (series, day): blocks->bytes, counter
   |                 deltas with restart guards
 CAPF_*  forecast    Tier 1 REGR fits (+ CAPF_ESM_FORECAST / CAPF_COMPARE for Tier 2)
 CAPA_*  anomaly     rolling median + MAD (tablespace: trailing window;
   |                 CPU: same-weekday seasonal baseline)
-report/             read-only SQL*Plus text report (6 sections)
+CAPR_*  integration CAPR_CONTAINER (display labels) + CAPR_ALERTS (one row per
+  |                 current issue -- pollable by OEM / Zabbix / Nagios)
+report/             read-only SQL*Plus text report (7 sections)
 ```
 
 Only **two** tables are persisted: `CAP_CONFIG` (tuning knobs, MERGE-seeded)
@@ -130,8 +132,26 @@ UPDATE cap_config SET cfg_value = 0.70 WHERE cfg_name = 'r2_gate';
 
 Key knobs: `train_days` (90), `recent_days` (28), `min_train_days` (14),
 `r2_gate` (0.60), `mad_k` (3), `mad_window_days` (28), `cpu_sat_pct` (80),
-`abs_floor_bytes` (100 MiB), `dow_weeks` (8), `dtf_warn`/`dtf_crit` (90/30).
+`abs_floor_bytes` (100 MiB), `dow_weeks` (8), `dtf_warn`/`dtf_crit` (90/30),
+`nearfull_warn_pct`/`nearfull_crit_pct` (90/97), `anomaly_report_days` (14,
+the `CAPR_ALERTS` anomaly window).
 Run `SELECT * FROM cap_config ORDER BY cfg_name;` for the full annotated list.
+
+## Alerting / integration
+
+`CAPR_ALERTS` is the machine-readable surface: one row per current issue —
+`severity` (CRIT/WARN/INFO), `kind` (`TBSPC_FULL`, `TBSPC_NEARFULL`,
+`TBSPC_ANOM`, `CPU_SAT`, `CPU_ANOM`), the `(dbid, con_dbid)` keys plus a
+resolved `db_pdb` label, the metric `value` vs its `threshold`, and a
+ready-to-page `message`. Poll it from an OEM metric extension, Zabbix, Nagios,
+or a scheduler job:
+
+```sql
+SELECT severity, kind, db_pdb, message FROM capr_alerts ORDER BY sev_rank;
+```
+
+Both reports' at-a-glance blocks are built from the same view, so what pages
+you and what the report says can never disagree.
 
 ## Testing
 
@@ -142,15 +162,19 @@ Deterministic fixture harness — no randomness, all closed-form:
 @test/fixture_install.sql
 DEFINE seam_mode = 'fixture'
 @install.sql
-@test/run_test.sql        -- 14 assertions; exits non-zero on any failure
+@test/run_test.sql        -- 31 assertions; exits non-zero on any failure
 @test/run_test_ml.sql     -- Tier 2 ESM assertion (needs CREATE MINING MODEL)
 ```
 
 Fixtures: `FIX_LINEAR` (exact 10 MiB/day → slope, R², days_to_full checked to
 the byte), `FIX_SPIKE` (one +2 GiB jump → exactly one HIGH on that day),
-`FIX_FLAT` (constant → quality FLAT, no anomaly), and CPU counters with a
+`FIX_FLAT` (constant → quality FLAT, no anomaly), `FIX_GAP` (a 3-day AWR gap →
+rate-normalized, no false flag), `FIX_NEARFULL` (constant at exactly 97% of
+maxsize → near-full ranking + CRIT alert despite a FLAT fit), `FIX_FILLING`
+(20 days of headroom → `TBSPC_FULL` CRIT alert), CPU counters with a
 mid-series restart (excluded) + an injected +30-point Tuesday (flags in the
-same-weekday view). Cleanup: `@test/fixture_remove.sql`.
+same-weekday view), and `FIXCDB`/`FIXPDB1` container rows (label assertions).
+Cleanup: `@test/fixture_remove.sql`.
 
 ## Caveats
 

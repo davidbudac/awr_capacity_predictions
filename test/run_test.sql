@@ -109,6 +109,54 @@ BEGIN
       WHERE tablespace_name = 'FIX_GAP' AND anomaly_flag IS NOT NULL;
     chk_int('GAP no false anomaly (rate-normalized)', v_n, 0);
 
+    DBMS_OUTPUT.PUT_LINE('=== FIX_NEARFULL (M7.1: near-full now, unreliable fit) ===');
+    SELECT pct_used, quality INTO v_num, v_str
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_NEARFULL';
+    chk_close('NEARFULL pct_used', v_num, meta_n('NEARFULL_PCT'), 0.001);
+    chk_str  ('NEARFULL quality', v_str, 'FLAT');
+    SELECT COUNT(*) INTO v_n FROM capr_alerts
+      WHERE kind = 'TBSPC_NEARFULL' AND series_key = 'FIX_NEARFULL' AND severity = 'CRIT';
+    chk_int('NEARFULL CRIT alert raised', v_n, 1);
+    SELECT COUNT(*) INTO v_n FROM capr_alerts
+      WHERE kind = 'TBSPC_NEARFULL' AND series_key <> 'FIX_NEARFULL';
+    chk_int('NEARFULL alerts only for FIX_NEARFULL', v_n, 0);
+
+    DBMS_OUTPUT.PUT_LINE('=== FIX_FILLING (M8.1: TBSPC_FULL alert) ===');
+    SELECT days_to_full, pct_used, quality INTO v_n, v_num, v_str
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_FILLING';
+    chk_int  ('FILLING days_to_full', v_n, meta_n('FILLING_DTF'));
+    chk_close('FILLING pct_used', v_num, meta_n('FILLING_PCT'), 0.001);
+    chk_str  ('FILLING quality', v_str, 'OK');
+    SELECT COUNT(*) INTO v_n FROM capr_alerts
+      WHERE kind = 'TBSPC_FULL' AND series_key = 'FIX_FILLING' AND severity = 'CRIT';
+    chk_int('FILLING TBSPC_FULL CRIT alert raised', v_n, 1);
+    SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'TBSPC_FULL';
+    chk_int('TBSPC_FULL alerts only for FIX_FILLING', v_n, 1);
+
+    DBMS_OUTPUT.PUT_LINE('=== CAPR_CONTAINER labels (M7.2) ===');
+    SELECT db_pdb INTO v_str FROM capr_container
+      WHERE dbid = v_dbid AND con_dbid = v_dbid;
+    chk_str('root label = db name alone', v_str, 'FIXCDB');
+    SELECT db_pdb INTO v_str FROM capr_container
+      WHERE dbid = v_dbid AND con_dbid = v_dbid + 1;
+    chk_str('PDB label = DB/PDB', v_str, 'FIXCDB/FIXPDB1');
+    SELECT COUNT(*) INTO v_n FROM capr_alerts
+      WHERE kind = 'TBSPC_NEARFULL' AND db_pdb <> 'FIXCDB';
+    chk_int('alerts resolve db_pdb', v_n, 0);
+
+    DBMS_OUTPUT.PUT_LINE('=== CAPR_ALERTS anomaly kinds (M8.1) ===');
+    -- SPIKE_DAY is 10 days before LAST_DAY, INJECTED_TUE at most 6 days
+    -- before -- both inside the default 14-day anomaly_report_days window.
+    SELECT COUNT(*) INTO v_n FROM capr_alerts
+      WHERE kind = 'TBSPC_ANOM' AND series_key = 'FIX_SPIKE'
+        AND severity = 'WARN' AND day_dt = d_spike;
+    chk_int('SPIKE raises TBSPC_ANOM WARN', v_n, 1);
+    SELECT COUNT(*) INTO v_n FROM capr_alerts
+      WHERE kind = 'CPU_ANOM' AND severity = 'WARN' AND day_dt = d_inj;
+    chk_int('injected Tuesday raises CPU_ANOM WARN', v_n, 1);
+    SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SAT';
+    chk_int('no CPU_SAT alert (flat CPU trend)', v_n, 0);
+
     DBMS_OUTPUT.PUT_LINE('=== CPU restart guard + busy% ===');
     SELECT COUNT(*) INTO v_n FROM capd_cpu_daily
       WHERE dbid = v_dbid AND day_dt = d_restart;

@@ -1,7 +1,7 @@
 --
 -- ddl/10_seam_local.sql -- CAPV_* portable seam over DBA_HIST_* (LOCAL mode).
 -- =====================================================================
--- These six views are the ONLY place the analytics touch Oracle's AWR
+-- These seven views are the ONLY place the analytics touch Oracle's AWR
 -- dictionary. Everything downstream (CAPD_/CAPF_/CAPA_/report) is written
 -- once against CAPV_* and runs byte-identically in local, warehouse, or
 -- fixture mode. Swapping this file for ddl/11_seam_warehouse.sql or
@@ -123,3 +123,34 @@ SELECT dbid                     AS dbid,
        value                    AS value
 FROM   dba_hist_sys_time_model
 WHERE  stat_name IN ('DB CPU','DB time','background cpu time');
+
+-- --------------------------------------------------------------------
+-- CAPV_CONTAINER -- container/database naming dimension: one row per
+-- (dbid, con_dbid) AWR has seen, with the human names the report prints
+-- instead of raw con_dbid values.
+--   * DBA_HIST_PDB_INSTANCE (19c, CDB only) names every container incl.
+--     CDB$ROOT (whose con_dbid equals the CDB dbid; verified on 19c).
+--   * On a NON-CDB that view has no rows, so a fallback branch emits the
+--     (dbid, dbid) key with con_name NULL; db_name always comes from
+--     DBA_HIST_DATABASE_INSTANCE.
+-- The UNION dedupes the key set; MAX() collapses per-instance/per-startup
+-- duplicate dimension rows to one name per container.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capv_container AS
+SELECT k.dbid,
+       k.con_dbid,
+       d.db_name,
+       p.con_name
+FROM  (
+        SELECT dbid, con_dbid FROM dba_hist_pdb_instance
+        UNION
+        SELECT dbid, dbid FROM dba_hist_database_instance
+      ) k
+LEFT  JOIN (SELECT dbid, MAX(db_name) AS db_name
+            FROM   dba_hist_database_instance
+            GROUP  BY dbid) d
+  ON  d.dbid = k.dbid
+LEFT  JOIN (SELECT dbid, con_dbid, MAX(pdb_name) AS con_name
+            FROM   dba_hist_pdb_instance
+            GROUP  BY dbid, con_dbid) p
+  ON  p.dbid = k.dbid AND p.con_dbid = k.con_dbid;

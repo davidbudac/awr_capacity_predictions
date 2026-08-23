@@ -9,7 +9,7 @@ PROMPT    Anomaly on the per-day growth RATE (delta/gap): FLAG when
 PROMPT    |rate - median_rate| exceeds THRESHOLD = max(k*MAD, 100MiB/day floor).
 PROMPT    GAP = days since previous sample (>1 across an AWR gap).
 
-COLUMN con_dbid        FORMAT 99999999999 HEADING 'CON_DBID'
+COLUMN db_pdb          FORMAT A20         HEADING 'DB/PDB'
 COLUMN tablespace_name FORMAT A16         HEADING 'TABLESPACE'
 COLUMN day_dt          FORMAT A10          HEADING 'DAY'
 COLUMN gap             FORMAT 990          HEADING 'GAP'
@@ -20,17 +20,19 @@ COLUMN thr_mb          FORMAT 9999990.0    HEADING 'THR_MB/D'
 COLUMN z               FORMAT 99990.0      HEADING 'ROBUST_Z'
 COLUMN anomaly_flag    FORMAT A5           HEADING 'FLAG'
 
-SELECT con_dbid,
-       tablespace_name,
-       TO_CHAR(day_dt,'YYYY-MM-DD')     AS day_dt,
-       day_gap                    AS gap,
-       used_delta_bytes / 1048576 AS delta_mb,
-       used_rate_bpd    / 1048576 AS rate_mb,
-       median_rate_bpd  / 1048576 AS med_mb,
-       threshold_bpd    / 1048576 AS thr_mb,
-       robust_z                   AS z,
-       anomaly_flag
-FROM   capa_tbspc_anom
-WHERE  anomaly_flag IS NOT NULL
-  AND  day_dt > (SELECT MAX(day_dt) FROM capd_tbspc_daily) - &anomaly_days
-ORDER  BY day_dt DESC, con_dbid, tablespace_name;
+SELECT NVL(cn.db_pdb, TO_CHAR(a.con_dbid)) AS db_pdb,
+       a.tablespace_name,
+       TO_CHAR(a.day_dt,'YYYY-MM-DD')   AS day_dt,
+       a.day_gap                    AS gap,
+       a.used_delta_bytes / 1048576 AS delta_mb,
+       a.used_rate_bpd    / 1048576 AS rate_mb,
+       a.median_rate_bpd  / 1048576 AS med_mb,
+       a.threshold_bpd    / 1048576 AS thr_mb,
+       a.robust_z                   AS z,
+       a.anomaly_flag
+FROM   capa_tbspc_anom a
+LEFT   JOIN capr_container cn
+  ON   cn.dbid = a.dbid AND cn.con_dbid = a.con_dbid
+WHERE  a.anomaly_flag IS NOT NULL
+  AND  a.day_dt > (SELECT MAX(day_dt) FROM capd_tbspc_daily) - &anomaly_days
+ORDER  BY a.day_dt DESC, a.con_dbid, a.tablespace_name;

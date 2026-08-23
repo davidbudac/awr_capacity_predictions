@@ -23,9 +23,9 @@ This document explains *why* each layer is shaped the way it is. For usage see
 
 ## Layer 1 — the seam (`CAPV_*`)
 
-Six views re-present the AWR dictionary in a stable shape. Everything downstream
-depends only on these, so swapping `ddl/10_seam_local.sql` for `11` (warehouse)
-or `12` (fixture) re-points the whole stack. Every view carries
+Seven views re-present the AWR dictionary in a stable shape. Everything
+downstream depends only on these, so swapping `ddl/10_seam_local.sql` for `11`
+(warehouse) or `12` (fixture) re-points the whole stack. Every view carries
 `(dbid, con_dbid)`.
 
 - `DBA_HIST_SNAPSHOT` has no `CON_DBID`, so `CAPV_SNAPSHOT` sets
@@ -45,6 +45,15 @@ or `12` (fixture) re-points the whole stack. Every view carries
   timestamps come from joining `snap_id` → `CAPV_SNAPSHOT`. Live
   `DBA_TABLESPACES` is never joined (loses dropped tablespaces; absent in
   warehouse mode).
+- `CAPV_CONTAINER` (M7.2) is the naming dimension: one row per
+  `(dbid, con_dbid)` with `db_name` + `con_name`. Local mode reads
+  `DBA_HIST_PDB_INSTANCE` (which names every container including `CDB$ROOT`,
+  whose `con_dbid` equals the CDB dbid — verified on 19c) with a
+  `DBA_HIST_DATABASE_INSTANCE` fallback branch for non-CDBs; warehouse mode
+  maps `db_name` to the Target's display name via `awrv_container`
+  (`con_name` stays NULL — no PDB-name dim collected yet); fixture mode reads
+  `CAP_FIXTURE_CONTAINER`. Historical dictionaries only, same as the rest of
+  the seam — never live `V$` views.
 
 ## Layer 2 — daily series (`CAPD_*`)
 
@@ -156,13 +165,36 @@ no partitioned ESM) via `DBMS_DATA_MINING.CREATE_MODEL2(mining_function =>
 -- /
 ```
 
+## Layer 6 — integration (`CAPR_*`, M7.2/M8.1)
+
+Two seam-agnostic views for consumers outside the bundled reports:
+
+- `CAPR_CONTAINER` wraps `CAPV_CONTAINER` and computes `db_pdb`, the one
+  display label every report section prints instead of a raw `con_dbid`
+  (root/non-CDB → db name alone; PDB → `DBNAME/PDBNAME`; unnamed → the raw
+  `con_dbid` as text). Defining the label once keeps text and HTML from
+  drifting.
+- `CAPR_ALERTS` is the pollable alert surface: one row per current issue with
+  `severity` (CRIT/WARN/INFO + numeric `sev_rank`), `kind` (`TBSPC_FULL`,
+  `TBSPC_NEARFULL`, `TBSPC_ANOM`, `CPU_SAT`, `CPU_ANOM`), keys, `value` vs
+  `threshold` (+ `unit`), and a ready-to-page `message`. The forecast kinds
+  gate on `quality = 'OK'`; `TBSPC_NEARFULL` deliberately does **not** (M7.1:
+  a 97%-full tablespace with an unfittable series must still surface — that's
+  a fact about *today*, not a forecast). Anomaly kinds use the
+  `anomaly_report_days` knob as their window (the reports' `anomaly_days`
+  DEFINE is presentation-only). Both reports' at-a-glance blocks read this
+  view, so paging and reporting can never disagree.
+
 ## Report
 
-`report/report.sql` spools a read-only text report (6 sections) to
+`report/report.sql` spools a read-only text report (7 sections: an
+at-a-glance alert roll-up from `CAPR_ALERTS`, then the six detail sections) to
 `reports/cap_report_<db>_<ts>.txt`. Identity comes from `SYS_CONTEXT` (no `V$`
 or catalog privileges needed, so any monitoring schema can run it). Sections
-consume only `CAPF_*`/`CAPA_*`. `show_esm` = `AUTO`/`Y`/`N` controls the Tier 2
-section (AUTO prints a hint when no models are trained).
+consume only `CAPF_*`/`CAPA_*`/`CAPR_*`. `show_esm` = `AUTO`/`Y`/`N` controls
+the Tier 2 section (AUTO prints a hint when no models are trained). Section 1
+ranks days-to-full across **all** fit qualities (marker column says how much
+to trust each row) and adds a near-full-now ranking by `pct_used` (M7.1).
 
 ## Testing philosophy
 

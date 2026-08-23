@@ -120,3 +120,18 @@ SELECT dbid                     AS dbid,
        value                    AS value
 FROM   awrv_sys_time_model
 WHERE  stat_name IN ('DB CPU','DB time','background cpu time');
+
+-- --------------------------------------------------------------------
+-- CAPV_CONTAINER -- container/database naming dimension over the warehouse's
+-- AWRV_CONTAINER (awr-fleet-warehouse ddl/50_awrv_views.sql): db_name is the
+-- warehouse Target's display name (awrw_target.target_name via awrw_dbid) --
+-- more useful in a fleet report than the raw DB_NAME. The warehouse keeps no
+-- per-container (PDB) name dim yet, so con_name is NULL there and the report
+-- falls back to showing the raw con_dbid for a non-root container.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capv_container AS
+SELECT dbid                     AS dbid,
+       con_dbid                 AS con_dbid,
+       db_name                  AS db_name,
+       con_name                 AS con_name
+FROM   awrv_container;
