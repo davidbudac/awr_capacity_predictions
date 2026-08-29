@@ -38,7 +38,9 @@ CAPA_*  anomaly     rolling median + MAD (tablespace: trailing window;
   |                 CPU: same-weekday seasonal baseline)
 CAPR_*  integration CAPR_CONTAINER (display labels) + CAPR_ALERTS (one row per
   |                 current issue -- pollable by OEM / Zabbix / Nagios)
-report/             read-only SQL*Plus text report (7 sections)
+  |                 + one view per report section (M8.2), so the text and
+  |                 HTML drivers only FORMAT and cannot drift
+report/             read-only SQL*Plus text report (7 sections) + HTML twin
 ```
 
 Only **two** tables are persisted: `CAP_CONFIG` (tuning knobs, MERGE-seeded)
@@ -100,9 +102,10 @@ likely to run out of room, phrased in words rather than statistics) and a
 full-width anomaly timeline that marks every recent unusual day on a per-series
 lane. Every jargon column header carries a hover/focus
 tooltip in plain English, and a collapsible glossary defines the terms for readers
-who are new to them. It has a sticky section nav and light/dark theming. It duplicates the SQL logic from `report/sections/*.sql`
-rather than including those files, so `report.sql` and `report/sections/` are
-unaffected:
+who are new to them. It has a sticky section nav and light/dark theming. Since
+M8.2 it reads exactly the same `CAPR_*` per-section views as
+`report/sections/*.sql` (only chart geometry is computed in the driver), so
+the text and HTML reports can no longer show different numbers:
 
 ```sql
 sqlplus / as sysdba              -- run from the REPO ROOT (@@ include paths)
@@ -160,6 +163,42 @@ SELECT severity, kind, db_pdb, message FROM capr_alerts ORDER BY sev_rank;
 
 Both reports' at-a-glance blocks are built from the same view, so what pages
 you and what the report says can never disagree.
+
+## Preflight & scheduler jobs
+
+Two standalone scripts at the repo root; neither is part of `install.sql`.
+
+**`@doctor.sql`** — read-only preflight. Run it *before* installing (and again
+after) in the schema/container you intend to use. It prints a PASS/WARN/FAIL
+checklist: Diagnostics Pack access, direct SELECT on each `DBA_HIST_*` view the
+local seam needs, the `CREATE TABLE/VIEW/PROCEDURE/TYPE/MINING MODEL/JOB`
+privileges, AWR retention and snapshot interval per dbid, how many distinct days
+each source actually holds versus `min_train_days`, and — if the suite is already
+installed — invalid `CAP*` objects plus the seam mode in use. It closes with a
+plain-English reason why forecasts would come back `INSUFFICIENT_HISTORY`. It
+creates nothing and every probe is exception-wrapped, so a missing privilege
+prints one WARN line instead of aborting the run.
+
+**`@install_jobs.sql`** — opt-in `DBMS_SCHEDULER` automation, **both jobs created
+DISABLED**; re-running it is idempotent. `CAP_ML_RETRAIN` runs
+`cap_forecast_ml.train_all` weekly (Sun 02:00). `CAP_REPORT_SPOOL_JOB` runs daily
+(03:00) and calls the `cap_report_spool(p_dir)` procedure the script also
+creates, which writes `<dir>/cap_alerts.txt` through `UTL_FILE` — a pollable
+snapshot (header with timestamp + CRIT/WARN/INFO counts, then one pipe-delimited
+line per `CAPR_ALERTS` row), *not* the full report, since SQL\*Plus spooling
+cannot happen inside a scheduler job. For the formatted report keep driving
+`report/report.sql` from cron. The directory object is not created for you: the
+script checks `ALL_DIRECTORIES` and prints the exact `CREATE DIRECTORY` / `GRANT
+READ, WRITE` DDL if it is missing. Override its name with
+`DEFINE report_dir = 'MY_DIR'` before running (default `CAP_REPORTS`).
+
+```sql
+@doctor.sql                                    -- before anything else
+@install_jobs.sql                              -- opt-in, jobs land disabled
+EXEC DBMS_SCHEDULER.ENABLE('CAP_ML_RETRAIN')
+EXEC DBMS_SCHEDULER.ENABLE('CAP_REPORT_SPOOL_JOB')
+@uninstall_jobs.sql                            -- drops both jobs + the procedure
+```
 
 ## Testing
 

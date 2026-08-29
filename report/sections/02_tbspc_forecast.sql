@@ -1,6 +1,8 @@
 --
 -- 02_tbspc_forecast.sql -- per-tablespace REGR projections + ESM (when trained).
--- Consumes CAPF_TBSPC_FORECAST + CAPF_COMPARE (ESM point predictions).
+-- FORMAT ONLY (M8.2): everything comes from CAPR_TBSPC_FORECAST
+-- (ddl/55_report_views_ml.sql), which already resolves DB/PDB, converts to
+-- GiB and joins the Tier 2 ESM +30 point. The HTML report reads the same view.
 --
 PROMPT
 PROMPT == 2. TABLESPACE FORECAST (GB): current / +30 / +90 / +180, plus ESM +30 ==
@@ -22,22 +24,17 @@ COLUMN r2              FORMAT 90.999        HEADING 'R2'
 COLUMN quality         FORMAT A20          HEADING 'QUALITY'
 COLUMN esm30           FORMAT 99990.00     HEADING 'ESM+30'
 
-SELECT NVL(cn.db_pdb, TO_CHAR(f.con_dbid)) AS db_pdb,
-       f.tablespace_name,
-       f.train_n                          AS n,
-       f.cur_used       / 1073741824 AS cur_gb,
-       f.proj_30_bytes  / 1073741824 AS p30,
-       f.proj_90_bytes  / 1073741824 AS p90,
-       f.proj_180_bytes / 1073741824 AS p180,
-       f.proj_180_lo    / 1073741824 AS p180_lo,
-       f.proj_180_hi    / 1073741824 AS p180_hi,
-       f.r2,
-       f.quality,
-       (SELECT c.value / 1073741824 FROM capf_compare c
-         WHERE c.engine='ESM' AND c.series_kind='TBSPC'
-           AND c.dbid=f.dbid AND c.con_dbid=f.con_dbid AND c.series_key=f.tablespace_name
-           AND c.horizon_days=30)          AS esm30
-FROM   capf_tbspc_forecast f
-LEFT   JOIN capr_container cn
-  ON   cn.dbid = f.dbid AND cn.con_dbid = f.con_dbid
-ORDER  BY f.con_dbid, f.tablespace_name;
+SELECT db_pdb,
+       tablespace_name,
+       train_n AS n,
+       cur_gb,
+       p30,
+       p90,
+       p180,
+       p180_lo,
+       p180_hi,
+       r2,
+       quality,
+       esm30
+FROM   capr_tbspc_forecast
+ORDER  BY con_dbid, tablespace_name;

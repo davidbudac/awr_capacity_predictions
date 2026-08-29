@@ -149,10 +149,23 @@
             <tr><th scope="row"><code>CAPF_CPU_TREND</code></th><td class="def">view</td><td class="def">Tier 1 fit for busy% and db_cpu_sec, with days-to-saturation</td></tr>
             <tr><th scope="row"><code>CAPF_ESM_FORECAST</code></th><td class="def">view</td><td class="def">Tier 2 ESM predictions and 95% bounds, via the package registry</td></tr>
             <tr><th scope="row"><code>CAPF_COMPARE</code></th><td class="def">view</td><td class="def">Tier 1 vs Tier 2 at the horizons (ESM +30 only)</td></tr>
+            <tr><th scope="row"><code>CAPF_ESM_BACKTEST</code></th><td class="def">view</td><td class="def">Holdout (purpose=BACKTEST) ESM predictions, kept out of the live forecast</td></tr>
+            <tr><th scope="row"><code>CAPF_BACKTEST</code></th><td class="def">view</td><td class="def">Holdout accuracy per series per engine: MAPE% / bias% over the held-out window</td></tr>
 
             <tr><td colspan="3"><b><span class="k">CAPA_</span> — anomaly views</b> · robust median + MAD</td></tr>
             <tr><th scope="row"><code>CAPA_TBSPC_ANOM</code></th><td class="def">view</td><td class="def">Median + MAD flags on the growth rate over a trailing window</td></tr>
             <tr><th scope="row"><code>CAPA_CPU_ANOM</code></th><td class="def">view</td><td class="def">Median + MAD flags on a same-weekday seasonal baseline</td></tr>
+
+            <tr><td colspan="3"><b><span class="k">CAPR_</span> — integration &amp; report views (9)</b> · display labels, alerts, and one view per report section (M8.2)</td></tr>
+            <tr><th scope="row"><code>CAPR_CONTAINER</code></th><td class="def">view</td><td class="def">(dbid, con_dbid) &rarr; <code>db_pdb</code>, the one display label every report prints</td></tr>
+            <tr><th scope="row"><code>CAPR_ALERTS</code></th><td class="def">view</td><td class="def">One row per current issue — severity, kind, value vs threshold, ready-to-page message</td></tr>
+            <tr><th scope="row"><code>CAPR_TBSPC_DAYS_TO_FULL</code></th><td class="def">view</td><td class="def">Report section 1: days-to-full and near-full-now rankings, with severity markers and <code>rank_dtf</code> / <code>rank_nearfull</code></td></tr>
+            <tr><th scope="row"><code>CAPR_TBSPC_FORECAST</code></th><td class="def">view</td><td class="def">Report section 2: GiB projections, +180 band, ESM +30 point, <code>rank_chart</code></td></tr>
+            <tr><th scope="row"><code>CAPR_TBSPC_ANOMALIES</code></th><td class="def">view</td><td class="def">Report section 3: flagged growth days in MiB, with <code>days_ago</code></td></tr>
+            <tr><th scope="row"><code>CAPR_CPU_TREND</code></th><td class="def">view</td><td class="def">Report section 4: per-metric CPU trend with the days-to-saturation range</td></tr>
+            <tr><th scope="row"><code>CAPR_CPU_ANOMALIES</code></th><td class="def">view</td><td class="def">Report section 5: flagged busy% days, with <code>days_ago</code></td></tr>
+            <tr><th scope="row"><code>CAPR_ESM_COMPARE</code></th><td class="def">view</td><td class="def">Report sections 6a/6b: REGR vs ESM per (series, horizon), raw units and GiB</td></tr>
+            <tr><th scope="row"><code>CAPR_BACKTEST</code></th><td class="def">view</td><td class="def">Report section 6c: holdout scorecard pivoted per series, with the BETTER verdict</td></tr>
 
             <tr><td colspan="3"><b>Tables &amp; package</b> · the only persisted state</td></tr>
             <tr><th scope="row"><span class="kt">CAP_CONFIG</span></th><td class="def">table</td><td class="def">Tuning knobs (name/value), MERGE-seeded</td></tr>
@@ -172,7 +185,7 @@
         <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
           <span class="term__title">SQL*Plus</span><span class="term__tag in">you run</span></div>
 <pre><span class="c-prompt">SQL&gt;</span> @test/fixture_remove.sql   <span class="c-cmt">-- fixture mode only: drop CAP_FIXTURE_* tables</span>
-<span class="c-prompt">SQL&gt;</span> @uninstall.sql             <span class="c-cmt">-- drop all CAP_* / CAPV_ / CAPD_ / CAPF_ / CAPA_ objects</span>
+<span class="c-prompt">SQL&gt;</span> @uninstall.sql             <span class="c-cmt">-- drop all CAP_* / CAPV_ / CAPD_ / CAPF_ / CAPA_ / CAPR_ objects</span>
 <span class="c-prompt">SQL&gt;</span> EXEC cap_forecast_ml.drop_all;  <span class="c-cmt">-- (if trained) remove the OML models</span></pre>
       </div>
       <div class="callout tip">

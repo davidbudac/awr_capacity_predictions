@@ -205,3 +205,147 @@ SELECT a.severity,
 FROM   alerts a
 LEFT   JOIN capr_container c
   ON   c.dbid = a.dbid AND c.con_dbid = a.con_dbid;
+
+-- ====================================================================
+-- M8.2 -- one CAPR_ view per report section, so report/report.sql (via
+-- report/sections/*.sql) and report/report_html.sql only FORMAT: every
+-- derived number, display label, severity marker and unit conversion is
+-- computed HERE, once, and both drivers read the same rows. That removes
+-- the duplicated-SQL drift risk between the text and HTML reports.
+--
+-- Conventions shared by all of them:
+--   * db_pdb is already resolved through CAPR_CONTAINER (raw con_dbid as
+--     the fallback), so no driver ever repeats that LEFT JOIN.
+--   * Severity markers use the same CAP_CONFIG knobs as CAPR_ALERTS.
+--   * Ranking views expose rank_* (ROW_NUMBER) so a driver applies its
+--     top_n with a plain WHERE instead of its own ORDER BY + FETCH FIRST.
+--   * Anomaly views expose days_ago (max collected day minus the row's
+--     day), so the reports' anomaly_days window is a plain WHERE too.
+--   * Sections whose numbers need Tier 2 (CAPF_COMPARE / CAPF_BACKTEST,
+--     created in ddl/50_ml.sql AFTER this file) live in
+--     ddl/55_report_views_ml.sql instead.
+-- ====================================================================
+
+-- --------------------------------------------------------------------
+-- CAPR_TBSPC_DAYS_TO_FULL -- report section 1 (both halves).
+--   1a "by days-to-full"  : WHERE days_to_full IS NOT NULL
+--                             AND rank_dtf <= top_n  ORDER BY rank_dtf
+--   1b "near-full now"    : WHERE pct_used IS NOT NULL
+--                             AND rank_nearfull <= top_n  ORDER BY rank_nearfull
+-- sev_dtf keys off dtf_crit/dtf_warn (days), sev_nearfull off
+-- nearfull_crit_pct/nearfull_warn_pct (percent used) -- M7.1: the near-full
+-- ranking is deliberately independent of fit quality.
+-- GiB / MiB-per-day conversions are numeric columns (not strings) so a
+-- consumer can still compare and threshold them.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capr_tbspc_days_to_full AS
+WITH cfg AS (
+        SELECT MAX(CASE WHEN cfg_name = 'dtf_warn'          THEN cfg_value END) AS dtf_warn,
+               MAX(CASE WHEN cfg_name = 'dtf_crit'          THEN cfg_value END) AS dtf_crit,
+               MAX(CASE WHEN cfg_name = 'nearfull_warn_pct' THEN cfg_value END) AS nf_warn,
+               MAX(CASE WHEN cfg_name = 'nearfull_crit_pct' THEN cfg_value END) AS nf_crit
+        FROM   cap_config
+     )
+SELECT f.dbid,
+       f.con_dbid,
+       NVL(c.db_pdb, TO_CHAR(f.con_dbid))  AS db_pdb,
+       f.tablespace_name,
+       f.pct_used,
+       f.cur_used    / 1024 / 1024 / 1024  AS cur_gb,
+       f.limit_bytes / 1024 / 1024 / 1024  AS limit_gb,
+       f.slope_bpd   / 1024 / 1024         AS slope_mb,
+       f.days_to_full,
+       f.days_to_full_lo                   AS dtf_worst,
+       f.days_to_full_hi                   AS dtf_best,
+       CASE WHEN f.days_to_full <= cfg.dtf_crit THEN 'CRIT'
+            WHEN f.days_to_full <= cfg.dtf_warn THEN 'WARN'
+            ELSE 'ok'  END                 AS sev_dtf,
+       CASE WHEN f.pct_used >= cfg.nf_crit THEN 'CRIT'
+            WHEN f.pct_used >= cfg.nf_warn THEN 'WARN'
+            ELSE 'ok'  END                 AS sev_nearfull,
+       f.quality,
+       f.r2,
+       f.accel_ratio                       AS accel,
+       ROW_NUMBER() OVER (ORDER BY f.days_to_full NULLS LAST,
+                                   f.con_dbid, f.tablespace_name)  AS rank_dtf,
+       ROW_NUMBER() OVER (ORDER BY f.pct_used DESC NULLS LAST,
+                                   f.con_dbid, f.tablespace_name)  AS rank_nearfull
+FROM   capf_tbspc_forecast f
+CROSS  JOIN cfg
+LEFT   JOIN capr_container c
+  ON   c.dbid = f.dbid AND c.con_dbid = f.con_dbid;
+
+-- --------------------------------------------------------------------
+-- CAPR_TBSPC_ANOMALIES -- report section 3. Every FLAGGED day (no window
+-- applied here); a driver bounds it with  WHERE days_ago < anomaly_days.
+-- days_ago is measured from MAX(day_dt) over ALL of CAPD_TBSPC_DAILY --
+-- the same reference the report used before, so "last N days" means the
+-- last N collected days, not the last N days before an anomaly.
+-- day_str is the pre-formatted YYYY-MM-DD the reports print; day_dt stays
+-- a DATE for consumers that want to compare it.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capr_tbspc_anomalies AS
+SELECT a.dbid,
+       a.con_dbid,
+       NVL(c.db_pdb, TO_CHAR(a.con_dbid))      AS db_pdb,
+       a.tablespace_name,
+       a.day_dt,
+       TO_CHAR(a.day_dt, 'YYYY-MM-DD')         AS day_str,
+       (SELECT MAX(day_dt) FROM capd_tbspc_daily) - a.day_dt AS days_ago,
+       a.day_gap                               AS gap,
+       a.used_delta_bytes / 1048576            AS delta_mb,
+       a.used_rate_bpd    / 1048576            AS rate_mb,
+       a.median_rate_bpd  / 1048576            AS med_mb,
+       a.threshold_bpd    / 1048576            AS thr_mb,
+       a.robust_z                              AS z,
+       a.anomaly_flag
+FROM   capa_tbspc_anom a
+LEFT   JOIN capr_container c
+  ON   c.dbid = a.dbid AND c.con_dbid = a.con_dbid
+WHERE  a.anomaly_flag IS NOT NULL;
+
+-- --------------------------------------------------------------------
+-- CAPR_CPU_TREND -- report section 4. One row per (container, metric):
+-- BUSY_PCT / BUSY_P95 / BUSY_PEAK / DB_CPU_SEC / DB_CPU_PCT / DB_CPU_P95.
+-- sat_worst / sat_best are the M9.1 days-to-saturation range (lo = worst
+-- case / soonest; hi NULL = might never saturate).
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capr_cpu_trend AS
+SELECT t.dbid,
+       t.con_dbid,
+       NVL(c.db_pdb, TO_CHAR(t.con_dbid))  AS db_pdb,
+       t.metric,
+       t.last_day,
+       t.train_n,
+       t.cur_val,
+       t.slope_per_day,
+       t.r2,
+       t.days_to_sat,
+       t.days_to_sat_lo                    AS sat_worst,
+       t.days_to_sat_hi                    AS sat_best,
+       t.quality
+FROM   capf_cpu_trend t
+LEFT   JOIN capr_container c
+  ON   c.dbid = t.dbid AND c.con_dbid = t.con_dbid;
+
+-- --------------------------------------------------------------------
+-- CAPR_CPU_ANOMALIES -- report section 5. Same shape/contract as
+-- CAPR_TBSPC_ANOMALIES: flagged rows only, days_ago measured from
+-- MAX(day_dt) over CAPD_CPU_DAILY.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capr_cpu_anomalies AS
+SELECT a.dbid,
+       a.con_dbid,
+       NVL(c.db_pdb, TO_CHAR(a.con_dbid))    AS db_pdb,
+       a.day_dt,
+       TO_CHAR(a.day_dt, 'YYYY-MM-DD')       AS day_str,
+       (SELECT MAX(day_dt) FROM capd_cpu_daily) - a.day_dt AS days_ago,
+       a.busy_pct,
+       a.median_pct,
+       a.threshold_pct,
+       a.robust_z                            AS z,
+       a.anomaly_flag
+FROM   capa_cpu_anom a
+LEFT   JOIN capr_container c
+  ON   c.dbid = a.dbid AND c.con_dbid = a.con_dbid
+WHERE  a.anomaly_flag IS NOT NULL;

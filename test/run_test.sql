@@ -208,6 +208,52 @@ BEGIN
     SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SAT';
     chk_int('no CPU_SAT alert (flat CPU trend)', v_n, 0);
 
+    DBMS_OUTPUT.PUT_LINE('=== M8.2 CAPR_* report views ===');
+    -- Section 1a: FIX_FILLING fills soonest, so it ranks 1 and carries CRIT.
+    SELECT days_to_full, rank_dtf, sev_dtf INTO v_n, v_num, v_str
+      FROM capr_tbspc_days_to_full WHERE tablespace_name = 'FIX_FILLING';
+    chk_int('CAPR_TBSPC_DAYS_TO_FULL FILLING days_to_full', v_n, meta_n('FILLING_DTF'));
+    chk_int('CAPR_TBSPC_DAYS_TO_FULL FILLING rank_dtf', v_num, 1);
+    chk_str('CAPR_TBSPC_DAYS_TO_FULL FILLING sev_dtf', v_str, 'CRIT');
+    -- Section 1b: FIX_NEARFULL is the fullest RIGHT NOW (97%), any fit quality.
+    SELECT rank_nearfull, sev_nearfull INTO v_num, v_str
+      FROM capr_tbspc_days_to_full WHERE tablespace_name = 'FIX_NEARFULL';
+    chk_int('CAPR_TBSPC_DAYS_TO_FULL NEARFULL rank_nearfull', v_num, 1);
+    chk_str('CAPR_TBSPC_DAYS_TO_FULL NEARFULL sev_nearfull', v_str, 'CRIT');
+    SELECT COUNT(*) INTO v_n FROM capr_tbspc_days_to_full WHERE db_pdb <> 'FIXCDB';
+    chk_int('CAPR section views resolve db_pdb', v_n, 0);
+
+    -- Section 2: one row per tablespace, GiB conversion done in the view.
+    SELECT COUNT(*) INTO v_n   FROM capr_tbspc_forecast;
+    SELECT COUNT(*) INTO v_num FROM capf_tbspc_forecast;
+    chk_int('CAPR_TBSPC_FORECAST row count = CAPF_TBSPC_FORECAST', v_n, v_num);
+    SELECT cur_gb INTO v_num FROM capr_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
+    chk_close('CAPR_TBSPC_FORECAST LINEAR cur_gb', v_num,
+              meta_n('LINEAR_CUR') / 1073741824, 0.000001);
+
+    -- Section 3: flagged rows only; days_ago is measured from the last
+    -- collected day, so the report window is a plain WHERE days_ago < N.
+    SELECT days_ago INTO v_num FROM capr_tbspc_anomalies
+      WHERE tablespace_name = 'FIX_SPIKE' AND day_dt = d_spike;
+    chk_int('CAPR_TBSPC_ANOMALIES SPIKE days_ago', v_num, meta_d('LAST_DAY') - d_spike);
+    SELECT COUNT(*) INTO v_n FROM capr_tbspc_anomalies WHERE anomaly_flag IS NULL;
+    chk_int('CAPR_TBSPC_ANOMALIES holds flagged rows only', v_n, 0);
+
+    -- Section 4: the six CPU metrics (M10.1/M10.2) for the fixture database.
+    SELECT COUNT(*) INTO v_n FROM capr_cpu_trend WHERE dbid = v_dbid;
+    chk_int('CAPR_CPU_TREND metric count', v_n, 6);
+
+    -- Section 5: the injected Tuesday, same days_ago contract.
+    SELECT days_ago INTO v_num FROM capr_cpu_anomalies WHERE day_dt = d_inj;
+    chk_int('CAPR_CPU_ANOMALIES injected day days_ago', v_num, meta_d('LAST_DAY') - d_inj);
+
+    -- Section 6: the Tier 2 report views compile and answer even with no
+    -- ESM models trained (REGR backtest is pure SQL, so it always scores).
+    SELECT COUNT(*) INTO v_n FROM capr_esm_compare;
+    chk_true('CAPR_ESM_COMPARE queryable (' || v_n || ' rows)', v_n >= 0);
+    SELECT COUNT(*) INTO v_n FROM capr_backtest WHERE regr_mape IS NOT NULL;
+    chk_true('CAPR_BACKTEST scores REGR (' || v_n || ' series)', v_n >= 1);
+
     DBMS_OUTPUT.PUT_LINE('=== CPU restart guard + busy% ===');
     SELECT COUNT(*) INTO v_n FROM capd_cpu_daily
       WHERE dbid = v_dbid AND day_dt = d_restart;

@@ -1,7 +1,10 @@
 --
 -- 01_days_to_full.sql -- tablespaces ranked by days-to-full + near-full-now.
--- Consumes CAPF_TBSPC_FORECAST (+ CAPR_CONTAINER for DB/PDB labels).
--- WARN/CRIT from CAP_CONFIG (&dtf_warn/&dtf_crit, &nf_warn/&nf_crit).
+-- FORMAT ONLY (M8.2): every number, label and severity marker comes from
+-- CAPR_TBSPC_DAYS_TO_FULL, the same view the HTML report reads, so the two
+-- drivers cannot drift. WARN/CRIT thresholds are baked into the view's
+-- sev_dtf / sev_nearfull from CAP_CONFIG; the &dtf_*/&nf_* substitutions
+-- below are only echoed in the PROMPT headers.
 --
 -- M7.1: the ranking no longer hides non-OK fits -- every computable
 -- days_to_full appears WITH its quality marker (a LOW_CONFIDENCE estimate is
@@ -29,45 +32,37 @@ COLUMN sev             FORMAT A4            HEADING 'SEV'
 COLUMN quality         FORMAT A20           HEADING 'QUALITY'
 COLUMN accel           FORMAT 990.00        HEADING 'ACCEL'
 
-SELECT NVL(c.db_pdb, TO_CHAR(f.con_dbid)) AS db_pdb,
-       f.tablespace_name,
-       f.pct_used,
-       f.cur_used    / 1024 / 1024 / 1024 AS cur_gb,
-       f.limit_bytes / 1024 / 1024 / 1024 AS limit_gb,
-       f.slope_bpd   / 1024 / 1024        AS slope_mb,
-       f.days_to_full,
-       f.days_to_full_lo                  AS dtf_worst,
-       f.days_to_full_hi                  AS dtf_best,
-       CASE WHEN f.days_to_full <= &dtf_crit THEN 'CRIT'
-            WHEN f.days_to_full <= &dtf_warn THEN 'WARN'
-            ELSE 'ok'  END                AS sev,
-       f.quality,
-       f.accel_ratio                      AS accel
-FROM   capf_tbspc_forecast f
-LEFT   JOIN capr_container c
-  ON   c.dbid = f.dbid AND c.con_dbid = f.con_dbid
-WHERE  f.days_to_full IS NOT NULL
-ORDER  BY f.days_to_full
-FETCH FIRST &top_n ROWS ONLY;
+SELECT db_pdb,
+       tablespace_name,
+       pct_used,
+       cur_gb,
+       limit_gb,
+       slope_mb,
+       days_to_full,
+       dtf_worst,
+       dtf_best,
+       sev_dtf AS sev,
+       quality,
+       accel
+FROM   capr_tbspc_days_to_full
+WHERE  days_to_full IS NOT NULL
+  AND  rank_dtf <= &top_n
+ORDER  BY rank_dtf;
 
 PROMPT
 PROMPT == 1b. NEAR-FULL NOW (by PCT_USED, independent of fit quality; top &top_n) ==
 PROMPT     SEV: CRIT>=&nf_crit%, WARN>=&nf_warn% used. A tablespace can be nearly full
 PROMPT     today even when its growth is too flat/erratic to forecast.
 
-SELECT NVL(c.db_pdb, TO_CHAR(f.con_dbid)) AS db_pdb,
-       f.tablespace_name,
-       f.pct_used,
-       f.cur_used    / 1024 / 1024 / 1024 AS cur_gb,
-       f.limit_bytes / 1024 / 1024 / 1024 AS limit_gb,
-       f.days_to_full,
-       CASE WHEN f.pct_used >= &nf_crit THEN 'CRIT'
-            WHEN f.pct_used >= &nf_warn THEN 'WARN'
-            ELSE 'ok'  END                AS sev,
-       f.quality
-FROM   capf_tbspc_forecast f
-LEFT   JOIN capr_container c
-  ON   c.dbid = f.dbid AND c.con_dbid = f.con_dbid
-WHERE  f.pct_used IS NOT NULL
-ORDER  BY f.pct_used DESC
-FETCH FIRST &top_n ROWS ONLY;
+SELECT db_pdb,
+       tablespace_name,
+       pct_used,
+       cur_gb,
+       limit_gb,
+       days_to_full,
+       sev_nearfull AS sev,
+       quality
+FROM   capr_tbspc_days_to_full
+WHERE  pct_used IS NOT NULL
+  AND  rank_nearfull <= &top_n
+ORDER  BY rank_nearfull;

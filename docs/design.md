@@ -208,9 +208,10 @@ no partitioned ESM) via `DBMS_DATA_MINING.CREATE_MODEL2(mining_function =>
 -- /
 ```
 
-## Layer 6 — integration (`CAPR_*`, M7.2/M8.1)
+## Layer 6 — integration + report views (`CAPR_*`, M7.2/M8.1/M8.2)
 
-Two seam-agnostic views for consumers outside the bundled reports:
+Seam-agnostic views for consumers outside the bundled reports — and, since
+M8.2, for the bundled reports themselves:
 
 - `CAPR_CONTAINER` wraps `CAPV_CONTAINER` and computes `db_pdb`, the one
   display label every report section prints instead of a raw `con_dbid`
@@ -228,13 +229,37 @@ Two seam-agnostic views for consumers outside the bundled reports:
   DEFINE is presentation-only). Both reports' at-a-glance blocks read this
   view, so paging and reporting can never disagree.
 
+**M8.2 — one view per report section.** Every section's SELECT now lives in a
+`CAPR_*` view, so `report/report.sql` (via `report/sections/*.sql`) and
+`report/report_html.sql` only *format*: no analytic SQL is duplicated between
+the two drivers, and they cannot drift.
+
+| view | section | notes |
+| --- | --- | --- |
+| `CAPR_TBSPC_DAYS_TO_FULL` | 1a + 1b | `pct_used`, GiB/MiB numeric columns, `sev_dtf` (days) and `sev_nearfull` (percent) markers, the M9.1 `dtf_worst`/`dtf_best` range, plus `rank_dtf` / `rank_nearfull` (`ROW_NUMBER`) so a driver applies `top_n` with `WHERE rank_* <= n` instead of its own `ORDER BY … FETCH FIRST` |
+| `CAPR_TBSPC_FORECAST` | 2 | GiB projections + the +180 band, `train_n`, `r2`, `quality`, the Tier 2 `esm30`/`esm30_lo`/`esm30_hi` point, raw byte columns and `rank_chart` for the HTML chart grid |
+| `CAPR_TBSPC_ANOMALIES` | 3 | flagged rows only, MiB conversions, `day_str`, and `days_ago` = `MAX(day_dt)` over `CAPD_TBSPC_DAILY` minus the row's day, so the report window is `WHERE days_ago < anomaly_days` |
+| `CAPR_CPU_TREND` | 4 | per (container, metric) trend with `sat_worst`/`sat_best` |
+| `CAPR_CPU_ANOMALIES` | 5 | same contract as the tablespace anomaly view |
+| `CAPR_ESM_COMPARE` | 6a/6b | REGR vs ESM pivoted per (container, series, horizon), in raw units *and* GiB; filter on `series_kind` |
+| `CAPR_BACKTEST` | 6c | the M9.4 holdout scorecard pivoted per series, incl. the `better` verdict |
+
+All of them resolve `db_pdb` through `CAPR_CONTAINER` themselves. The last
+three read `CAPF_COMPARE` / `CAPF_BACKTEST`, which `ddl/50_ml.sql` creates
+*after* `ddl/45_report_views.sql`, so they live in `ddl/55_report_views_ml.sql`
+(loaded last by `install.sql`). What is still computed inside
+`report_html.sql` is only chart *geometry*: raw `CAPD_*` history points, the
+anomaly-dot / timeline placements, and the whole-database `cur_hero`
+regression that has no section of its own.
+
 ## Report
 
 `report/report.sql` spools a read-only text report (7 sections: an
 at-a-glance alert roll-up from `CAPR_ALERTS`, then the six detail sections) to
 `reports/cap_report_<db>_<ts>.txt`. Identity comes from `SYS_CONTEXT` (no `V$`
-or catalog privileges needed, so any monitoring schema can run it). Sections
-consume only `CAPF_*`/`CAPA_*`/`CAPR_*`. `show_esm` = `AUTO`/`Y`/`N` controls
+or catalog privileges needed, so any monitoring schema can run it). Since M8.2
+the sections consume **only** `CAPR_*` — they are `SELECT` + `COLUMN` formats
+and nothing else. `show_esm` = `AUTO`/`Y`/`N` controls
 the Tier 2 section (AUTO prints a hint when no models are trained). Section 1
 ranks days-to-full across **all** fit qualities (marker column says how much
 to trust each row) and adds a near-full-now ranking by `pct_used` (M7.1).

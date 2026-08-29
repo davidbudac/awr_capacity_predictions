@@ -1,6 +1,7 @@
 --
 -- 05_cpu_anomalies.sql -- host busy% anomalies vs same-weekday baseline.
--- Consumes CAPA_CPU_ANOM. Threshold = k * max(MAD, cpu_min_mad_pct floor).
+-- FORMAT ONLY (M8.2): CAPR_CPU_ANOMALIES (flagged rows, DB/PDB label and
+-- days_ago precomputed). Threshold = k * max(MAD, cpu_min_mad_pct floor).
 --
 PROMPT
 PROMPT == 5. CPU BUSY% ANOMALIES vs same-weekday baseline (last &anomaly_days days) ==
@@ -14,16 +15,14 @@ COLUMN threshold_pct FORMAT 9990.00     HEADING 'THRESH%'
 COLUMN z            FORMAT 99990.0      HEADING 'ROBUST_Z'
 COLUMN anomaly_flag FORMAT A5           HEADING 'FLAG'
 
-SELECT NVL(cn.db_pdb, TO_CHAR(a.con_dbid)) AS db_pdb,
-       TO_CHAR(a.day_dt,'YYYY-MM-DD') AS day_dt,
-       a.busy_pct,
-       a.median_pct,
-       a.threshold_pct,
-       a.robust_z AS z,
-       a.anomaly_flag
-FROM   capa_cpu_anom a
-LEFT   JOIN capr_container cn
-  ON   cn.dbid = a.dbid AND cn.con_dbid = a.con_dbid
-WHERE  a.anomaly_flag IS NOT NULL
-  AND  a.day_dt > (SELECT MAX(day_dt) FROM capd_cpu_daily) - &anomaly_days
-ORDER  BY a.day_dt DESC, a.con_dbid;
+SELECT db_pdb,
+       day_str AS day_dt,
+       busy_pct,
+       median_pct,
+       threshold_pct,
+       z,
+       anomaly_flag
+FROM   capr_cpu_anomalies
+WHERE  days_ago < &anomaly_days
+-- days_ago ASC is exactly day_dt DESC (days_ago = last collected day - day_dt)
+ORDER  BY days_ago, con_dbid;

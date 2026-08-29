@@ -1,7 +1,10 @@
 --
 -- 03_tbspc_anomalies.sql -- tablespace growth anomalies, last &anomaly_days days.
--- Consumes CAPA_TBSPC_ANOM. Every row is hand-auditable: delta vs median vs
--- the k*MAD (floored) threshold, plus the robust z.
+-- FORMAT ONLY (M8.2): CAPR_TBSPC_ANOMALIES holds every flagged row with the
+-- MiB conversions and the DB/PDB label already applied; days_ago (measured
+-- from the last collected day) turns the report window into a plain WHERE.
+-- Every row stays hand-auditable: delta vs median vs the k*MAD (floored)
+-- threshold, plus the robust z.
 --
 PROMPT
 PROMPT == 3. TABLESPACE GROWTH ANOMALIES (last &anomaly_days days) ==
@@ -20,19 +23,17 @@ COLUMN thr_mb          FORMAT 9999990.0    HEADING 'THR_MB/D'
 COLUMN z               FORMAT 99990.0      HEADING 'ROBUST_Z'
 COLUMN anomaly_flag    FORMAT A5           HEADING 'FLAG'
 
-SELECT NVL(cn.db_pdb, TO_CHAR(a.con_dbid)) AS db_pdb,
-       a.tablespace_name,
-       TO_CHAR(a.day_dt,'YYYY-MM-DD')   AS day_dt,
-       a.day_gap                    AS gap,
-       a.used_delta_bytes / 1048576 AS delta_mb,
-       a.used_rate_bpd    / 1048576 AS rate_mb,
-       a.median_rate_bpd  / 1048576 AS med_mb,
-       a.threshold_bpd    / 1048576 AS thr_mb,
-       a.robust_z                   AS z,
-       a.anomaly_flag
-FROM   capa_tbspc_anom a
-LEFT   JOIN capr_container cn
-  ON   cn.dbid = a.dbid AND cn.con_dbid = a.con_dbid
-WHERE  a.anomaly_flag IS NOT NULL
-  AND  a.day_dt > (SELECT MAX(day_dt) FROM capd_tbspc_daily) - &anomaly_days
-ORDER  BY a.day_dt DESC, a.con_dbid, a.tablespace_name;
+SELECT db_pdb,
+       tablespace_name,
+       day_str AS day_dt,
+       gap,
+       delta_mb,
+       rate_mb,
+       med_mb,
+       thr_mb,
+       z,
+       anomaly_flag
+FROM   capr_tbspc_anomalies
+WHERE  days_ago < &anomaly_days
+-- days_ago ASC is exactly day_dt DESC (days_ago = last collected day - day_dt)
+ORDER  BY days_ago, con_dbid, tablespace_name;

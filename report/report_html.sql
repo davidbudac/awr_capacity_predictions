@@ -5,8 +5,11 @@
 -- reports/cap_report_<db>_<ts>.html. READ-ONLY: only SELECTs (the CAPF_ESM
 -- views call a pipelined function, which writes nothing). Creates/modifies no
 -- database object. This is a SIBLING of report/report.sql (the plain-text
--- report) -- it duplicates that SQL logic to render HTML instead; report.sql
--- and report/sections/*.sql are untouched.
+-- report): since M8.2 BOTH drivers read the same CAPR_* per-section views
+-- (ddl/45_report_views.sql + ddl/55_report_views_ml.sql) and only FORMAT --
+-- the analytics SQL is no longer duplicated here, so text and HTML cannot
+-- drift. Only chart geometry (raw CAPD_* history points, the whole-database
+-- cur_hero regression) is still computed in this file.
 --
 -- Run from the REPO ROOT so the @@report/defaults.sql include resolves
 -- (SQL*Plus @@ is relative to the outermost caller's directory on 19c):
@@ -945,8 +948,8 @@ BEGIN
   -- (a) tablespaces forecast to fill within the warning window.
   FOR ta IN (
     SELECT tablespace_name, days_to_full,
-           CASE WHEN days_to_full <= dtf_crit THEN 2 ELSE 1 END AS sev
-    FROM   capf_tbspc_forecast
+           CASE WHEN sev_dtf = 'CRIT' THEN 2 ELSE 1 END AS sev
+    FROM   capr_tbspc_days_to_full
     WHERE  quality = 'OK' AND days_to_full IS NOT NULL AND days_to_full <= dtf_warn
     ORDER  BY days_to_full
   ) LOOP
@@ -999,28 +1002,24 @@ BEGIN
 
   -- (c) host CPU projected to reach saturation within the warning window.
   FOR cc IN (
-    SELECT dbid, con_dbid, days_to_sat,
+    SELECT db_pdb, con_dbid, days_to_sat,
            CASE WHEN days_to_sat <= dtf_crit THEN 2 ELSE 1 END AS sev
-    FROM   capf_cpu_trend
+    FROM   capr_cpu_trend
     WHERE  metric = 'BUSY_PCT' AND quality = 'OK'
       AND  days_to_sat IS NOT NULL AND days_to_sat <= dtf_warn
     ORDER  BY con_dbid
   ) LOOP
     v_nitems := v_nitems + 1;
     v_items(v_nitems) := '<li>Host CPU'
-                         || CASE WHEN v_con_count > 1 THEN ' (' || esc(db_label(cc.dbid, cc.con_dbid)) || ')' END
+                         || CASE WHEN v_con_count > 1 THEN ' (' || esc(cc.db_pdb) || ')' END
                          || ' could reach ' || TO_CHAR(cpu_sat, 'FM990') || '% busy in '
                          || time_phrase(cc.days_to_sat) || '</li>';
     v_max_sev := GREATEST(v_max_sev, cc.sev);
   END LOOP;
 
   -- (d) neutral info: flagged unusual days in the window (never raises severity).
-  SELECT (SELECT COUNT(*) FROM capa_tbspc_anom
-          WHERE anomaly_flag IS NOT NULL
-            AND day_dt > (SELECT MAX(day_dt) FROM capd_tbspc_daily) - anomaly_days)
-       + (SELECT COUNT(*) FROM capa_cpu_anom
-          WHERE anomaly_flag IS NOT NULL
-            AND day_dt > (SELECT MAX(day_dt) FROM capd_cpu_daily) - anomaly_days)
+  SELECT (SELECT COUNT(*) FROM capr_tbspc_anomalies WHERE days_ago < anomaly_days)
+       + (SELECT COUNT(*) FROM capr_cpu_anomalies   WHERE days_ago < anomaly_days)
     INTO v_anom_count FROM dual;
 
   IF v_nitems = 0 THEN
@@ -1051,7 +1050,7 @@ BEGIN
 
   ----------------------------------------------------------------------
   -- Hero duo: whole-database total-size hero, then host-CPU hero, side by side.
-  -- Both use cur_hero / capf_cpu_trend, the same views/knobs as the detail
+  -- Both use cur_hero / CAPR_CPU_TREND, the same views/knobs as the detail
   -- sections, so a hero can never contradict the tables below.
   ----------------------------------------------------------------------
   p('<div class="hero-duo">');
@@ -1245,13 +1244,13 @@ BEGIN
   -- like section 4's (threshold line at cpu_sat, dashed REGR projection to +90
   -- when quality=OK, red anomaly dots) at the same 560x250 hero geometry.
   FOR ch IN (
-    SELECT dbid, con_dbid, cur_val, days_to_sat, r2, quality, slope_per_day
-    FROM   capf_cpu_trend
+    SELECT db_pdb, con_dbid, cur_val, days_to_sat, r2, quality, slope_per_day
+    FROM   capr_cpu_trend
     WHERE  metric = 'BUSY_PCT'
     ORDER  BY con_dbid
   ) LOOP
     v_hlabel := 'Host CPU'
-                || CASE WHEN v_con_count > 1 THEN ' (' || db_label(ch.dbid, ch.con_dbid) || ')' END;
+                || CASE WHEN v_con_count > 1 THEN ' (' || ch.db_pdb || ')' END;
     v_hpill := NULL;
     IF ch.quality = 'OK' AND ch.days_to_sat IS NOT NULL THEN
       v_accent := CASE WHEN ch.days_to_sat <= dtf_crit THEN 'g-crit'
@@ -1513,16 +1512,16 @@ BEGIN
   -- to forecast it can never hide it.
   FOR r IN (
     SELECT tablespace_name,
-           cur_used    / 1073741824 AS cur_gb,
-           limit_bytes / 1073741824 AS lim_gb,
-           pct_used, quality
-    FROM   capf_tbspc_forecast
+           cur_gb,
+           limit_gb AS lim_gb,
+           pct_used, quality, sev_nearfull
+    FROM   capr_tbspc_days_to_full
     WHERE  pct_used >= nf_warn
-    ORDER  BY pct_used DESC
-    FETCH FIRST top_n ROWS ONLY
+      AND  rank_nearfull <= top_n
+    ORDER  BY rank_nearfull
   ) LOOP
     v_card_count := v_card_count + 1;
-    v_accent := CASE WHEN r.pct_used >= nf_crit THEN 'g-crit' ELSE 'g-warn' END;
+    v_accent := CASE WHEN r.sev_nearfull = 'CRIT' THEN 'g-crit' ELSE 'g-warn' END;
     p('<div class="gcard ' || v_accent || '">');
     p('<h4 class="g-head">' || esc(r.tablespace_name) || ' &mdash; '
       || TO_CHAR(r.pct_used, 'FM990.0') || '% full right now'
@@ -1538,21 +1537,21 @@ BEGIN
   -- One card per tablespace with a confident, computable days-to-full.
   FOR r IN (
     SELECT tablespace_name,
-           cur_used    / 1073741824 AS cur_gb,
-           limit_bytes / 1073741824 AS lim_gb,
+           cur_gb,
+           limit_gb AS lim_gb,
            days_to_full,
-           days_to_full_lo,
-           r2
-    FROM   capf_tbspc_forecast
+           dtf_worst AS days_to_full_lo,
+           r2, sev_dtf
+    FROM   capr_tbspc_days_to_full
     WHERE  quality = 'OK'
       AND  days_to_full IS NOT NULL
     ORDER  BY days_to_full
     FETCH FIRST top_n ROWS ONLY
   ) LOOP
     v_card_count := v_card_count + 1;
-    v_accent := CASE WHEN r.days_to_full <= dtf_crit THEN 'g-crit'
-                     WHEN r.days_to_full <= dtf_warn THEN 'g-warn'
-                     ELSE 'g-ok' END;
+    v_accent := CASE r.sev_dtf WHEN 'CRIT' THEN 'g-crit'
+                               WHEN 'WARN' THEN 'g-warn'
+                               ELSE 'g-ok' END;
     v_conf   := CASE WHEN r.r2 >= 0.9 THEN 'high confidence' ELSE 'good confidence' END;
     p('<div class="gcard ' || v_accent || '">');
     p('<h4 class="g-head">' || esc(r.tablespace_name) || ' &mdash; full in ' || time_phrase(r.days_to_full)
@@ -1581,7 +1580,7 @@ BEGIN
     BEGIN
       SELECT quality INTO v_dom FROM (
         SELECT quality, COUNT(*) AS c
-        FROM   capf_tbspc_forecast
+        FROM   capr_tbspc_days_to_full
         GROUP  BY quality
         ORDER  BY c DESC, quality
       ) WHERE ROWNUM = 1;
@@ -1614,7 +1613,7 @@ BEGIN
          SUM(CASE WHEN quality = 'LOW_CONFIDENCE'       THEN 1 ELSE 0 END),
          SUM(CASE WHEN quality = 'INSUFFICIENT_HISTORY' THEN 1 ELSE 0 END)
     INTO v_n_flat, v_n_low, v_n_insuf
-  FROM   capf_tbspc_forecast;
+  FROM   capr_tbspc_days_to_full;
   v_roll := NULL;
   IF v_n_flat > 0 THEN
     v_roll := CASE WHEN v_n_flat = 1
@@ -1675,25 +1674,22 @@ BEGIN
 
   any_rows := FALSE;
   FOR r IN (
-    SELECT dbid,
-           con_dbid,
+    SELECT db_pdb,
            tablespace_name,
-           cur_used    / 1024 / 1024 / 1024 AS cur_gb,
-           limit_bytes / 1024 / 1024 / 1024 AS limit_gb,
+           cur_gb,
+           limit_gb,
            pct_used,
-           slope_bpd   / 1024 / 1024        AS slope_mb,
+           slope_mb,
            days_to_full,
-           days_to_full_lo,
-           days_to_full_hi,
-           CASE WHEN days_to_full <= dtf_crit THEN 'CRIT'
-                WHEN days_to_full <= dtf_warn THEN 'WARN'
-                ELSE 'ok'  END              AS sev,
+           dtf_worst AS days_to_full_lo,
+           dtf_best  AS days_to_full_hi,
+           sev_dtf   AS sev,
            quality,
-           accel_ratio                      AS accel
-    FROM   capf_tbspc_forecast
+           accel
+    FROM   capr_tbspc_days_to_full
     WHERE  days_to_full IS NOT NULL
-    ORDER  BY days_to_full
-    FETCH FIRST top_n ROWS ONLY
+      AND  rank_dtf <= top_n
+    ORDER  BY rank_dtf
   ) LOOP
     IF NOT any_rows THEN
       p('<table class="tbl"><thead><tr>'
@@ -1709,7 +1705,7 @@ BEGIN
         || '</tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
-    p('<tr><td>' || esc(db_label(r.dbid, r.con_dbid)) || '</td><td>' || esc(r.tablespace_name) || '</td>'
+    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.tablespace_name) || '</td>'
       || '<td class="num">' || nz(r.cur_gb) || '</td><td class="num">' || nz(r.limit_gb) || '</td>'
       || '<td>' || bar(r.pct_used,
                         CASE r.sev WHEN 'CRIT' THEN 'crit' WHEN 'WARN' THEN 'warn' ELSE '' END) || '</td>'
@@ -1741,21 +1737,18 @@ BEGIN
     || '</h3>');
   any_rows := FALSE;
   FOR r IN (
-    SELECT dbid,
-           con_dbid,
+    SELECT db_pdb,
            tablespace_name,
-           cur_used    / 1024 / 1024 / 1024 AS cur_gb,
-           limit_bytes / 1024 / 1024 / 1024 AS limit_gb,
+           cur_gb,
+           limit_gb,
            pct_used,
            days_to_full,
-           CASE WHEN pct_used >= nf_crit THEN 'CRIT'
-                WHEN pct_used >= nf_warn THEN 'WARN'
-                ELSE 'ok'  END              AS sev,
+           sev_nearfull AS sev,
            quality
-    FROM   capf_tbspc_forecast
+    FROM   capr_tbspc_days_to_full
     WHERE  pct_used IS NOT NULL
-    ORDER  BY pct_used DESC
-    FETCH FIRST top_n ROWS ONLY
+      AND  rank_nearfull <= top_n
+    ORDER  BY rank_nearfull
   ) LOOP
     IF NOT any_rows THEN
       p('<table class="tbl"><thead><tr>'
@@ -1765,7 +1758,7 @@ BEGIN
         || '</tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
-    p('<tr><td>' || esc(db_label(r.dbid, r.con_dbid)) || '</td><td>' || esc(r.tablespace_name) || '</td>'
+    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.tablespace_name) || '</td>'
       || '<td class="num">' || nz(r.cur_gb) || '</td><td class="num">' || nz(r.limit_gb) || '</td>'
       || '<td>' || bar(r.pct_used,
                         CASE r.sev WHEN 'CRIT' THEN 'crit' WHEN 'WARN' THEN 'warn' ELSE '' END) || '</td>'
@@ -1798,7 +1791,7 @@ BEGIN
   ----------------------------------------------------------------------
   chart_legend;
 
-  SELECT COUNT(*) INTO v_total_ts FROM capf_tbspc_forecast;
+  SELECT COUNT(*) INTO v_total_ts FROM capr_tbspc_forecast;
   IF v_total_ts > top_n THEN
     p('<div class="note">Chart grid capped at top ' || top_n || ' of ' || v_total_ts
       || ' tablespaces (by days-to-full, NULLS LAST, then name); ' || (v_total_ts - top_n)
@@ -1811,10 +1804,11 @@ BEGIN
   ELSE
     p('<div class="chart-grid">');
     FOR f IN (
-      SELECT dbid, con_dbid, tablespace_name, cur_used, limit_bytes, slope_bpd, quality
-      FROM   capf_tbspc_forecast
-      ORDER  BY days_to_full NULLS LAST, tablespace_name
-      FETCH FIRST top_n ROWS ONLY
+      SELECT dbid, con_dbid, tablespace_name, cur_bytes, limit_bytes, slope_bpd, quality,
+             esm30, esm30_lo, esm30_hi
+      FROM   capr_tbspc_forecast
+      WHERE  rank_chart <= top_n
+      ORDER  BY rank_chart
     ) LOOP
       xs.DELETE;
       ys.DELETE;
@@ -1833,18 +1827,9 @@ BEGIN
         p('<div class="empty-note">No daily history collected yet for this tablespace.</div>');
         p('</div>');
       ELSE
-        -- ESM +30 point (if a fresh model exists for this series) -- same
-        -- join CAPF_COMPARE predicate as the ESM+30 column in the table below.
-        v_esm_val := NULL; v_esm_lo := NULL; v_esm_hi := NULL;
-        BEGIN
-          SELECT c.value / 1073741824, c.lower_bound / 1073741824, c.upper_bound / 1073741824
-            INTO   v_esm_val, v_esm_lo, v_esm_hi
-          FROM   capf_compare c
-          WHERE  c.engine = 'ESM' AND c.series_kind = 'TBSPC'
-            AND  c.dbid = f.dbid AND c.con_dbid = f.con_dbid AND c.series_key = f.tablespace_name
-            AND  c.horizon_days = 30;
-        EXCEPTION WHEN NO_DATA_FOUND THEN NULL;
-        END;
+        -- ESM +30 point (if a fresh model exists for this series) -- the very
+        -- same CAPR_TBSPC_FORECAST columns the ESM+30 cell prints below.
+        v_esm_val := f.esm30; v_esm_lo := f.esm30_lo; v_esm_hi := f.esm30_hi;
 
         v_last_day_n := xs(v_cnt);
         v_xmin       := xs(1);
@@ -1885,7 +1870,7 @@ BEGIN
 
         -- COALESCE, not nz(): nz's '&ndash;' placeholder would be re-escaped
         -- by chart_open's esc() and render as literal "&amp;ndash;" text.
-        v_subtitle := 'cur ' || COALESCE(TO_CHAR(f.cur_used / 1073741824, 'FM999999990.00'), 'n/a')
+        v_subtitle := 'cur ' || COALESCE(TO_CHAR(f.cur_bytes / 1073741824, 'FM999999990.00'), 'n/a')
                       || ' GB | limit ' || COALESCE(TO_CHAR(v_limit_gb, 'FM999999990.00'), 'n/a') || ' GB';
         IF v_limit_gb IS NOT NULL AND NOT v_show_limit THEN
           v_subtitle := v_subtitle || ' (line hidden, out of chart scale)';
@@ -1935,24 +1920,20 @@ BEGIN
 
   any_rows := FALSE;
   FOR r IN (
-    SELECT f.dbid,
-           f.con_dbid,
-           f.tablespace_name,
-           f.train_n                          AS n,
-           f.cur_used       / 1073741824 AS cur_gb,
-           f.proj_30_bytes  / 1073741824 AS p30,
-           f.proj_90_bytes  / 1073741824 AS p90,
-           f.proj_180_bytes / 1073741824 AS p180,
-           f.proj_180_lo    / 1073741824 AS p180_lo,
-           f.proj_180_hi    / 1073741824 AS p180_hi,
-           f.r2,
-           f.quality,
-           (SELECT c.value / 1073741824 FROM capf_compare c
-             WHERE c.engine='ESM' AND c.series_kind='TBSPC'
-               AND c.dbid=f.dbid AND c.con_dbid=f.con_dbid AND c.series_key=f.tablespace_name
-               AND c.horizon_days=30)          AS esm30
-    FROM   capf_tbspc_forecast f
-    ORDER  BY f.con_dbid, f.tablespace_name
+    SELECT db_pdb,
+           tablespace_name,
+           train_n AS n,
+           cur_gb,
+           p30,
+           p90,
+           p180,
+           p180_lo,
+           p180_hi,
+           r2,
+           quality,
+           esm30
+    FROM   capr_tbspc_forecast
+    ORDER  BY con_dbid, tablespace_name
   ) LOOP
     IF NOT any_rows THEN
       p('<table class="tbl"><thead><tr>'
@@ -1968,7 +1949,7 @@ BEGIN
         || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
-    p('<tr><td>' || esc(db_label(r.dbid, r.con_dbid)) || '</td><td>' || esc(r.tablespace_name) || '</td>'
+    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.tablespace_name) || '</td>'
       || '<td class="num">' || nz(r.n, 'FM9990') || '</td>'
       || '<td class="num">' || nz(r.cur_gb) || '</td>'
       || '<td class="num">' || nz(r.p30) || '</td>'
@@ -1999,21 +1980,19 @@ BEGIN
 
   any_rows := FALSE;
   FOR r IN (
-    SELECT dbid,
-           con_dbid,
+    SELECT db_pdb,
            tablespace_name,
-           TO_CHAR(day_dt,'YYYY-MM-DD')     AS day_dt,
-           day_gap                    AS gap,
-           used_delta_bytes / 1048576 AS delta_mb,
-           used_rate_bpd    / 1048576 AS rate_mb,
-           median_rate_bpd  / 1048576 AS med_mb,
-           threshold_bpd    / 1048576 AS thr_mb,
-           robust_z                   AS z,
+           day_str AS day_dt,
+           gap,
+           delta_mb,
+           rate_mb,
+           med_mb,
+           thr_mb,
+           z,
            anomaly_flag
-    FROM   capa_tbspc_anom
-    WHERE  anomaly_flag IS NOT NULL
-      AND  day_dt > (SELECT MAX(day_dt) FROM capd_tbspc_daily) - anomaly_days
-    ORDER  BY day_dt DESC, con_dbid, tablespace_name
+    FROM   capr_tbspc_anomalies
+    WHERE  days_ago < anomaly_days
+    ORDER  BY days_ago, con_dbid, tablespace_name
   ) LOOP
     IF NOT any_rows THEN
       p('<table class="tbl"><thead><tr>'
@@ -2027,7 +2006,7 @@ BEGIN
         || '</th><th>FLAG' || info_icon('the direction of the flagged change for this day') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
-    p('<tr><td>' || esc(db_label(r.dbid, r.con_dbid)) || '</td><td>' || esc(r.tablespace_name) || '</td><td>' || r.day_dt || '</td>'
+    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.tablespace_name) || '</td><td>' || r.day_dt || '</td>'
       || '<td class="num">' || nz(r.gap, 'FM990') || '</td>'
       || '<td class="num">' || nz(r.delta_mb, 'FM9999990.0') || '</td>'
       || '<td class="num">' || nz(r.rate_mb, 'FM9999990.0') || '</td>'
@@ -2089,7 +2068,7 @@ BEGIN
       END LOOP;
 
       v_quality := NULL; v_slope := NULL;
-      FOR t IN (SELECT slope_per_day, quality FROM capf_cpu_trend
+      FOR t IN (SELECT slope_per_day, quality FROM capr_cpu_trend
                 WHERE con_dbid = cd.con_dbid AND metric = 'BUSY_PCT'
                 ORDER BY dbid FETCH FIRST 1 ROW ONLY) LOOP
         v_quality := t.quality;
@@ -2150,7 +2129,7 @@ BEGIN
       END LOOP;
 
       v_quality := NULL; v_slope := NULL;
-      FOR t IN (SELECT slope_per_day, quality FROM capf_cpu_trend
+      FOR t IN (SELECT slope_per_day, quality FROM capr_cpu_trend
                 WHERE con_dbid = cd.con_dbid AND metric = 'DB_CPU_SEC'
                 ORDER BY dbid FETCH FIRST 1 ROW ONLY) LOOP
         v_quality := t.quality;
@@ -2196,18 +2175,17 @@ BEGIN
 
   any_rows := FALSE;
   FOR r IN (
-    SELECT dbid,
-           con_dbid,
+    SELECT db_pdb,
            metric,
-           train_n        AS n,
+           train_n       AS n,
            cur_val,
-           slope_per_day  AS slope_day,
+           slope_per_day AS slope_day,
            r2,
-           days_to_sat    AS days_sat,
-           days_to_sat_lo,
-           days_to_sat_hi,
+           days_to_sat   AS days_sat,
+           sat_worst,
+           sat_best,
            quality
-    FROM   capf_cpu_trend
+    FROM   capr_cpu_trend
     ORDER  BY con_dbid, metric
   ) LOOP
     IF NOT any_rows THEN
@@ -2220,7 +2198,7 @@ BEGIN
         || '</th><th>QUALITY</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
-    p('<tr><td>' || esc(db_label(r.dbid, r.con_dbid)) || '</td><td>' || esc(r.metric) || '</td>'
+    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.metric) || '</td>'
       || '<td class="num">' || nz(r.n, 'FM9990') || '</td>'
       || '<td>' || CASE WHEN r.metric <> 'DB_CPU_SEC' THEN bar(r.cur_val,
                      CASE WHEN r.cur_val >= cpu_sat THEN 'crit'
@@ -2232,9 +2210,9 @@ BEGIN
       || '<td class="num' || (CASE WHEN r.days_sat IS NOT NULL AND r.days_sat <= dtf_warn THEN ' sev-warn' END)
          || '">' || nz(r.days_sat, 'FM99999990') || '</td>'
       || '<td class="num">'
-      || CASE WHEN r.days_to_sat_lo IS NULL THEN '&ndash;'
-              ELSE TO_CHAR(r.days_to_sat_lo, 'FM99999990') || '&ndash;'
-                   || NVL(TO_CHAR(r.days_to_sat_hi, 'FM99999990'), 'never') END || '</td>'
+      || CASE WHEN r.sat_worst IS NULL THEN '&ndash;'
+              ELSE TO_CHAR(r.sat_worst, 'FM99999990') || '&ndash;'
+                   || NVL(TO_CHAR(r.sat_best, 'FM99999990'), 'never') END || '</td>'
       || '<td>' || quality_pill(r.quality) || '</td></tr>');
   END LOOP;
   IF any_rows THEN
@@ -2255,18 +2233,16 @@ BEGIN
 
   any_rows := FALSE;
   FOR r IN (
-    SELECT dbid,
-           con_dbid,
-           TO_CHAR(day_dt,'YYYY-MM-DD') AS day_dt,
+    SELECT db_pdb,
+           day_str AS day_dt,
            busy_pct,
            median_pct,
            threshold_pct,
-           robust_z AS z,
+           z,
            anomaly_flag
-    FROM   capa_cpu_anom
-    WHERE  anomaly_flag IS NOT NULL
-      AND  day_dt > (SELECT MAX(day_dt) FROM capd_cpu_daily) - anomaly_days
-    ORDER  BY day_dt DESC, con_dbid
+    FROM   capr_cpu_anomalies
+    WHERE  days_ago < anomaly_days
+    ORDER  BY days_ago, con_dbid
   ) LOOP
     IF NOT any_rows THEN
       p('<table class="tbl"><thead><tr>'
@@ -2277,7 +2253,7 @@ BEGIN
         || '</th><th>FLAG</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
-    p('<tr><td>' || esc(db_label(r.dbid, r.con_dbid)) || '</td><td>' || r.day_dt || '</td>'
+    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || r.day_dt || '</td>'
       || '<td class="num">' || nz(r.busy_pct, 'FM9990.00') || '</td>'
       || '<td class="num">' || nz(r.median_pct, 'FM9990.00') || '</td>'
       || '<td class="num">' || nz(r.threshold_pct, 'FM9990.00') || '</td>'
@@ -2315,14 +2291,13 @@ BEGIN
     p('<h3 style="font-size:13px;margin:16px 0 6px">6a. Tablespaces (GB)</h3>');
     any_rows := FALSE;
     FOR r IN (
-      SELECT dbid, con_dbid, series_key, horizon_days AS h,
-             MAX(CASE WHEN engine='REGR' THEN value END)       / 1073741824 AS regr,
-             MAX(CASE WHEN engine='ESM'  THEN value END)       / 1073741824 AS esm,
-             MAX(CASE WHEN engine='ESM'  THEN lower_bound END) / 1073741824 AS esm_lo,
-             MAX(CASE WHEN engine='ESM'  THEN upper_bound END) / 1073741824 AS esm_hi
-      FROM   capf_compare
+      SELECT db_pdb, series_key, horizon_days AS h,
+             regr_gb   AS regr,
+             esm_gb    AS esm,
+             esm_lo_gb AS esm_lo,
+             esm_hi_gb AS esm_hi
+      FROM   capr_esm_compare
       WHERE  series_kind = 'TBSPC'
-      GROUP  BY dbid, con_dbid, series_key, horizon_days
       ORDER  BY con_dbid, series_key, horizon_days
     ) LOOP
       IF NOT any_rows THEN
@@ -2331,7 +2306,7 @@ BEGIN
           || '<th class="num">ESM_GB</th><th class="num">ESM_LO</th><th class="num">ESM_HI</th></tr></thead><tbody>');
         any_rows := TRUE;
       END IF;
-      p('<tr><td>' || esc(db_label(r.dbid, r.con_dbid)) || '</td><td>' || esc(r.series_key) || '</td>'
+      p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.series_key) || '</td>'
         || '<td class="num">' || nz(r.h, 'FM9990') || '</td>'
         || '<td class="num">' || nz(r.regr) || '</td>'
         || '<td class="num">' || nz(r.esm) || '</td>'
@@ -2347,14 +2322,9 @@ BEGIN
     p('<h3 style="font-size:13px;margin:16px 0 6px">6b. CPU (busy% / DB CPU sec)</h3>');
     any_rows := FALSE;
     FOR r IN (
-      SELECT dbid, con_dbid, series_key, horizon_days AS h,
-             MAX(CASE WHEN engine='REGR' THEN value END)       AS regr,
-             MAX(CASE WHEN engine='ESM'  THEN value END)       AS esm,
-             MAX(CASE WHEN engine='ESM'  THEN lower_bound END) AS esm_lo,
-             MAX(CASE WHEN engine='ESM'  THEN upper_bound END) AS esm_hi
-      FROM   capf_compare
+      SELECT db_pdb, series_key, horizon_days AS h, regr, esm, esm_lo, esm_hi
+      FROM   capr_esm_compare
       WHERE  series_kind = 'CPU'
-      GROUP  BY dbid, con_dbid, series_key, horizon_days
       ORDER  BY con_dbid, series_key, horizon_days
     ) LOOP
       IF NOT any_rows THEN
@@ -2363,7 +2333,7 @@ BEGIN
           || '<th class="num">ESM</th><th class="num">ESM_LO</th><th class="num">ESM_HI</th></tr></thead><tbody>');
         any_rows := TRUE;
       END IF;
-      p('<tr><td>' || esc(db_label(r.dbid, r.con_dbid)) || '</td><td>' || esc(r.series_key) || '</td>'
+      p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.series_key) || '</td>'
         || '<td class="num">' || nz(r.h, 'FM9990') || '</td>'
         || '<td class="num">' || nz(r.regr, 'FM99999990.00') || '</td>'
         || '<td class="num">' || nz(r.esm, 'FM99999990.00') || '</td>'
@@ -2385,15 +2355,10 @@ BEGIN
       || '</h3>');
     any_rows := FALSE;
     FOR r IN (
-      SELECT f.dbid, f.con_dbid, f.series_kind, f.series_key,
-             TO_CHAR(MIN(f.cutoff_day), 'YYYY-MM-DD')             AS cutoff_day,
-             MAX(CASE WHEN f.engine = 'REGR' THEN f.mape_pct END) AS regr_mape,
-             MAX(CASE WHEN f.engine = 'REGR' THEN f.bias_pct END) AS regr_bias,
-             MAX(CASE WHEN f.engine = 'ESM'  THEN f.mape_pct END) AS esm_mape,
-             MAX(CASE WHEN f.engine = 'ESM'  THEN f.bias_pct END) AS esm_bias
-      FROM   capf_backtest f
-      GROUP  BY f.dbid, f.con_dbid, f.series_kind, f.series_key
-      ORDER  BY f.con_dbid, f.series_kind, f.series_key
+      SELECT db_pdb, series_kind, series_key, cutoff_day,
+             regr_mape, regr_bias, esm_mape, esm_bias, better
+      FROM   capr_backtest
+      ORDER  BY con_dbid, series_kind, series_key
     ) LOOP
       IF NOT any_rows THEN
         p('<table class="tbl"><thead><tr>'
@@ -2403,16 +2368,16 @@ BEGIN
           || '<th>BETTER</th></tr></thead><tbody>');
         any_rows := TRUE;
       END IF;
-      p('<tr><td>' || esc(db_label(r.dbid, r.con_dbid)) || '</td>'
+      p('<tr><td>' || esc(r.db_pdb) || '</td>'
         || '<td>' || esc(r.series_kind) || '</td><td>' || esc(r.series_key) || '</td>'
         || '<td>' || r.cutoff_day || '</td>'
         || '<td class="num">' || nz(r.regr_mape, 'FM99990.00') || '</td>'
         || '<td class="num">' || nz(r.regr_bias, 'FMS99990.00') || '</td>'
         || '<td class="num">' || nz(r.esm_mape, 'FM99990.00') || '</td>'
         || '<td class="num">' || nz(r.esm_bias, 'FMS99990.00') || '</td>'
-        || '<td>' || CASE WHEN r.regr_mape IS NULL OR r.esm_mape IS NULL THEN '&ndash;'
-                          WHEN r.esm_mape < r.regr_mape THEN '<span class="pill pill-ok">ESM</span>'
-                          ELSE '<span class="pill pill-ok">REGR</span>' END || '</td></tr>');
+        || '<td>' || CASE WHEN r.better IS NULL THEN '&ndash;'
+                          ELSE '<span class="pill pill-ok">' || r.better || '</span>' END
+        || '</td></tr>');
     END LOOP;
     IF any_rows THEN
       p('</tbody></table>');

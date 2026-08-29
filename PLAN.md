@@ -52,16 +52,30 @@ every new number (see `test/run_test.sql`).
       TBSPC_ANOM | CPU_SAT | CPU_ANOM), dbid, con_dbid, db_pdb, series_key,
       day_dt, value, threshold, unit, message`. Anomaly kinds window on the
       `anomaly_report_days` knob. Read-only; fixture-asserted.
-- [ ] **M8.2 `CAPR_*` report views.** Move every section's SELECT into a view
-      so `report.sql` and `report_html.sql` only *format* — removes the
-      duplicated-SQL drift risk README admits for the HTML driver.
-- [ ] **M8.3 Jobs.** `install_jobs.sql` (opt-in): weekly `cap_forecast_ml.train_all`
-      retrain + a spool-the-report job; both `DBMS_SCHEDULER`, disabled by
-      default.
-- [ ] **M8.4 `doctor.sql` preflight.** Checks pack access
-      (`CONTROL_MANAGEMENT_PACK_ACCESS`), direct `DBA_HIST_*` grants,
-      `CREATE MINING MODEL`, AWR retention/interval, days of history available
-      per source → says up front why forecasts will be `INSUFFICIENT_HISTORY`.
+- [x] **M8.2 `CAPR_*` report views.** Done: one view per report section —
+      `CAPR_TBSPC_DAYS_TO_FULL` (1a/1b, with `sev_dtf`/`sev_nearfull` and
+      `rank_dtf`/`rank_nearfull` so a driver applies `top_n` with a WHERE),
+      `CAPR_TBSPC_ANOMALIES` / `CAPR_CPU_ANOMALIES` (flagged rows + `days_ago`
+      so the window is a WHERE too), `CAPR_CPU_TREND` in
+      `ddl/45_report_views.sql`; `CAPR_TBSPC_FORECAST`, `CAPR_ESM_COMPARE`
+      and `CAPR_BACKTEST` in the new `ddl/55_report_views_ml.sql` (loaded
+      after `50_ml`, because they read `CAPF_COMPARE`/`CAPF_BACKTEST`). Every
+      GiB/MiB conversion, severity marker and `db_pdb` label is computed once
+      in the view; `report/sections/0[1-6]*.sql` and `report_html.sql` now
+      only format, so the two drivers cannot drift. Text and HTML output are
+      byte-identical to before on the fixture.
+- [x] **M8.3 Jobs.** Done: `install_jobs.sql` / `uninstall_jobs.sql` (opt-in,
+      repo root, not in `install.sql`) create `CAP_ML_RETRAIN` (weekly
+      `cap_forecast_ml.train_all`) and `CAP_REPORT_SPOOL_JOB` (daily
+      `cap_report_spool(p_dir)` → `UTL_FILE` snapshot of `CAPR_ALERTS` into a
+      `report_dir` DEFINE, default `CAP_REPORTS`), both DISABLED and
+      idempotent; jobs share the schema namespace with procedures, hence the
+      `_JOB` suffix (ORA-27477).
+- [x] **M8.4 `doctor.sql` preflight.** Done: read-only PASS/WARN/FAIL checklist
+      in one exception-wrapped anonymous block — pack access, direct
+      `DBA_HIST_*` reads, `SESSION_PRIVS`, AWR retention/interval per dbid,
+      days of history per source vs `min_train_days`, invalid `CAP*` objects +
+      detected seam mode, then a plain-English "why `INSUFFICIENT_HISTORY`".
 
 ## M9 — Forecast quality (Tier 1)
 
