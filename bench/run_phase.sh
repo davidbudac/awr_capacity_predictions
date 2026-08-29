@@ -67,15 +67,27 @@ logfile="$BENCH_DIR/logs/${tag}.log"
 
 run_charbench() {  # <config> <user> <pass> <users> <results> [extra...]
     local config="$1" u="$2" p="$3" uc="$4" res="$5"; shift 5
+    # charbench SAVES the config back on exit, with the -u/-p overrides folded
+    # in (the password encrypted, but still a credential in a tracked file) and
+    # the XML comments stripped. Always hand it a throwaway copy.
+    local tmpcfg; tmpcfg="$(mktemp "${TMPDIR:-/tmp}/capbench_${config}_XXXXXX.xml")"
+    cp "$BENCH_DIR/configs/${config}.xml" "$tmpcfg"
+    local rc=0
+    # No -dt: charbench 2.7's -dt only accepts the long form ("Oracle jdbc
+    # Driver"), not the "thin" its own help text advertises -- and bin/charbench
+    # word-splits its arguments, so the long form cannot be passed either. The
+    # config XML already carries <DriverType>Oracle jdbc Driver</DriverType>.
     "$SWINGBENCH_HOME/bin/charbench" \
-        -c  "$BENCH_DIR/configs/${config}.xml" \
-        -cs "$CONNECT_STRING" -dt thin \
+        -c  "$tmpcfg" \
+        -cs "$CONNECT_STRING" \
         -u  "$u" -p "$p" \
         -uc "$uc" -rt "0:${minutes}" \
         -a -nc -min 0 -max 0 \
         -r  "$res" -mr \
         -v  trans,tpm,resp \
-        -com "capacity-bench ${phase}"
+        -com "capacity-bench-${phase}" || rc=$?   # no spaces: bin/charbench word-splits args
+    rm -f "$tmpcfg"
+    return $rc
 }
 
 log "phase=$phase users=$users minutes=$minutes sh_bg=$sh_bg_users -> $logfile"

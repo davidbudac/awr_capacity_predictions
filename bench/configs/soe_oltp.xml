@@ -112,7 +112,7 @@
         </EnvironmentVariables>
     </Load>
     <Preferences>
-        <StartMode>auto</StartMode>
+        <StartMode>automatic</StartMode>
         <Output>swingbench</Output>
         <JumpToEvents>true</JumpToEvents>
         <TimingsIncludeSleep>false</TimingsIncludeSleep>

@@ -70,6 +70,21 @@ Results land in `bench/results/<stamp>_<phase>.xml` and logs in `bench/logs/`
 (both gitignored). `$SWINGBENCH_HOME/bin/results2pdf` turns a results file into
 a report if you want the client-side view.
 
+## charbench gotchas (swingbench 2.7.0)
+
+- **Never pass `-dt`.** Its own help advertises `thin`, but the value is looked
+  up in a map keyed `Oracle jdbc Driver` / `Oracle oci Driver`, so `-dt thin`
+  dies with "Driver type must be on of the following (thin, oci, ...)". The
+  config XML's `<DriverType>` already says the right thing. (`oewizard` /
+  `shwizard` parse `-dt` differently and *do* accept `thin`.)
+- **`bin/charbench` word-splits its arguments** (`${@}` unquoted), so no
+  argument may contain a space — hence `-com capacity-bench-<phase>`.
+- **charbench rewrites the config file it is given** on exit: it folds the
+  `-u`/`-p` overrides in (password encrypted, but still a credential) and drops
+  the XML comments. `run_phase.sh` therefore hands it a `mktemp` copy.
+- `<StartMode>` takes `manual` / `automatic` — `auto` fails schema validation
+  with a JAXB `UnmarshalException`.
+
 ## Sizing notes
 
 The test VM is small — **2 vCPU, 3 GB RAM, 1.5 GB SGA** — so it, not the

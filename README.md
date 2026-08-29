@@ -5,6 +5,8 @@ Oracle Database (19c floor), driven entirely by AWR history. No external ML
 stack, no agent, no data export — just views, a small config table, one OML
 package, and a read-only SQL\*Plus text report.
 
+📖 **Documentation site:** <https://davidbudac.github.io/awr_capacity_predictions/>
+
 What it answers:
 
 - **Tablespace growth** — projected size at +30/+90/+180/+365 days (with 95%
