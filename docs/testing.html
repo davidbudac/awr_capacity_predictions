@@ -74,7 +74,7 @@
           <h4>Fixture self-check</h4>
           <p>Install <span class="inline">fixture</span> mode (fake data) as <b>CAPTEST</b> in
             <b>PDB1</b>, then run the self-check scripts. This is how you "test everything yourself":
-            <b>199 Tier 1 assertions</b> plus <b>13 Tier 2 (ESM) assertions</b>, each compared against
+            <b>199 Tier 1 assertions</b> plus <b>14 Tier 2 (ESM) assertions</b>, each compared against
             a closed-form answer, <b>failing loudly</b> if any is off. No AWR history required.</p>
           <div class="meta">
             <span><b>Where:</b> PDB1 · captest/&lt;password&gt;</span>
@@ -616,7 +616,7 @@ All fixture assertions passed.</pre>
           <div class="step__body">
             <h4>Run the Tier 2 (optional ML) self-check</h4>
             <p>A separate script, because Oracle's built-in ML needs the
-              <span class="inline">CREATE MINING MODEL</span> privilege. <b>13 assertions</b>: it
+              <span class="inline">CREATE MINING MODEL</span> privilege. <b>14 assertions</b>: it
               trains the smoothing models, checks the <code>FIX_LINEAR</code> +30-day forecast lands
               within 5% of the closed form, then checks the M10.4 contract — the quality gate (no
               model for <code>FIX_FLAT</code> / <code>FIX_NEARFULL</code>), both candidate twins

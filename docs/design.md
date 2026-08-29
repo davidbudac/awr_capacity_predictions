@@ -524,7 +524,7 @@ The fixture seam is the correctness gate: since we can't `INSERT` into
 anchored, deterministic series. Every asserted number is a closed form recorded
 in `CAP_FIXTURE_META` (so `run_test.sql` reads expectations rather than
 re-deriving dates). `run_test.sql` prints PASS/FAIL over **199** assertions and
-exits non-zero on any failure (CI-able); `run_test_ml.sql` adds **13** more
+exits non-zero on any failure (CI-able); `run_test_ml.sql` adds **14** more
 behind the `CREATE MINING MODEL` privilege. The harness needs
 `CREATE TABLE/VIEW/TYPE/PROCEDURE` (+ `CREATE MINING MODEL` for Tier 2) and no
 `V$` access at all — report identity comes from `SYS_CONTEXT`.

@@ -305,7 +305,7 @@ Deterministic fixture harness — no randomness, all closed-form:
 DEFINE seam_mode = 'fixture'
 @install.sql
 @test/run_test.sql        -- 199 assertions; exits non-zero on any failure
-@test/run_test_ml.sql     -- 13 Tier 2 ESM + backtest assertions (needs CREATE MINING MODEL)
+@test/run_test_ml.sql     -- 14 Tier 2 ESM + backtest assertions (needs CREATE MINING MODEL)
 ```
 
 No `V$` access is needed (identity comes from `SYS_CONTEXT`), and fixture mode
