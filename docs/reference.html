@@ -99,6 +99,9 @@
             <tr><td><span class="k">mad_window_days</span></td><td class="num">28</td><td class="def">Trailing window length for the rolling median / MAD baseline (days).</td></tr>
             <tr><td><span class="k">anomaly_report_days</span></td><td class="num">14</td><td class="def">How many trailing days of anomalies the report prints.</td></tr>
             <tr><td><span class="k">cpu_sat_pct</span></td><td class="num">80</td><td class="def">CPU busy percent treated as saturated for days-to-saturation.</td></tr>
+            <tr><td><span class="k">peak_hour_from</span></td><td class="num">8</td><td class="def">Peak window start (hour, exclusive): an interval is "peak" when its end hour is in (from, to].</td></tr>
+            <tr><td><span class="k">peak_hour_to</span></td><td class="num">18</td><td class="def">Peak window end (hour, inclusive). Drives BUSY_PEAK / db_cpu_peak_pct.</td></tr>
+            <tr><td><span class="k">cpu_sat_on_p95</span></td><td class="num">1</td><td class="def">1 = CPU_SAT alerts key off the BUSY_P95 busy-hour trend; 0 = the daily-average BUSY_PCT trend.</td></tr>
             <tr><td><span class="k">abs_floor_bytes</span></td><td class="num">104,857,600</td><td class="def">Absolute floor (100&nbsp;MiB) for the tablespace-delta anomaly threshold; guards flat baselines (MAD = 0).</td></tr>
             <tr><td><span class="k">dow_weeks</span></td><td class="num">8</td><td class="def">Number of prior same-weekday observations forming the CPU seasonal baseline.</td></tr>
             <tr><td><span class="k">dtf_warn</span></td><td class="num">90</td><td class="def"><code>days_to_full</code> at/below this = <span class="pill warn">WARN</span> in the report.</td></tr>

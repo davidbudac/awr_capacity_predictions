@@ -19,8 +19,13 @@
 --   FIX_ZIGZAG   : 10 MiB/day +-20 MiB alternating -- deterministic residuals
 --                  for the M9.1 prediction-interval + M9.4 backtest closed
 --                  forms (expectations computed in-loop below).
---   CPU          : 40% weekday / 20% weekend busy, one restart at day 60
---                  (startup_time change + counter reset), one +30pt Tuesday.
+--   CPU          : two snapshots per day (06:00 = the overnight interval,
+--                  18:00 = the daytime/peak interval). Weekday 20% night /
+--                  60% day (daily avg 40%), weekend 10% / 30% (avg 20%), one
+--                  +30pt Tuesday (70%/70%), one restart at day 60 (startup_time
+--                  change + counter reset, morning snapshot missing so the
+--                  whole day drops). Exercises M10.1 (p95/max/peak-window)
+--                  and M10.2 (DB CPU % of cores) closed forms.
 --   CONTAINER    : FIXCDB root row + one synthetic FIXPDB1 row (M7.2 labels).
 --
 -- Run this BEFORE @install.sql with seam_mode=fixture (the seam views need the
@@ -95,11 +100,20 @@ DECLARE
     FUNCTION dow(p_i PLS_INTEGER) RETURN PLS_INTEGER IS       -- 0=Mon .. 6=Sun
     BEGIN RETURN MOD(TRUNC(v_base + p_i) - DATE '2020-01-06', 7); END;
 
-    FUNCTION fbusy(p_i PLS_INTEGER) RETURN NUMBER IS
+    -- Busy fraction of the overnight (18:00 -> 06:00) and daytime (06:00 ->
+    -- 18:00) intervals. Equal 12 h halves, so the daily time-weighted
+    -- average is exactly their mean: weekday 0.40, weekend 0.20, injected 0.70.
+    FUNCTION fnight(p_i PLS_INTEGER) RETURN NUMBER IS
     BEGIN
         IF p_i = v_inj THEN RETURN 0.70;
-        ELSIF dow(p_i) >= 5 THEN RETURN 0.20;
-        ELSE RETURN 0.40; END IF;
+        ELSIF dow(p_i) >= 5 THEN RETURN 0.10;
+        ELSE RETURN 0.20; END IF;
+    END;
+    FUNCTION fday(p_i PLS_INTEGER) RETURN NUMBER IS
+    BEGIN
+        IF p_i = v_inj THEN RETURN 0.70;
+        ELSIF dow(p_i) >= 5 THEN RETURN 0.30;
+        ELSE RETURN 0.60; END IF;
     END;
 
     PROCEDURE osstat(p_snap NUMBER, p_name VARCHAR2, p_val NUMBER) IS
@@ -150,36 +164,48 @@ BEGIN
     INSERT INTO cap_fixture_container VALUES (c_dbid, c_con + 1, 'FIXCDB', 'FIXPDB1');
 
     -- ---- per-day series ----
+    -- Two snapshots a day: 2000+2i ends 06:00 (covers the night), 2001+2i
+    -- ends 18:00 (covers the day = the peak window). Tablespace usage hangs
+    -- off the 18:00 snapshot only (last-of-day). On the restart day the
+    -- instance was down overnight, so the 06:00 snapshot does not exist and
+    -- the 18:00 one carries the new startup_time + reset counters: the single
+    -- interval that day spans the restart and is dropped by the guard.
     FOR i IN 0 .. c_nd LOOP
         v_start := CASE WHEN i < c_restart THEN v_start1 ELSE v_start2 END;
+        IF i <> c_restart THEN
+            INSERT INTO cap_fixture_snapshot
+            VALUES (c_dbid, c_con, c_inst, 2000 + 2 * i,
+                    CAST(v_base + i - 6/24 AS TIMESTAMP),
+                    CAST(v_base + i + 6/24 AS TIMESTAMP), v_start);
+        END IF;
         INSERT INTO cap_fixture_snapshot
-        VALUES (c_dbid, c_con, c_inst, 1000 + i,
-                CAST(v_base + i + 22/24 AS TIMESTAMP),
-                CAST(v_base + i + 23/24 AS TIMESTAMP), v_start);
+        VALUES (c_dbid, c_con, c_inst, 2001 + 2 * i,
+                CAST(v_base + i + 6/24 AS TIMESTAMP),
+                CAST(v_base + i + 18/24 AS TIMESTAMP), v_start);
 
         -- FIX_LINEAR : 10 MiB/day = 1280 blocks/day, base 100 MiB (12800 blocks)
         v_used := 1280 * i + 12800;
         INSERT INTO cap_fixture_tbspc_usage
-        VALUES (c_dbid, c_con, 1000 + i, 10, v_used, v_max50g, v_used);
+        VALUES (c_dbid, c_con, 2001 + 2 * i, 10, v_used, v_max50g, v_used);
 
         -- FIX_SPIKE : 5 MiB/day = 640 blocks/day + one +2 GiB (262144 blocks) step
         v_used := 640 * i + 6400 + CASE WHEN i >= c_spike THEN 262144 ELSE 0 END;
         INSERT INTO cap_fixture_tbspc_usage
-        VALUES (c_dbid, c_con, 1000 + i, 11, v_used, v_max50g, v_used);
+        VALUES (c_dbid, c_con, 2001 + 2 * i, 11, v_used, v_max50g, v_used);
 
         -- FIX_FLAT : constant 400 MiB used of a 600 MiB (76800-block) allocation,
         -- no autoextend (maxsize 0 -> limit = allocated size). Kept well under
         -- the near-full floor so its 66.7% never trips a TBSPC_NEARFULL alert
         -- (only FIX_NEARFULL exercises that path).
         INSERT INTO cap_fixture_tbspc_usage
-        VALUES (c_dbid, c_con, 1000 + i, 12, 76800, 0, 51200);
+        VALUES (c_dbid, c_con, 2001 + 2 * i, 12, 76800, 0, 51200);
 
         -- FIX_NEARFULL : constant 124160 of maxsize 128000 blocks = exactly
         -- 97.0% full, never growing (quality FLAT). Exercises M7.1: near-full
         -- NOW must surface (near-full ranking + TBSPC_NEARFULL CRIT alert)
         -- even though the fit quality would hide it from days-to-full.
         INSERT INTO cap_fixture_tbspc_usage
-        VALUES (c_dbid, c_con, 1000 + i, 14, 124160, 128000, 124160);
+        VALUES (c_dbid, c_con, 2001 + 2 * i, 14, 124160, 128000, 124160);
 
         -- FIX_FILLING : same 10 MiB/day (1280 blocks/day, base 100 MiB) growth
         -- as FIX_LINEAR but with a small 1500-MiB (192000-block) maxsize, so
@@ -188,7 +214,7 @@ BEGIN
         -- Exercises the TBSPC_FULL alert branch of CAPR_ALERTS.
         v_used := 1280 * i + 12800;
         INSERT INTO cap_fixture_tbspc_usage
-        VALUES (c_dbid, c_con, 1000 + i, 15, v_used, 192000, v_used);
+        VALUES (c_dbid, c_con, 2001 + 2 * i, 15, v_used, 192000, v_used);
 
         -- FIX_ZIGZAG : 10 MiB/day trend + alternating +-20 MiB (2560 blocks)
         -- around the line -- a deterministic "noisy" series whose OLS sums are
@@ -199,7 +225,7 @@ BEGIN
         -- (k*MAD of the alternating baseline), so it never flags.
         v_used := 12800 + 1280 * i + CASE WHEN MOD(i, 2) = 0 THEN 2560 ELSE -2560 END;
         INSERT INTO cap_fixture_tbspc_usage
-        VALUES (c_dbid, c_con, 1000 + i, 16, v_used, v_max50g, v_used);
+        VALUES (c_dbid, c_con, 2001 + 2 * i, 16, v_used, v_max50g, v_used);
 
         -- FIX_GAP : 60 MiB/day = 7680 blocks/day, but with a 3-day AWR gap
         -- (days 100-102 have NO usage sample). The post-gap day (103) sees a
@@ -209,27 +235,42 @@ BEGIN
         IF i NOT BETWEEN 100 AND 102 THEN
             v_used := 7680 * i + 6400;
             INSERT INTO cap_fixture_tbspc_usage
-            VALUES (c_dbid, c_con, 1000 + i, 13, v_used, v_max50g, v_used);
+            VALUES (c_dbid, c_con, 2001 + 2 * i, 13, v_used, v_max50g, v_used);
         END IF;
 
         -- ---- CPU counters (cumulative centiseconds), reset at restart ----
+        -- Each 12 h interval contributes half a day of CPU time (c_tot_cs/2).
+        -- DB time model (cumulative microseconds) resets with the restart:
+        -- db_cpu_sec = f * 500 per interval (daily sum = avg busy * 1000),
+        -- db_time = f * 600 per interval, background 25 s per interval.
         IF i = c_restart THEN
             v_busy := 0; v_idle := 0; v_dbcpu := 0; v_dbtime := 0; v_bg := 0;
+        ELSE
+            v_busy   := v_busy   + fnight(i) * c_tot_cs / 2;
+            v_idle   := v_idle   + (1 - fnight(i)) * c_tot_cs / 2;
+            v_dbcpu  := v_dbcpu  + fnight(i) * 500 * 1000000;
+            v_dbtime := v_dbtime + fnight(i) * 600 * 1000000;
+            v_bg     := v_bg     + 25 * 1000000;
+            osstat(2000 + 2 * i, 'BUSY_TIME', v_busy);
+            osstat(2000 + 2 * i, 'IDLE_TIME', v_idle);
+            osstat(2000 + 2 * i, 'NUM_CPUS', 4);
+            osstat(2000 + 2 * i, 'NUM_CPU_CORES', 4);
+            tmodel(2000 + 2 * i, 'DB CPU', v_dbcpu);
+            tmodel(2000 + 2 * i, 'DB time', v_dbtime);
+            tmodel(2000 + 2 * i, 'background cpu time', v_bg);
         END IF;
-        v_busy := v_busy + fbusy(i) * c_tot_cs;
-        v_idle := v_idle + (1 - fbusy(i)) * c_tot_cs;
-        osstat(1000 + i, 'BUSY_TIME', v_busy);
-        osstat(1000 + i, 'IDLE_TIME', v_idle);
-        osstat(1000 + i, 'NUM_CPUS', 4);
-        osstat(1000 + i, 'NUM_CPU_CORES', 4);
-
-        -- ---- DB time model (cumulative microseconds), reset with the restart ----
-        v_dbcpu  := v_dbcpu  + fbusy(i) * 1000 * 1000000;   -- db_cpu_sec  = fbusy*1000
-        v_dbtime := v_dbtime + fbusy(i) * 1200 * 1000000;   -- db_time_sec = fbusy*1200
-        v_bg     := v_bg     + 50 * 1000000;                -- bg 50 s/day
-        tmodel(1000 + i, 'DB CPU', v_dbcpu);
-        tmodel(1000 + i, 'DB time', v_dbtime);
-        tmodel(1000 + i, 'background cpu time', v_bg);
+        v_busy   := v_busy   + fday(i) * c_tot_cs / 2;
+        v_idle   := v_idle   + (1 - fday(i)) * c_tot_cs / 2;
+        v_dbcpu  := v_dbcpu  + fday(i) * 500 * 1000000;
+        v_dbtime := v_dbtime + fday(i) * 600 * 1000000;
+        v_bg     := v_bg     + 25 * 1000000;
+        osstat(2001 + 2 * i, 'BUSY_TIME', v_busy);
+        osstat(2001 + 2 * i, 'IDLE_TIME', v_idle);
+        osstat(2001 + 2 * i, 'NUM_CPUS', 4);
+        osstat(2001 + 2 * i, 'NUM_CPU_CORES', 4);
+        tmodel(2001 + 2 * i, 'DB CPU', v_dbcpu);
+        tmodel(2001 + 2 * i, 'DB time', v_dbtime);
+        tmodel(2001 + 2 * i, 'background cpu time', v_bg);
     END LOOP;
 
     -- ---- expected values / key dates for run_test.sql ----
@@ -240,6 +281,17 @@ BEGIN
     INSERT INTO cap_fixture_meta (mkey, dval) VALUES ('RESTART_DAY', v_base + c_restart);
     INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('INJECTED_TUE', v_base + v_inj, v_inj);
     INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('PROBE_DAY',    v_base + v_probe, v_probe);
+    -- CPU closed forms on the probe weekday (M10.1 / M10.2). Assumes shipped
+    -- peak window (8,18]: only the 18:00 interval is "peak".
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_PROBE_AVG',  40);     -- (20+60)/2
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_PROBE_P95',  58);     -- PERCENTILE_CONT(.95) of {20,60}
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_PROBE_MAX',  60);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_PROBE_PEAK', 60);     -- daytime interval only
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_PROBE_HOST_BUSY_SEC', 0.40 * 4 * 86400);   -- 138240
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_SEC', 400);  -- 0.2*500 + 0.6*500
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_PCT', 100 * 400 / (4 * 86400));           -- 0.1157
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_PEAK_PCT', 100 * 300 / (4 * 43200));      -- 0.1736
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_HOST_SHARE', 100 * 400 / (0.40 * 4 * 86400)); -- 0.2894
     -- FIX_LINEAR closed forms
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('LINEAR_SLOPE', 10485760);              -- bytes/day
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('LINEAR_CUR',   1280 * c_nd * 8192 + 104857600);

@@ -16,7 +16,7 @@
 --                     extensions / Zabbix / Nagios / a scheduler job:
 --                       severity   CRIT | WARN | INFO  (sev_rank 1|2|3)
 --                       kind       TBSPC_FULL | TBSPC_NEARFULL | TBSPC_ANOM |
---                                  CPU_SAT | CPU_ANOM
+--                                  CPU_SAT | DBCPU_SAT | CPU_ANOM
 --                     plus keys (dbid, con_dbid, db_pdb, series_key), the
 --                     observation day, the metric value vs its threshold, and
 --                     a ready-to-page plain-text message.
@@ -51,7 +51,9 @@ FROM   capv_container c;
 --   TBSPC_NEARFULL capf_tbspc_forecast: pct_used >= nearfull_warn_pct,
 --                  REGARDLESS of fit quality (M7.1: a 97%-full tablespace with
 --                  an unreliable fit must still surface).
---   CPU_SAT        capf_cpu_trend BUSY_PCT: quality=OK, days_to_sat <= dtf_warn.
+--   CPU_SAT        capf_cpu_trend BUSY_P95 (or BUSY_PCT when cpu_sat_on_p95=0):
+--                  quality=OK, days_to_sat <= dtf_warn.
+--   DBCPU_SAT      capf_cpu_trend DB_CPU_PCT (per container, M10.2): same rule.
 --   TBSPC_ANOM     capa_tbspc_anom flagged within the last anomaly_report_days
 --                  (HIGH growth -> WARN, LOW/shrink -> INFO).
 --   CPU_ANOM       capa_cpu_anom, same window/severity mapping.
@@ -67,7 +69,11 @@ WITH cfg AS (
                MAX(CASE WHEN cfg_name = 'nearfull_warn_pct'   THEN cfg_value END) AS nf_warn,
                MAX(CASE WHEN cfg_name = 'nearfull_crit_pct'   THEN cfg_value END) AS nf_crit,
                MAX(CASE WHEN cfg_name = 'cpu_sat_pct'         THEN cfg_value END) AS cpu_sat,
-               MAX(CASE WHEN cfg_name = 'anomaly_report_days' THEN cfg_value END) AS anom_days
+               MAX(CASE WHEN cfg_name = 'anomaly_report_days' THEN cfg_value END) AS anom_days,
+               -- which host-busy trend drives CPU_SAT (M10.1): p95 of the
+               -- day's snapshot intervals (default) or the daily average
+               CASE WHEN MAX(CASE WHEN cfg_name = 'cpu_sat_on_p95' THEN cfg_value END) = 0
+                    THEN 'BUSY_PCT' ELSE 'BUSY_P95' END                       AS cpu_sat_metric
         FROM   cap_config
      ),
      alerts AS (
@@ -116,11 +122,31 @@ WITH cfg AS (
                t.days_to_sat,
                CASE WHEN t.days_to_sat <= cfg.dtf_crit THEN cfg.dtf_crit ELSE cfg.dtf_warn END,
                'DAYS',
-               'Host CPU forecast to reach ' || TO_CHAR(cfg.cpu_sat, 'FM990')
+               'Host CPU ' || CASE t.metric WHEN 'BUSY_P95' THEN '(busy-hour p95) ' ELSE '(daily avg) ' END
+                 || 'forecast to reach ' || TO_CHAR(cfg.cpu_sat, 'FM990')
                  || '% busy in ' || TO_CHAR(t.days_to_sat, 'FM9999990')
                  || ' days (now ' || TO_CHAR(t.cur_val, 'FM990.0') || '% busy)'
         FROM   capf_cpu_trend t CROSS JOIN cfg
-        WHERE  t.metric = 'BUSY_PCT'
+        WHERE  t.metric = cfg.cpu_sat_metric
+          AND  t.quality = 'OK'
+          AND  t.days_to_sat IS NOT NULL
+          AND  t.days_to_sat <= cfg.dtf_warn
+        UNION ALL
+        -- ---- DBCPU_SAT: a container's DB CPU forecast to consume the
+        -- saturation share of the host's cores (M10.2, per PDB) ----
+        SELECT CASE WHEN t.days_to_sat <= cfg.dtf_crit THEN 'CRIT' ELSE 'WARN' END,
+               'DBCPU_SAT',
+               t.dbid, t.con_dbid,
+               t.metric,
+               t.last_day,
+               t.days_to_sat,
+               CASE WHEN t.days_to_sat <= cfg.dtf_crit THEN cfg.dtf_crit ELSE cfg.dtf_warn END,
+               'DAYS',
+               'DB CPU forecast to reach ' || TO_CHAR(cfg.cpu_sat, 'FM990')
+                 || '% of host core capacity in ' || TO_CHAR(t.days_to_sat, 'FM9999990')
+                 || ' days (now ' || TO_CHAR(t.cur_val, 'FM990.0') || '%)'
+        FROM   capf_cpu_trend t CROSS JOIN cfg
+        WHERE  t.metric = 'DB_CPU_PCT'
           AND  t.quality = 'OK'
           AND  t.days_to_sat IS NOT NULL
           AND  t.days_to_sat <= cfg.dtf_warn

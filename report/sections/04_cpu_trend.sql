@@ -3,8 +3,11 @@
 -- Consumes CAPF_CPU_TREND.
 --
 PROMPT
-PROMPT == 4. CPU TREND (host busy% and DB CPU sec/day) ==
-PROMPT    DAYS_SAT = projected days until host busy% reaches &cpu_sat% (BUSY_PCT only).
+PROMPT == 4. CPU TREND (host busy% avg / p95 / peak window, DB CPU sec and % of cores) ==
+PROMPT    BUSY_PCT = daily average; BUSY_P95 / BUSY_PEAK = the busy hour (p95 of the
+PROMPT    day's snapshot intervals / peak-window busy%) -- what actually saturates.
+PROMPT    DB_CPU_PCT / DB_CPU_P95 = this container's DB CPU as % of host core capacity.
+PROMPT    DAYS_SAT = projected days until the metric reaches &cpu_sat% (all but DB_CPU_SEC).
 PROMPT    WORST/BEST: days-to-saturation range from the 95% CI on the slope
 PROMPT    (BEST empty = might never saturate).
 

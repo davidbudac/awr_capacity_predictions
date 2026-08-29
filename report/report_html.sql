@@ -2048,10 +2048,13 @@ BEGIN
   -- Section 4: CPU trend
   ----------------------------------------------------------------------
   p('<section id="s4">');
-  p('<h2>4. CPU trend (host busy% and DB CPU sec/day)</h2>');
+  p('<h2>4. CPU trend (host busy% avg / p95 / peak window, DB CPU sec and % of cores)</h2>');
   p('<p class="desc">How busy the CPU has been, and when it might run out of headroom. '
-      || 'DAYS_SAT = projected days until host busy% reaches ' || cpu_sat
-      || '% (BUSY_PCT only).</p>');
+      || 'BUSY_PCT is the daily average; BUSY_P95 / BUSY_PEAK are the busy hour (p95 of the day''s '
+      || 'snapshot intervals / peak-window busy%), which is what actually saturates. DB_CPU_PCT / DB_CPU_P95 '
+      || 'express this container''s DB CPU as a percent of host core capacity. '
+      || 'DAYS_SAT = projected days until the metric reaches ' || cpu_sat
+      || '% (every metric but DB_CPU_SEC).</p>');
 
   ----------------------------------------------------------------------
   -- Chart grid: one busy% card (history + saturation threshold + REGR
@@ -2212,14 +2215,14 @@ BEGIN
         || '<th>DB/PDB</th><th>METRIC</th><th class="num">TRAIN_N</th><th>FILL</th><th class="num">CURRENT</th>'
         || '<th class="num">SLOPE/DAY' || info_icon('how much this metric moves per day on average')
         || '</th><th class="num">R2</th>'
-        || '<th class="num">DAYS_SAT' || info_icon('estimated days until host CPU reaches the saturation threshold')
+        || '<th class="num">DAYS_SAT' || info_icon('estimated days until this metric reaches the saturation threshold (none for DB_CPU_SEC, which has no ceiling)')
         || '</th><th class="num">RANGE' || info_icon('worst-to-best case days-to-saturation from the statistical uncertainty of the trend; never = it may not saturate at the slow end')
         || '</th><th>QUALITY</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
     p('<tr><td>' || esc(db_label(r.dbid, r.con_dbid)) || '</td><td>' || esc(r.metric) || '</td>'
       || '<td class="num">' || nz(r.n, 'FM9990') || '</td>'
-      || '<td>' || CASE WHEN r.metric = 'BUSY_PCT' THEN bar(r.cur_val,
+      || '<td>' || CASE WHEN r.metric <> 'DB_CPU_SEC' THEN bar(r.cur_val,
                      CASE WHEN r.cur_val >= cpu_sat THEN 'crit'
                           WHEN r.cur_val >= cpu_sat * 0.75 THEN 'warn' ELSE '' END)
                    ELSE '&ndash;' END || '</td>'

@@ -139,14 +139,17 @@ Key knobs: `train_days` (90), `recent_days` (28), `min_train_days` (14),
 `r2_gate` (0.60), `mad_k` (3), `mad_window_days` (28), `cpu_sat_pct` (80),
 `abs_floor_bytes` (100 MiB), `dow_weeks` (8), `dtf_warn`/`dtf_crit` (90/30),
 `nearfull_warn_pct`/`nearfull_crit_pct` (90/97), `anomaly_report_days` (14,
-the `CAPR_ALERTS` anomaly window), `backtest_holdout_days` (28).
+the `CAPR_ALERTS` anomaly window), `backtest_holdout_days` (28),
+`peak_hour_from`/`peak_hour_to` (8/18, the busy-hour window for `BUSY_PEAK` /
+`DB_CPU_PEAK`), `cpu_sat_on_p95` (1: `CPU_SAT` alerts follow the p95 busy-hour
+trend rather than the daily average).
 Run `SELECT * FROM cap_config ORDER BY cfg_name;` for the full annotated list.
 
 ## Alerting / integration
 
 `CAPR_ALERTS` is the machine-readable surface: one row per current issue —
 `severity` (CRIT/WARN/INFO), `kind` (`TBSPC_FULL`, `TBSPC_NEARFULL`,
-`TBSPC_ANOM`, `CPU_SAT`, `CPU_ANOM`), the `(dbid, con_dbid)` keys plus a
+`TBSPC_ANOM`, `CPU_SAT`, `DBCPU_SAT`, `CPU_ANOM`), the `(dbid, con_dbid)` keys plus a
 resolved `db_pdb` label, the metric `value` vs its `threshold`, and a
 ready-to-page `message`. Poll it from an OEM metric extension, Zabbix, Nagios,
 or a scheduler job:

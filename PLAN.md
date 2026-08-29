@@ -94,13 +94,18 @@ every new number (see `test/run_test.sql`).
 
 ## M10 — CPU / capacity analysis
 
-- [ ] **M10.1 Peak, not average.** From per-snapshot OSSTAT deltas derive daily
-      `busy_p95`, `busy_max`, and busy% inside a configurable peak window
-      (`peak_hour_from/to`); forecast those for days-to-saturation. Same for DB
-      CPU.
-- [ ] **M10.2 DB CPU as % of core capacity.** `db_cpu_sec / (cores·86400)·100`
-      (already have `db_cpu_per_core`) → same REGR fit and `days_to_sat` as
-      busy%; per-PDB share of host CPU.
+- [x] **M10.1 Peak, not average.** Done: `CAPD_CPU_DAILY` adds `busy_p95`,
+      `busy_max`, `busy_peak_pct` (+ `peak_intervals`, `host_busy_sec`) from
+      the per-snapshot OSSTAT deltas; peak window = intervals ending in
+      `(peak_hour_from, peak_hour_to]` (knobs, default 8/18). `CAPF_CPU_TREND`
+      fits `BUSY_P95` / `BUSY_PEAK` with `days_to_sat`; `CPU_SAT` alerts key
+      off `BUSY_P95` unless `cpu_sat_on_p95 = 0`. Fixture now has two
+      snapshots/day (06:00 night, 18:00 peak) with closed-form assertions.
+- [x] **M10.2 DB CPU as % of core capacity.** Done: `CAPD_DBTIME_DAILY` adds
+      `db_cpu_pct`, `db_cpu_p95_pct`, `db_cpu_max_pct`, `db_cpu_peak_pct`,
+      `host_share_pct` (per-PDB share of host busy seconds); `CAPF_CPU_TREND`
+      metrics `DB_CPU_PCT` / `DB_CPU_P95` with `days_to_sat`; new alert kind
+      `DBCPU_SAT`.
 - [ ] **M10.3 Level-shift detection.** A sustained +15% that never crosses
       k·MAD on any single day: flag when N of the last M days exceed
       median+σ, or recent-window median vs baseline median > threshold. Knobs

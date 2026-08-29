@@ -55,6 +55,9 @@ USING (
     UNION ALL SELECT 'esm_prediction_step',  30,        'OML ESM forecast horizon in steps (days). Oracle 19c hard-caps this at 30.'                            FROM dual
     UNION ALL SELECT 'nearfull_warn_pct',    90,        'Percent-used at/above which a tablespace raises a near-full-now WARN (any forecast quality).'          FROM dual
     UNION ALL SELECT 'nearfull_crit_pct',    97,        'Percent-used at/above which a tablespace raises a near-full-now CRIT (any forecast quality).'          FROM dual
+    UNION ALL SELECT 'peak_hour_from',        8,         'Peak window start (hour of day, exclusive). A snapshot interval is "peak" when its end time falls in (from, to].' FROM dual
+    UNION ALL SELECT 'peak_hour_to',          18,        'Peak window end (hour of day, inclusive). See peak_hour_from.'                                          FROM dual
+    UNION ALL SELECT 'cpu_sat_on_p95',        1,         '1 = CPU_SAT alerts key off the BUSY_P95 (per-snapshot p95) trend; 0 = off the daily-average BUSY_PCT trend.' FROM dual
     UNION ALL SELECT 'backtest_holdout_days',28,        'Holdout window (days) CAPF_BACKTEST fits before and scores against; <=30 lets ESM cover it on 19c.'    FROM dual
 ) s
 ON (c.cfg_name = s.cfg_name)

@@ -76,11 +76,25 @@ row per day.
   interval that spans an **instance restart** (`startup_time` changed) or shows
   a **negative delta** (counter reset) is dropped. Per day:
   `busy% = 100·Σbusy_d / Σ(busy_d+idle_d)` — centisecond units cancel in the
-  ratio.
+  ratio. **Peak, not just average (M10.1):** the same per-interval deltas also
+  give `busy_p95` (`PERCENTILE_CONT(0.95)` of the day's per-snapshot busy%),
+  `busy_max`, and `busy_peak_pct` — the time-weighted busy% over only the
+  intervals whose `end_interval_time` hour falls in `(peak_hour_from,
+  peak_hour_to]` (default `(8,18]`, i.e. hourly snapshots ending 09:00–18:00;
+  `peak_intervals` counts them, NULL when none). With hourly AWR, p95 ≈ "the
+  busy hour" — what actually saturates while a 40% daily average hides it.
+  `host_busy_sec` (Σbusy_d/100) is the denominator for a container's share of
+  host CPU.
 - **`CAPD_DBTIME_DAILY`** — same delta+guard pattern over the time model →
   `db_cpu_sec`, `db_time_sec`, `bg_cpu_sec` (÷1e6). `db_cpu_per_core` divides by
   the host core count summed across instances from OSSTAT (falling back to
-  `NUM_CPUS`).
+  `NUM_CPUS`). **DB CPU as % of core capacity (M10.2):** `db_cpu_pct =
+  100·db_cpu_sec / (total_cores·86400)`, plus per-interval `db_cpu_p95_pct` /
+  `db_cpu_max_pct` / `db_cpu_peak_pct` (DB CPU seconds over the interval's
+  elapsed core-seconds, same peak-window rule). `host_share_pct =
+  100·db_cpu_sec / host busy seconds` (host busy summed over the `dbid`, since
+  OSSTAT records under the CDB's `con_dbid`) is the per-PDB share of what the
+  host was actually doing.
 
 All `LAG`s use inline `OVER (...)` (19c has no `WINDOW` clause).
 
@@ -111,8 +125,13 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   (`R² < r2_gate`) → `OK`. Note the `FLAT` definition: Oracle's `REGR_R2`
   returns **1** for a zero-variance *y* (a truly flat series) and NULL only for
   zero-variance *x*, so flatness is detected by `slope = 0`, not by a NULL R².
-- `CAPF_CPU_TREND` applies the same fit to `busy_pct` and `db_cpu_sec` (one row
-  per `(dbid, con_dbid, metric)`), with `days_to_sat` for busy% only.
+- `CAPF_CPU_TREND` applies the same fit per `(dbid, con_dbid, metric)` to
+  `BUSY_PCT` (daily average), `BUSY_P95`, `BUSY_PEAK` (M10.1), `DB_CPU_SEC`,
+  `DB_CPU_PCT` and `DB_CPU_P95` (M10.2). Every percent-of-capacity metric gets
+  `days_to_sat` (+ `_lo/_hi`) against `cpu_sat_pct`; `DB_CPU_SEC` has no
+  ceiling, so its `days_to_sat` is NULL. `CAPR_ALERTS.CPU_SAT` keys off
+  `BUSY_P95` by default (`cpu_sat_on_p95 = 1`; set 0 for the daily average),
+  and `DBCPU_SAT` fires per container off `DB_CPU_PCT`.
 
 ## Layer 4 — anomalies (`CAPA_*`)
 
@@ -200,7 +219,7 @@ Two seam-agnostic views for consumers outside the bundled reports:
   drifting.
 - `CAPR_ALERTS` is the pollable alert surface: one row per current issue with
   `severity` (CRIT/WARN/INFO + numeric `sev_rank`), `kind` (`TBSPC_FULL`,
-  `TBSPC_NEARFULL`, `TBSPC_ANOM`, `CPU_SAT`, `CPU_ANOM`), keys, `value` vs
+  `TBSPC_NEARFULL`, `TBSPC_ANOM`, `CPU_SAT`, `DBCPU_SAT`, `CPU_ANOM`), keys, `value` vs
   `threshold` (+ `unit`), and a ready-to-page `message`. The forecast kinds
   gate on `quality = 'OK'`; `TBSPC_NEARFULL` deliberately does **not** (M7.1:
   a 97%-full tablespace with an unfittable series must still surface — that's

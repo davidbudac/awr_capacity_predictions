@@ -66,6 +66,11 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
   ~1% for df>=10, and min_train_days guarantees df>=12). The FIXTURE INSTALLER
   computes expected bands with the same formula — it is part of the contract;
   change both together or FIX_ZIGZAG assertions break.
+- Peak-window membership (M10.1) is by the interval's END hour in
+  `(peak_hour_from, peak_hour_to]`, so with hourly AWR the default (8,18] is
+  exactly the snapshots ending 09:00..18:00. The fixture has TWO snapshots per
+  day (ids `2000+2i` ending 06:00, `2001+2i` ending 18:00); tablespace usage
+  hangs only off the 18:00 one, and the restart day has no 06:00 snapshot.
 - Backtest ESM twins (`train_backtest`) share the 19c 30-step cap AND the
   `FLOOR(rows/4)` floor, so they may cover fewer than holdout_days forecast
   days (fixture: 93 rows -> 23 of 28). `CAPF_BACKTEST.n_days` reports actual

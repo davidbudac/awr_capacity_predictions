@@ -10,7 +10,8 @@
 --                          (proj_*_lo/hi), days_to_full with a worst/best-case
 --                          range (days_to_full_lo/hi, M9.1), recent-vs-full
 --                          acceleration ratio, and a quality grade.
---   CAPF_CPU_TREND      -- per (host busy%, DB CPU sec) series: slope, R^2,
+--   CAPF_CPU_TREND      -- per CPU metric (host busy% avg/p95/peak-window,
+--                          DB CPU sec, DB CPU % of cores avg/p95): slope, R^2,
 --                          projections (+95% bands), days_to_saturation
 --                          (+lo/hi range), quality.
 --
@@ -194,10 +195,17 @@ LEFT   JOIN rfit r ON r.dbid = f.dbid AND r.con_dbid = f.con_dbid
 CROSS  JOIN cfg;
 
 -- --------------------------------------------------------------------
--- CAPF_CPU_TREND -- one row per (dbid, con_dbid, metric) where metric is
--- BUSY_PCT (host CPU utilization, from CAPD_CPU_DAILY) or DB_CPU_SEC (DB CPU
--- seconds/day, from CAPD_DBTIME_DAILY). days_to_sat applies to BUSY_PCT only
--- (crossing cpu_sat_pct); it is NULL for DB_CPU_SEC (no fixed ceiling).
+-- CAPF_CPU_TREND -- one row per (dbid, con_dbid, metric):
+--   BUSY_PCT    host busy%, daily time-weighted average   (CAPD_CPU_DAILY)
+--   BUSY_P95    host busy%, p95 of the day's snapshot intervals (M10.1:
+--               "the busy hour" -- what actually saturates)
+--   BUSY_PEAK   host busy% inside the configured peak window (M10.1)
+--   DB_CPU_SEC  foreground DB CPU seconds/day               (CAPD_DBTIME_DAILY)
+--   DB_CPU_PCT  DB CPU as % of the host's core capacity     (M10.2)
+--   DB_CPU_P95  p95 of the per-interval DB CPU %            (M10.2)
+-- Every percent-of-capacity metric (everything but DB_CPU_SEC) gets
+-- days_to_sat = days until the fitted line crosses cpu_sat_pct; DB_CPU_SEC
+-- has no fixed ceiling so its days_to_sat is NULL.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capf_cpu_trend AS
 WITH cfg AS (
@@ -208,11 +216,23 @@ WITH cfg AS (
         FROM   cap_config
      ),
      src AS (
-        SELECT dbid, con_dbid, 'BUSY_PCT'   AS metric, day_dt, busy_pct   AS val
-        FROM   capd_cpu_daily    WHERE busy_pct   IS NOT NULL
+        SELECT dbid, con_dbid, 'BUSY_PCT'   AS metric, day_dt, busy_pct      AS val
+        FROM   capd_cpu_daily    WHERE busy_pct      IS NOT NULL
         UNION ALL
-        SELECT dbid, con_dbid, 'DB_CPU_SEC' AS metric, day_dt, db_cpu_sec AS val
-        FROM   capd_dbtime_daily WHERE db_cpu_sec IS NOT NULL
+        SELECT dbid, con_dbid, 'BUSY_P95'   AS metric, day_dt, busy_p95      AS val
+        FROM   capd_cpu_daily    WHERE busy_p95      IS NOT NULL
+        UNION ALL
+        SELECT dbid, con_dbid, 'BUSY_PEAK'  AS metric, day_dt, busy_peak_pct AS val
+        FROM   capd_cpu_daily    WHERE busy_peak_pct IS NOT NULL
+        UNION ALL
+        SELECT dbid, con_dbid, 'DB_CPU_SEC' AS metric, day_dt, db_cpu_sec    AS val
+        FROM   capd_dbtime_daily WHERE db_cpu_sec    IS NOT NULL
+        UNION ALL
+        SELECT dbid, con_dbid, 'DB_CPU_PCT' AS metric, day_dt, db_cpu_pct    AS val
+        FROM   capd_dbtime_daily WHERE db_cpu_pct    IS NOT NULL
+        UNION ALL
+        SELECT dbid, con_dbid, 'DB_CPU_P95' AS metric, day_dt, db_cpu_p95_pct AS val
+        FROM   capd_dbtime_daily WHERE db_cpu_p95_pct IS NOT NULL
      ),
      d AS (
         SELECT s.*, day_dt - DATE '2020-01-01' AS day_n FROM src s
@@ -287,13 +307,13 @@ SELECT f.dbid,
        f.slope_ci                                   AS slope_ci_per_day,
        -- GREATEST(0,...): if current busy% already exceeds the saturation
        -- threshold, report 0 (saturated now) rather than a negative "days".
-       CASE WHEN f.metric = 'BUSY_PCT' AND f.slope > 0
+       CASE WHEN f.metric <> 'DB_CPU_SEC' AND f.slope > 0
             THEN GREATEST(0, FLOOR((cfg.cpu_sat_pct - c.cur_val) / f.slope))
        END                                          AS days_to_sat,
-       CASE WHEN f.metric = 'BUSY_PCT' AND f.slope > 0 AND f.slope_ci IS NOT NULL
+       CASE WHEN f.metric <> 'DB_CPU_SEC' AND f.slope > 0 AND f.slope_ci IS NOT NULL
             THEN GREATEST(0, FLOOR((cfg.cpu_sat_pct - c.cur_val) / (f.slope + f.slope_ci)))
        END                                          AS days_to_sat_lo,
-       CASE WHEN f.metric = 'BUSY_PCT' AND f.slope > 0 AND f.slope_ci IS NOT NULL
+       CASE WHEN f.metric <> 'DB_CPU_SEC' AND f.slope > 0 AND f.slope_ci IS NOT NULL
                  AND f.slope - f.slope_ci > 0
             THEN GREATEST(0, FLOOR((cfg.cpu_sat_pct - c.cur_val) / (f.slope - f.slope_ci)))
        END                                          AS days_to_sat_hi,

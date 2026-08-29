@@ -217,6 +217,37 @@ BEGIN
     chk_true('CPU probe weekday busy% in [39,41] (got ' || ROUND(v_num,3) || ')',
              v_num BETWEEN 39 AND 41);
 
+    DBMS_OUTPUT.PUT_LINE('=== M10.1 peak busy% (p95 / max / peak window) ===');
+    SELECT busy_pct, busy_p95, busy_max INTO v_num, v_num2, v_num3
+      FROM capd_cpu_daily WHERE dbid = v_dbid AND day_dt = d_probe;
+    chk_close('CPU probe busy_pct (time-weighted avg)', v_num,  meta_n('CPU_PROBE_AVG'), 0.000001);
+    chk_close('CPU probe busy_p95 of 2 intervals',      v_num2, meta_n('CPU_PROBE_P95'), 0.000001);
+    chk_close('CPU probe busy_max',                     v_num3, meta_n('CPU_PROBE_MAX'), 0.000001);
+    SELECT busy_peak_pct, peak_intervals, n_intervals, host_busy_sec
+      INTO v_num, v_n, v_num2, v_num3
+      FROM capd_cpu_daily WHERE dbid = v_dbid AND day_dt = d_probe;
+    chk_close('CPU probe busy_peak_pct (18:00 interval only)', v_num, meta_n('CPU_PROBE_PEAK'), 0.000001);
+    chk_int('CPU probe peak_intervals', v_n, 1);
+    chk_int('CPU probe n_intervals', v_num2, 2);
+    chk_close('CPU probe host_busy_sec', v_num3, meta_n('CPU_PROBE_HOST_BUSY_SEC'), 0.000001);
+    SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
+      WHERE dbid = v_dbid AND metric IN ('BUSY_P95','BUSY_PEAK','DB_CPU_PCT','DB_CPU_P95');
+    chk_int('CAPF_CPU_TREND carries the four new metrics', v_n, 4);
+    SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
+      WHERE dbid = v_dbid AND metric = 'DB_CPU_SEC' AND days_to_sat IS NOT NULL;
+    chk_int('DB_CPU_SEC has no days_to_sat (no ceiling)', v_n, 0);
+
+    DBMS_OUTPUT.PUT_LINE('=== M10.2 DB CPU as % of core capacity ===');
+    SELECT db_cpu_sec, db_cpu_pct, db_cpu_peak_pct, host_share_pct
+      INTO v_num, v_num2, v_num3, v_r2
+      FROM capd_dbtime_daily WHERE dbid = v_dbid AND day_dt = d_probe;
+    chk_close('DB CPU probe db_cpu_sec',      v_num,  meta_n('DBCPU_PROBE_SEC'),        0.000001);
+    chk_close('DB CPU probe db_cpu_pct',      v_num2, meta_n('DBCPU_PROBE_PCT'),        0.000001);
+    chk_close('DB CPU probe db_cpu_peak_pct', v_num3, meta_n('DBCPU_PROBE_PEAK_PCT'),   0.000001);
+    chk_close('DB CPU probe host_share_pct',  v_r2,   meta_n('DBCPU_PROBE_HOST_SHARE'), 0.000001);
+    SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'DBCPU_SAT';
+    chk_int('no DBCPU_SAT alert (flat DB CPU)', v_n, 0);
+
     DBMS_OUTPUT.PUT_LINE('=== CPU same-DOW anomaly ===');
     SELECT anomaly_flag INTO v_str FROM capa_cpu_anom
       WHERE dbid = v_dbid AND day_dt = d_inj;
