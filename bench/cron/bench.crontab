@@ -1,0 +1,26 @@
+# bench/cron/bench.crontab -- example crontab for the workstation `db` user.
+#
+# Install with:  crontab bench/cron/bench.crontab
+# Inspect with:  crontab -l          Remove with: crontab -r
+#
+# One entry per phase rather than a single long-running run_day.sh: a phase
+# that dies then costs one band of the day, not the whole day. run_phase.sh
+# self-skips the weekday-only phases at weekends and halves the user count for
+# the phases that do run, so no separate weekend schedule is needed.
+#
+# Times are deliberately spread so each phase occupies its own 15-minute AWR
+# snapshot bands with idle troughs in between -- the troughs matter as much as
+# the peaks for a believable daily profile.
+
+BENCH=/home/db/github/awr_capacity_predictions/bench
+SHELL=/bin/bash
+
+0  6  * * *  $BENCH/run_phase.sh ramp  >> $BENCH/logs/cron.log 2>&1
+0  9  * * *  $BENCH/run_phase.sh peak  >> $BENCH/logs/cron.log 2>&1
+0  12 * * *  $BENCH/run_phase.sh dss   >> $BENCH/logs/cron.log 2>&1
+0  15 * * *  $BENCH/run_phase.sh mixed >> $BENCH/logs/cron.log 2>&1
+0  20 * * *  $BENCH/run_phase.sh batch >> $BENCH/logs/cron.log 2>&1
+
+# Optional: one anomaly day a week (Wednesday 22:00) so the anomaly detectors
+# have something to find. Comment out for a clean-trend-only dataset.
+# 0 22 * * 3  $BENCH/run_phase.sh anomaly --force >> $BENCH/logs/cron.log 2>&1

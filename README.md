@@ -29,7 +29,7 @@ Two forecasting engines run side by side:
 - **Tier 2 — OML ESM** (`DBMS_DATA_MINING`, exponential smoothing) for a
   seasonality-aware second opinion, compared against Tier 1 in the report.
 
-## Architecture — six view layers over a portable seam
+## Architecture — layered views over a portable seam
 
 ```
 CAPV_*  seam        DBA_HIST-shaped views  (local | warehouse | fixture source)
@@ -37,9 +37,12 @@ CAPV_*  seam        DBA_HIST-shaped views  (local | warehouse | fixture source)
 CAPD_*  daily       one clean row per (series, day): blocks->bytes, counter
   |                 deltas with restart guards; CAPD_SERIES_DAILY (M11) adds
   |                 the fixed-ceiling series keyed by a `series` name
-CAPF_*  forecast    Tier 1 REGR fits (+ CAPF_ESM_FORECAST / CAPF_COMPARE for Tier 2)
+CAPF_*  forecast    Tier 1 REGR fits + 95% bands; CAPF_SERIES_FORECAST (M11),
+  |                 CAPF_BACKTEST (holdout scores), CAPF_ESM_FORECAST /
+  |                 CAPF_COMPARE for Tier 2
 CAPA_*  anomaly     rolling median + MAD (tablespace: trailing window;
-  |                 CPU: same-weekday seasonal baseline)
+  |                 CPU: same-weekday seasonal baseline) + CAPA_CPU_SHIFT,
+  |                 window-vs-window sustained level shifts
 CAPR_*  integration CAPR_CONTAINER (display labels) + CAPR_ALERTS (one row per
   |                 current issue -- pollable by OEM / Zabbix / Nagios)
   |                 + one view per report section (M8.2), so the text and
@@ -53,8 +56,8 @@ registry). OML models themselves are schema objects.
 
 The **seam** is the portability trick: all analytics are written once against
 the thin `CAPV_*` views, so the identical SQL runs against local `DBA_HIST_*`,
-a future `awr-fleet-warehouse`, or the test fixtures — you just swap which
-seam file `install.sql` loads.
+the `awr-fleet-warehouse` `AWRV_*` views, or the test fixtures — you just swap
+which seam file `install.sql` loads.
 
 ## Install
 
@@ -72,7 +75,7 @@ Modes:
 | seam_mode | source | notes |
 |-----------|--------|-------|
 | `local` (default) | `DBA_HIST_*` | needs Diagnostics Pack + **direct** SELECT grants on the DBA_HIST views (not via a role). Install in `CDB$ROOT`. |
-| `warehouse` | `awrv_*` seam views | the [awr-fleet-warehouse](../awr-fleet-warehouse) collector gathers tablespace/OSSTAT/time-model history from the fleet; install this suite as the warehouse owner (or a schema with SELECT on the `AWRV_*` views). Presents every collected database keyed on `(dbid, con_dbid)`. |
+| `warehouse` | `awrv_*` seam views | the [awr-fleet-warehouse](../awr-fleet-warehouse) collector gathers tablespace/OSSTAT/time-model history from the fleet; install this suite as the warehouse owner (or a schema with SELECT on the `AWRV_*` views). Presents every collected database keyed on `(dbid, con_dbid)`. The warehouse has no resource-limit fact yet, so `CAPV_RESOURCE_LIMIT` is a zero-row stub there and the `PROCESSES` / `SESSIONS` series are simply empty. |
 | `fixture` | `CAP_FIXTURE_*` | test hook; run `test/fixture_install.sql` first. |
 
 Uninstall: `@uninstall.sql`.
@@ -126,7 +129,7 @@ with no tablespace prints usage and stops. Read-only, like everything else.
 
 ## HTML report
 
-`report/report_html.sql` is a sibling driver that renders the same six
+`report/report_html.sql` is a sibling driver that renders the same eight
 sections as a single self-contained HTML dashboard instead of plain text —
 severity badges, colored quality pills, inline fill bars for days-to-full and
 CPU busy%, and inline-SVG growth/trend charts (per-tablespace history + REGR
@@ -166,8 +169,9 @@ EXEC cap_forecast_ml.train_backtest(20); -- optional: holdout twins for section 
 ```
 
 Needs `CREATE MINING MODEL` (free in all editions since Dec 2019).
-`cap_forecast_ml.drop_all` removes the models. A weekly `DBMS_SCHEDULER`
-retrain job is documented (shipped commented-out) in `docs/design.md`.
+`cap_forecast_ml.drop_all` removes the models. For a weekly `DBMS_SCHEDULER`
+retrain job, run the opt-in `@install_jobs.sql` (see *Preflight & scheduler
+jobs* below) — it creates `CAP_ML_RETRAIN` disabled.
 
 ## Configuration
 
@@ -300,21 +304,54 @@ Deterministic fixture harness — no randomness, all closed-form:
 @test/fixture_install.sql
 DEFINE seam_mode = 'fixture'
 @install.sql
-@test/run_test.sql        -- 51 assertions; exits non-zero on any failure
-@test/run_test_ml.sql     -- Tier 2 ESM + backtest assertions (needs CREATE MINING MODEL)
+@test/run_test.sql        -- 199 assertions; exits non-zero on any failure
+@test/run_test_ml.sql     -- 13 Tier 2 ESM + backtest assertions (needs CREATE MINING MODEL)
 ```
 
-Fixtures: `FIX_LINEAR` (exact 10 MiB/day → slope, R², days_to_full checked to
-the byte), `FIX_SPIKE` (one +2 GiB jump → exactly one HIGH on that day),
-`FIX_FLAT` (constant → quality FLAT, no anomaly), `FIX_GAP` (a 3-day AWR gap →
-rate-normalized, no false flag), `FIX_NEARFULL` (constant at exactly 97% of
-maxsize → near-full ranking + CRIT alert despite a FLAT fit), `FIX_FILLING`
-(20 days of headroom → `TBSPC_FULL` CRIT alert), `FIX_ZIGZAG` (linear trend
-with alternating ±20 MiB residuals → the M9.1 prediction-interval and M9.4
-backtest numbers are asserted against first-principles closed forms), CPU
-counters with a mid-series restart (excluded) + an injected +30-point Tuesday
-(flags in the same-weekday view), and `FIXCDB`/`FIXPDB1` container rows
-(label assertions). Cleanup: `@test/fixture_remove.sql`.
+No `V$` access is needed (identity comes from `SYS_CONTEXT`), and fixture mode
+never touches `DBA_HIST_*`.
+
+The spine is 121 days (`i = 0..120`) anchored to `TRUNC(SYSDATE)`, with **two
+snapshots a day** — `2000+2i` ending 06:00 (the overnight interval) and
+`2001+2i` ending 18:00 (the daytime / peak-window interval, which also carries
+every tablespace usage row).
+
+Ten tablespace series: `FIX_LINEAR` (exact 10 MiB/day → slope, R²,
+`days_to_full = 4990` checked to the byte; zero residuals, so the M9.1 bands
+collapse), `FIX_SPIKE` (one +2 GiB jump → exactly one HIGH on that day, and
+Theil–Sen recovers the true 5 MiB/day while OLS is 3.9× off), `FIX_FLAT`
+(constant → quality FLAT, no anomaly, the one `is_reportable = 'N'` row),
+`FIX_GAP` (a 3-day AWR gap → rate-normalized, no false flag), `FIX_NEARFULL`
+(constant at exactly 97% of maxsize → near-full ranking + CRIT alert despite a
+FLAT fit), `FIX_FILLING` (20 days of headroom → `TBSPC_FULL` CRIT alert),
+`FIX_ZIGZAG` (linear trend with alternating ±20 MiB residuals → the M9.1
+prediction-interval, M9.2 Theil–Sen and M9.4 backtest numbers are asserted
+against first-principles closed forms), `FIX_OVERRIDE` (`FIX_LINEAR`'s twin
+capped at 2 GiB by `CAP_TBSPC_OVERRIDE` → 4990 days-to-full becomes 74,
+`limit_source = OVERRIDE`), `FIX_EXCLUDED` (99% full but silenced by a wildcard
+`exclude_flag='Y'` row → must appear nowhere) and `FIX_PURGE` (a −600 MiB cliff
+at day 90 → M9.3 restarts the window at the cliff, `train_n = 31`, slope back
+to exactly 10 MiB/day).
+
+Two containers: the root (`FIXCDB`/`CDB$ROOT`) carries OSSTAT + time-model with
+a mid-series restart (dropped by the startup-time guard), an injected
++30-point Tuesday (flags in the same-weekday view) and a pure AWR gap on a
+Sunday (the next interval spans 36 h → the following day reads 30% against a
+40% baseline and must stay unflagged purely because `gap_flag = 'Y'`);
+`FIXCDB`/`FIXPDB1` carries **time-model only** — a 7-day DB CPU sawtooth that
+steps +18 points for the last week, which only `CAPA_CPU_SHIFT` can see.
+
+Fixed-ceiling series (M11), from the `CAP_FIXTURE_RESOURCE_LIMIT` /
+`CAP_FIXTURE_SYSSTAT` tables: `SESSIONS` 200→440 of 500 (→ `days_to_limit = 5`,
+a `SERIES_LIMIT` CRIT), `PROCESSES` constant 150 of 300 (FLAT, silent) and
+`REDO_GB_DAY` at exactly 2.0 GiB/day (no ceiling, never alerts).
+
+Every expected number is computed by the installer in exact arithmetic and
+stored in `CAP_FIXTURE_META`, so the assertions read them instead of
+re-deriving. That includes the M9.1 bands, which the installer computes with
+the **same** `t ≈ 1.96 + 2.4/df` approximation `ddl/30_forecast_views.sql`
+uses — the two are a matched pair; change them together. Cleanup:
+`@test/fixture_remove.sql`.
 
 ### Real workload (optional)
 
@@ -346,9 +383,14 @@ suite depends on it.
   REGR-only in `CAPF_COMPARE`. The package caps the step automatically.
 - **Anomalies key off the per-day growth RATE, not the raw delta.** Across an
   AWR gap (missing snapshots) `CAPD_TBSPC_DELTA` exposes `day_gap` and divides
-  the delta by it, so a multi-day gap is not mistaken for a one-day spike. (The
-  CPU busy% over a gap is a valid multi-day average attributed to the ending
-  day — a documented minor limitation, not gap-normalized.)
+  the delta by it, so a multi-day gap is not mistaken for a one-day spike. The
+  CPU series handles the same problem differently (M10.5): the day is kept, but
+  `max_interval_hours` / `gap_flag` / `day_gap` mark it, `busy_p95` /
+  `busy_max` / `busy_peak_pct` (and the `db_cpu_*` twins) ignore intervals
+  longer than `cpu_gap_hours`, and `CAPA_CPU_ANOM` / `CAPA_CPU_SHIFT` neither
+  score a gap day nor let it into a baseline. The daily *average* over a gap is
+  still a valid multi-day average attributed to the ending day — `gap_flag` is
+  the column that says so.
 - **Re-install preserves your tuning, overrides and models.** `CAP_CONFIG`
   knobs, `CAP_TBSPC_OVERRIDE` rows and the `CAP_ML_MODEL` registry (and its OML
   models) survive `@install.sql` (`00_drop` no longer drops the three persisted

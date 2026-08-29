@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>How it works — AWR Capacity Predictions</title>
-<meta name="description" content="The architecture of AWR Capacity Predictions: the swappable seam, the five-layer view pipeline, and the two forecasting engines.">
+<meta name="description" content="The architecture of AWR Capacity Predictions: the swappable seam, the five-layer view pipeline, the forecast-quality machinery, the CPU and fixed-ceiling series, and the two forecasting engines.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23b06a0d'/><path d='M16 8L24 23L8 23Z' fill='%23fff'/></svg>">
 <link rel="stylesheet" href="assets/style.css">
 <script>
@@ -48,8 +48,8 @@
       <section class="hero" id="how">
         <span class="eyebrow">Architecture</span>
         <h1>How it works</h1>
-        <p class="lead">Five view layers turn irregular AWR snapshots into forecasts, anomalies and a
-          report, all built on one swappable data source.</p>
+        <p class="lead">Five view layers turn irregular AWR snapshots into forecasts, anomalies,
+          alerts and a report, all built on one swappable data source.</p>
       </section>
 
       <!-- ===================== TERMS ===================== -->
@@ -65,15 +65,20 @@
           <thead><tr><th>Term you'll see</th><th>What it actually means</th></tr></thead>
           <tbody>
             <tr><td><b>AWR</b></td><td class="def">Oracle's built-in performance history (Automatic Workload Repository) — the snapshots already sitting in your database. This tool only <b>reads</b> it; it never touches your data.</td></tr>
-            <tr><td><b>Seam</b> &nbsp;<span class="k">CAPV_</span> views</td><td class="def">A thin <b>adapter / switch layer</b>. Think of a symlink, or an alias in a load balancer: all the reporting math reads from these 6 views, and at install time you decide what they point at. Change the pointer, and everything above it keeps working unchanged.</td></tr>
+            <tr><td><b>Seam</b> &nbsp;<span class="k">CAPV_</span> views</td><td class="def">A thin <b>adapter / switch layer</b>. Think of a symlink, or an alias in a load balancer: all the reporting math reads from these 9 views, and at install time you decide what they point at. Change the pointer, and everything above it keeps working unchanged.</td></tr>
             <tr><td><b>Mode</b> <span class="inline">seam_mode</span></td><td class="def">Which back-end the seam points at: <span class="k">local</span> = this database's live AWR · <span class="k">warehouse</span> = a central collector covering many databases · <span class="k">fixture</span> = fake test data.</td></tr>
             <tr><td><b>Fixture</b></td><td class="def">A set of <b>fake, hand-built sample rows whose correct answers are known in advance</b> — like a golden test file you diff against. You can't insert fake rows into real AWR, so fixtures are how the tool proves its math is right before you trust it on production.</td></tr>
             <tr><td><b>Harness</b></td><td class="def">The self-check script that loads a fixture, runs the tool, and prints <span class="pill ok">PASS</span>/<span class="pill crit">FAIL</span> for each expected number. Same idea as a smoke-test script in CI.</td></tr>
             <tr><td><b>Tier 1 (REGR)</b></td><td class="def">The always-on forecast: plain-SQL <b>linear regression</b> — a straight trend line you can reconstruct by hand. Transparent, nothing trained.</td></tr>
             <tr><td><b>Tier 2 (OML / ESM)</b></td><td class="def">An <b>optional</b> second opinion using Oracle's built-in machine learning (Oracle Machine Learning). ESM = exponential smoothing, better at weekly seasonality. Off unless you turn it on.</td></tr>
             <tr><td><b>MAD</b></td><td class="def">Median Absolute Deviation — a <b>robust "how far from normal is this?"</b> measure. Like standard deviation, but one huge spike doesn't wreck the baseline. Used to flag anomalies.</td></tr>
-            <tr><td><b>Idempotent</b></td><td class="def">Safe to run again. Re-running the installer <b>won't wipe your settings or trained models</b> — it only fills in what's missing.</td></tr>
-            <tr><td><b>days_to_full</b></td><td class="def">The headline number: at the current trend, <b>how many days until this tablespace hits its limit</b>.</td></tr>
+            <tr><td><b>Prediction band</b></td><td class="def">The <b>uncertainty around a projection</b>. Instead of "412 GiB in 180 days" you get a range the value should land inside 95% of the time — and <code>days_to_full</code> becomes "120 days, worst case 80".</td></tr>
+            <tr><td><b>Theil–Sen</b></td><td class="def">A <b>robust alternative to least squares</b>: take the slope between every pair of days and use the median of them. One bulk-load day can move a least-squares line a long way; it can't move a median.</td></tr>
+            <tr><td><b>Change point</b> / <b>level shift</b></td><td class="def">A <b>step</b> in the series rather than a trend: a purge that drops a tablespace by 600 GiB, or a workload move that leaves CPU permanently 18 points higher. Fitting one straight line across a step gives a fiction, so steps are detected and handled separately.</td></tr>
+            <tr><td><b>Backtest</b> / holdout</td><td class="def">Hide the last few weeks, forecast them as if they hadn't happened, then <b>score the forecast against what really occurred</b>. <b>MAPE</b> is the average error as a percent; <b>bias</b> is the same average keeping its sign (positive = the engine over-forecast).</td></tr>
+            <tr><td><b>p95 / peak window</b></td><td class="def">Ways of saying "the busy hour" rather than "the daily average". <b>p95</b> is the 95th percentile of the day's snapshot intervals; the <b>peak window</b> is the configured business-hours band.</td></tr>
+            <tr><td><b>Idempotent</b></td><td class="def">Safe to run again. Re-running the installer <b>won't wipe your settings, overrides or trained models</b> — it only fills in what's missing.</td></tr>
+            <tr><td><b>days_to_full</b></td><td class="def">The headline number: at the current trend, <b>how many days until this tablespace hits its limit</b>. Its cousins are <code>days_to_sat</code> (CPU) and <code>days_to_limit</code> (the fixed-ceiling series).</td></tr>
           </tbody>
         </table>
       </div>
@@ -93,7 +98,7 @@
           comes from underneath it.</p>
       </div>
 
-      <p>Every calculation in this tool reads from a thin layer of six views prefixed
+      <p>Every calculation in this tool reads from a thin layer of nine views prefixed
         <span class="inline">CAPV_</span>, shaped to look just like Oracle's AWR data dictionary.
         Nothing above them ever touches the real <span class="inline">DBA_HIST_*</span> tables directly.
         That single layer is the <b>seam</b>: to change where the data comes from, you swap
@@ -124,7 +129,8 @@
       <div class="section-head" id="pipeline">
         <span class="eyebrow">Architecture</span>
         <h2>The pipeline</h2>
-        <p>Five view layers turn irregular AWR snapshots into forecasts, anomalies, and a report.</p>
+        <p>Five view layers turn irregular AWR snapshots into forecasts, anomalies, alerts and a
+          report.</p>
       </div>
 
       <div class="pipe">
@@ -142,12 +148,14 @@
           <span class="layer__tag">CAPV_</span>
           <div class="layer__body">
             <h5>Seam — DBA_HIST-shaped views</h5>
-            <p>Six views, each carrying <code>(dbid, con_dbid)</code>. Units passed through as-is
+            <p>Nine views, each carrying <code>(dbid, con_dbid)</code>. Units passed through as-is
               (blocks, centiseconds, microseconds). This is the only layer that knows the source.</p>
             <div class="layer__objs">
               <span class="obj">CAPV_SNAPSHOT</span><span class="obj">CAPV_TBSPC_USAGE</span>
               <span class="obj">CAPV_TABLESPACE</span><span class="obj">CAPV_DATAFILE</span>
               <span class="obj">CAPV_OSSTAT</span><span class="obj">CAPV_TIME_MODEL</span>
+              <span class="obj">CAPV_CONTAINER</span><span class="obj">CAPV_RESOURCE_LIMIT</span>
+              <span class="obj">CAPV_SYSSTAT</span>
             </div>
           </div>
         </div>
@@ -158,10 +166,12 @@
           <div class="layer__body">
             <h5>Daily series — one clean row per day</h5>
             <p>Collapses per-instance, cumulative-counter snapshots into daily rows: blocks→bytes,
-              counter deltas with restart guards, gap-aware growth rates.</p>
+              counter deltas with restart guards, gap-aware growth rates, peak-hour percentiles, and
+              the generic fixed-ceiling series.</p>
             <div class="layer__objs">
               <span class="obj">CAPD_TBSPC_DAILY</span><span class="obj">CAPD_TBSPC_DELTA</span>
               <span class="obj">CAPD_CPU_DAILY</span><span class="obj">CAPD_DBTIME_DAILY</span>
+              <span class="obj">CAPD_SERIES_DAILY</span>
             </div>
           </div>
         </div>
@@ -172,19 +182,23 @@
             <span class="layer__tag">CAPF_</span>
             <div class="layer__body">
               <h5>Tier 1 forecasts</h5>
-              <p>Least-squares <code>REGR_*</code> fits. Every projection reconstructs from slope + intercept.</p>
+              <p>Least-squares (or Theil–Sen) fits with 95% prediction bands. Every projection
+                reconstructs from slope + intercept.</p>
               <div class="layer__objs">
                 <span class="obj">CAPF_TBSPC_FORECAST</span><span class="obj">CAPF_CPU_TREND</span>
+                <span class="obj">CAPF_SERIES_FORECAST</span>
               </div>
             </div>
           </div>
           <div class="layer l-a">
             <span class="layer__tag">CAPA_</span>
             <div class="layer__body">
-              <h5>Anomalies</h5>
-              <p>Rolling median + MAD. Tablespace: trailing window. CPU: same-weekday seasonal baseline.</p>
+              <h5>Anomalies &amp; shifts</h5>
+              <p>Rolling median + MAD. Tablespace: trailing window. CPU: same-weekday seasonal
+                baseline, plus a window-vs-window level-shift test.</p>
               <div class="layer__objs">
                 <span class="obj">CAPA_TBSPC_ANOM</span><span class="obj">CAPA_CPU_ANOM</span>
+                <span class="obj">CAPA_CPU_SHIFT</span>
               </div>
             </div>
           </div>
@@ -196,12 +210,31 @@
           <div class="layer l-f">
             <span class="layer__tag">ESM</span>
             <div class="layer__body">
-              <h5>OML exponential smoothing</h5>
-              <p>One model per series via <code>DBMS_DATA_MINING</code>; compared against Tier 1.</p>
+              <h5>OML exponential smoothing + backtest</h5>
+              <p>One model per series via <code>DBMS_DATA_MINING</code>, plus holdout twins that score
+                every engine against the recent past.</p>
               <div class="layer__objs">
                 <span class="obj">cap_forecast_ml</span><span class="obj">CAPF_ESM_FORECAST</span>
-                <span class="obj">CAPF_COMPARE</span>
+                <span class="obj">CAPF_ESM_BACKTEST</span><span class="obj">CAPF_ESM_CANDIDATE</span>
+                <span class="obj">CAPF_COMPARE</span><span class="obj">CAPF_BACKTEST</span>
               </div>
+            </div>
+          </div>
+        </div>
+        <div class="conn"></div>
+
+        <div class="layer l-a">
+          <span class="layer__tag">CAPR_</span>
+          <div class="layer__body">
+            <h5>Integration — labels, alerts, one view per report section</h5>
+            <p>Display labels (<code>db_pdb</code>), the pollable <code>CAPR_ALERTS</code> surface,
+              and a view per report section that does every conversion, ranking and severity marker
+              once.</p>
+            <div class="layer__objs">
+              <span class="obj">CAPR_CONTAINER</span><span class="obj">CAPR_ALERTS</span>
+              <span class="obj">CAPR_TBSPC_DAYS_TO_FULL</span><span class="obj">CAPR_TBSPC_FORECAST</span>
+              <span class="obj">CAPR_CPU_TREND</span><span class="obj">CAPR_CPU_SHIFTS</span>
+              <span class="obj">CAPR_SERIES</span><span class="obj">CAPR_BACKTEST</span>
             </div>
           </div>
         </div>
@@ -210,10 +243,11 @@
         <div class="layer out">
           <span class="layer__tag">report/</span>
           <div class="layer__body">
-            <h5>Read-only SQL*Plus text report — 6 sections</h5>
-            <p>Consumes only <code>CAPF_*</code> / <code>CAPA_*</code>. Identity via
+            <h5>Read-only reports — text and HTML, sections 0–7</h5>
+            <p>Both drivers consume only <code>CAPR_*</code>, so they can't drift apart. Identity via
               <code>SYS_CONTEXT</code> (no V$ or catalog privileges). Spools to
-              <code>reports/cap_report_&lt;db&gt;_&lt;ts&gt;.txt</code>. Creates nothing.</p>
+              <code>reports/cap_report_&lt;db&gt;_&lt;ts&gt;.txt</code> (or <code>.html</code>).
+              Creates nothing.</p>
           </div>
         </div>
       </div>
@@ -222,39 +256,51 @@
       <div class="section-head" id="layers">
         <span class="eyebrow">Architecture</span>
         <h2>Layer reference</h2>
-        <p>What each layer is responsible for, and the non-obvious decisions baked into it.</p>
+        <p>What each layer is responsible for, and the non-obvious decisions baked into it. For the
+          full column-by-column list, see the <a href="reference.html#objects">object index</a>.</p>
       </div>
 
       <h3><span class="k">CAPV_</span> &nbsp;— seam views</h3>
-      <p>Six views re-present the AWR dictionary in a stable shape carrying
+      <p>Nine views re-present the AWR dictionary in a stable shape carrying
         <span class="inline">(dbid, con_dbid)</span>. <span class="inline">con_dbid</span> is
         mandatory: <span class="inline">TS#</span> restarts at 0 per container, so <code>SYSTEM</code>
         in the root and in a PDB would collide without it. Block size rides on
         <span class="inline">CAPV_TABLESPACE</span> (populated for every tablespace); the datafile
         view is a fallback only, because <span class="inline">DBA_HIST_DATAFILE</span> is missing
-        <code>SYSTEM</code> on stock 19c.</p>
+        <code>SYSTEM</code> on stock 19c. Three of the nine are about identity and the newer series:
+        <span class="inline">CAPV_CONTAINER</span> resolves each
+        <span class="inline">(dbid, con_dbid)</span> to a database and PDB name (so reports print
+        <code>DB/PDB</code> rather than a raw number),
+        <span class="inline">CAPV_RESOURCE_LIMIT</span> carries <code>processes</code> /
+        <code>sessions</code> utilisation against the init parameters, and
+        <span class="inline">CAPV_SYSSTAT</span> carries the <code>redo size</code> counter.</p>
 
       <h3><span class="k">CAPD_</span> &nbsp;— daily series</h3>
       <p>Tablespace usage is a <em>level</em>, so each day keeps the last sample
         (<span class="inline">KEEP (DENSE_RANK LAST ...)</span>) and converts blocks→bytes.
-        <span class="inline">UNDO</span>/<span class="inline">TEMPORARY</span> are excluded. CPU
+        <span class="inline">UNDO</span>/<span class="inline">TEMPORARY</span> are excluded, and the
+        tablespace ceiling is resolved here — which is why operator overrides applied at this layer
+        are honoured by everything above it. CPU
         <span class="inline">BUSY/IDLE</span> are cumulative counters — consecutive snaps are
         differenced per instance, and any interval spanning a restart
         (<span class="inline">startup_time</span> changed) or showing a negative delta is dropped.
         Deltas expose <span class="inline">day_gap</span> so a multi-day AWR gap becomes a
-        <em>rate</em>, not a false spike.</p>
+        <em>rate</em>, not a false spike. <span class="inline">CAPD_SERIES_DAILY</span> generalises the
+        pattern: any series with a ceiling lands in one view keyed by a <code>series</code> name.</p>
 
       <h3><span class="k">CAPF_</span> &nbsp;— Tier 1 forecasts</h3>
-      <p>Ordinary least squares over <span class="inline">day_n = day_dt − DATE '2020-01-01'</span>.
+      <p>Ordinary least squares over <span class="inline">day_n = day_dt − DATE '2020-01-01'</span>
+        (optionally Theil–Sen — see <a href="#quality">forecast quality</a> below).
         Two fits per series (a 90-day primary and a 28-day "recent"), giving an
-        <span class="inline">accel_ratio</span> that flags accelerating growth.
+        <span class="inline">accel_ratio</span> that flags accelerating growth — NULL rather than an
+        absurd number when the slope is below <span class="inline">accel_slope_floor_bpd</span>.
         <span class="inline">days_to_full = FLOOR((limit − cur_used)/slope)</span>. Quality is
         graded in priority order:</p>
       <div class="tablewrap">
         <table>
           <thead><tr><th>Quality</th><th>Condition</th></tr></thead>
           <tbody>
-            <tr><td><span class="pill crit">INSUFFICIENT_HISTORY</span></td><td class="def"><code>REGR_COUNT &lt; min_train_days</code> — too little AWR retention</td></tr>
+            <tr><td><span class="pill crit">INSUFFICIENT_HISTORY</span></td><td class="def"><code>REGR_COUNT &lt; min_train_days</code> — too little AWR retention (or too few days left after a change-point reset)</td></tr>
             <tr><td><span class="pill warn">FLAT</span></td><td class="def"><code>slope = 0</code>. Note: <code>REGR_R2</code> returns <b>1</b> for a flat series, not NULL, so flatness keys off the slope</td></tr>
             <tr><td><span class="pill warn">LOW_CONFIDENCE</span></td><td class="def"><code>R² &lt; r2_gate</code> (default 0.60)</td></tr>
             <tr><td><span class="pill ok">OK</span></td><td class="def">a trustworthy trend</td></tr>
@@ -264,14 +310,322 @@
 
       <h3><span class="k">CAPA_</span> &nbsp;— anomalies</h3>
       <p>Robust median + MAD, where
-        <span class="inline">MAD_σ = MEDIAN(|x − median|)·1.4826</span>. Each view is a
+        <span class="inline">MAD_σ = MEDIAN(|x − median|)·1.4826</span>. Each anomaly view is a
         trailing-window self-join in two passes (median, then MAD about it), always
         <em>excluding the current day</em> so a spike can't inflate its own baseline. Tablespace
         anomalies work on the growth <em>rate</em> with a
         <span class="inline">GREATEST(k·MAD, abs_floor_bytes)</span> threshold, so a jump from an
         exactly-flat baseline still flags but sub-100&nbsp;MiB/day wiggles never do. CPU anomalies
         baseline against the prior <em>same weekdays</em>, handling weekly seasonality deterministically.
-        Every flag carries value, median, MAD·k threshold, and robust z for hand-verification.</p>
+        Every flag carries value, median, MAD·k threshold, and robust z for hand-verification.
+        A third view, <span class="inline">CAPA_CPU_SHIFT</span>, answers a question a per-day flag
+        cannot — see <a href="#cpu">CPU: peak, share and shifts</a>.</p>
+
+      <h3><span class="k">CAPR_</span> &nbsp;— integration</h3>
+      <p>The layer the outside world reads: display labels, pollable alerts, and one view per report
+        section. Covered in <a href="#integration">the integration layer</a> below.</p>
+
+      <!-- ===================== FORECAST QUALITY ===================== -->
+      <div class="section-head" id="quality">
+        <span class="eyebrow">Tier 1 in depth</span>
+        <h2>Forecast quality: bands, robustness, resets, backtests</h2>
+        <p>Four independent mechanisms sit on top of the plain linear fit. Each one is a
+          <span class="inline">CAP_CONFIG</span> knob away from being turned off.</p>
+      </div>
+
+      <h3>Prediction bands — how wrong could this be?</h3>
+      <p>A projection with no uncertainty attached invites false precision. Every
+        <span class="inline">CAPF_</span> fit therefore publishes a 95% band alongside each point
+        projection, derived from the residuals of the same fit: the residual standard error is
+        <span class="inline">resid_se = √(SSE/(n−2))</span>, and the half-width at a horizon
+        <span class="inline">x₀</span> is
+        <span class="inline">t · resid_se · √(1 + 1/n + (x₀−x̄)²/SXX)</span>. The band widens the
+        further out you look, which is exactly right.</p>
+      <p>The same machinery turns <span class="inline">days_to_full</span> into a range. The slope
+        gets its own confidence interval
+        (<span class="inline">slope_ci = t · resid_se / √SXX</span>); dividing the remaining headroom
+        by <span class="inline">slope + slope_ci</span> gives the <b>worst case</b> (fastest plausible
+        growth) and by <span class="inline">slope − slope_ci</span> the <b>best case</b> — NULL when
+        the slow edge of the interval is not positive, i.e. "it might never get there". That's what
+        the reports print as "120 days, worst case 80".</p>
+      <div class="callout">
+        <span class="ico">i</span>
+        <p><strong>No t-distribution in SQL.</strong> Oracle has no <code>TINV</code>, so
+        <em>t</em> is approximated as <span class="inline">1.96 + 2.4/df</span> with
+        <span class="inline">df = n − 2</span>. That's good to about 1% for df ≥ 10, and
+        <span class="inline">min_train_days</span> guarantees df ≥ 12 before any band is published.
+        The formula is part of the contract — the fixture harness recomputes the expected bands with
+        the identical expression.</p>
+      </div>
+
+      <h3>Theil–Sen — a slope one bad day can't move</h3>
+      <p>Least squares minimises <em>squared</em> error, so a single step — a bulk load, an import, a
+        partition drop — drags the whole line with it. The Theil–Sen estimator is the <b>median of the
+        pairwise slopes</b> <span class="inline">(y_j − y_i)/(x_j − x_i)</span> over every pair in the
+        training window: a minority of stepped pairs cannot move a median (its breakdown point is
+        29%). Cost is O(n²), about 4,000 pairs per series at the shipped 90-day window, computed with
+        a self-join.</p>
+      <p>Both estimators are <em>always</em> computed and exposed
+        (<span class="inline">ols_slope_bpd</span> / <span class="inline">ts_slope_bpd</span>); the
+        <span class="inline">slope_method</span> knob (<b>0 = OLS</b>, the default; <b>1 =
+        THEILSEN</b>) decides which one the row actually uses, and a column of the same name says so.
+        When Theil–Sen is selected it drives the slope, the intercept, every projection,
+        <span class="inline">days_to_full</span> / <span class="inline">days_to_sat</span>, both halves
+        of <span class="inline">accel_ratio</span> and the <code>slope = 0</code> FLAT test. It applies
+        to tablespaces and to the CPU trend alike.</p>
+      <div class="callout warn">
+        <span class="ico">!</span>
+        <p><strong>The bands stay OLS.</strong> There is no closed-form prediction interval for
+        Theil–Sen in SQL, so <code>r2</code>, <code>resid_se</code>, the projection bands and
+        <code>slope_ci</code> remain least-squares residual quantities — drawn <em>around</em> the
+        chosen line. With the default <span class="inline">slope_method = 0</span> nothing about the
+        output changes at all.</p>
+      </div>
+
+      <h3>Change-point reset — don't fit across a purge</h3>
+      <p>After a purge, archive or partition drop, a tablespace's history has a cliff in it, and a
+        line fitted across the cliff understates the slope and overstates the headroom. With
+        <span class="inline">reset_on_shrink = 1</span> (the default) the training window
+        <b>restarts</b> at the most recent day whose day-over-day delta is a large negative step:</p>
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">the rule</span><span class="term__tag in">M9.3</span></div>
+<pre>delta &lt; -GREATEST(shrink_mad_k * MAD_sigma(window deltas), abs_floor_bytes)</pre>
+      </div>
+      <p>The <span class="inline">abs_floor_bytes</span> term stops an exactly-flat series (MAD = 0)
+        from treating every wiggle as a cliff, and <span class="inline">shrink_mad_k</span> defaults to
+        <b>6</b> — twice the anomaly <span class="inline">mad_k</span> — because this restarts a fit
+        and should only fire on real cliffs. The cliff day itself is day 1 of the new window (its
+        <span class="inline">used_bytes</span> is already the post-purge level), so
+        <span class="inline">train_start = reset_day</span> and the fit sees only post-cliff data. Both
+        columns are published — <span class="inline">reset_day</span> is NULL when nothing reset — and
+        if fewer than <span class="inline">min_train_days</span> rows survive, the quality honestly
+        reads <span class="pill crit">INSUFFICIENT_HISTORY</span>: we genuinely don't know the
+        post-purge growth rate yet. This is a tablespace mechanism only; a CPU step is a level shift,
+        handled by <a href="#cpu">CAPA_CPU_SHIFT</a>.</p>
+
+      <h3>Backtest — score the engines against what actually happened</h3>
+      <p><span class="inline">CAPF_BACKTEST</span> hides the last
+        <span class="inline">backtest_holdout_days</span> (default 28) of each series, fits the
+        training window ending at that cutoff, and scores the predictions against the days it hid:
+        <b>MAPE</b> (average absolute error as a percent) and <b>bias</b> (the same average with its
+        sign, so positive means the engine over-forecast), per series per engine. The REGR row is
+        recomputed in pure SQL and is always available; the ESM row appears once
+        <span class="inline">cap_forecast_ml.train_backtest</span> has trained
+        <em>purpose = BACKTEST</em> twin models through the same cutoff. Those twins never leak into
+        the live forecast views. Because the 19c 30-step cap and a conservative
+        <span class="inline">FLOOR(rows/4)</span> floor also apply to the twins, ESM may be scored on
+        fewer days than REGR — <span class="inline">n_days</span> reports what each engine was
+        actually scored on.</p>
+      <p>The backtest also <em>decides</em> something. With
+        <span class="inline">esm_tbspc_model = 2</span> (AUTO, the default) and
+        <span class="inline">esm_select_by_backtest = 1</span>, each tablespace gets <b>both</b>
+        candidate twins trained — <span class="inline">EXSM_HOLT</span> and
+        <span class="inline">EXSM_ADDWINTERS</span> with a 7-day season — scored in
+        <span class="inline">CAPF_ESM_CANDIDATE</span>, and the production model is built with
+        whichever had the lower holdout MAPE (ties, or no evidence, go to Holt). Setting the knob to
+        <b>0</b> or <b>1</b> pins a model type and skips the extra trainings; setting
+        <span class="inline">esm_select_by_backtest = 0</span> makes AUTO fall back to Holt.</p>
+
+      <!-- ===================== CPU ===================== -->
+      <div class="section-head" id="cpu">
+        <span class="eyebrow">CPU in depth</span>
+        <h2>CPU: peak, share and shifts</h2>
+        <p>A daily average hides the hour that actually saturates, and a trend line can't see a step.
+          Three additions fix both, and a fourth stops AWR gaps from lying.</p>
+      </div>
+
+      <h3>The busy hour, not the day</h3>
+      <p><span class="inline">CAPD_CPU_DAILY</span> keeps the day's time-weighted average
+        (<span class="inline">busy_pct</span>) but adds the numbers that matter for headroom:
+        <span class="inline">busy_p95</span> and <span class="inline">busy_max</span> over the day's
+        snapshot intervals, and <span class="inline">busy_peak_pct</span>, the time-weighted average
+        inside a configured business-hours window. Membership in that window is decided by the
+        interval's <b>end</b> hour falling in
+        <span class="inline">(peak_hour_from, peak_hour_to]</span> — with hourly AWR and the default
+        (8, 18], that's exactly the snapshots ending 09:00 through 18:00.</p>
+      <p><span class="inline">CAPF_CPU_TREND</span> fits six metrics per container —
+        <span class="inline">BUSY_PCT</span>, <span class="inline">BUSY_P95</span>,
+        <span class="inline">BUSY_PEAK</span>, <span class="inline">DB_CPU_SEC</span>,
+        <span class="inline">DB_CPU_PCT</span> and <span class="inline">DB_CPU_P95</span> — each with
+        the same bands and quality ladder as the tablespace fit. Every percent-of-capacity metric gets
+        a <span class="inline">days_to_sat</span> against <span class="inline">cpu_sat_pct</span>
+        (default 80); <span class="inline">DB_CPU_SEC</span> has no fixed ceiling, so its is NULL. The
+        <code>CPU_SAT</code> alert keys off the p95 busy-hour trend unless you set
+        <span class="inline">cpu_sat_on_p95 = 0</span>.</p>
+
+      <h3>DB CPU as a share of the machine</h3>
+      <p>Host busy% tells you the machine is hot; it doesn't tell you which container made it hot.
+        <span class="inline">CAPD_DBTIME_DAILY</span> converts the time-model counters into two
+        comparable percentages: <span class="inline">db_cpu_pct</span> —
+        <span class="inline">100 · db_cpu_sec / (cores · 86400)</span>, the fraction of the host's
+        core-seconds this container's foreground DB CPU consumed, on the same scale as busy% and
+        therefore forecastable the same way — and <span class="inline">host_share_pct</span>, DB CPU
+        seconds over the host's busy seconds that day: how much of what the host was doing was
+        <em>this</em> container. The per-interval p95 / max / peak-window twins exist too, giving each
+        PDB its own busy hour. A trend crossing the saturation line raises the
+        <code>DBCPU_SAT</code> alert.</p>
+      <div class="callout">
+        <span class="ico">i</span>
+        <p><strong>Why OSSTAT is CDB-wide.</strong> Host CPU is recorded under the CDB's
+        <span class="inline">con_dbid</span>, while time-model DB CPU is per container. That's what
+        makes <span class="inline">host_share_pct</span> meaningful — and why the host busy seconds in
+        its denominator are summed across the <span class="inline">dbid</span>, not read per PDB.</p>
+      </div>
+
+      <h3>Level shifts — the step a trend line can't see</h3>
+      <p>A container that has run 18 points hotter since a workload moved onto it is not an anomaly on
+        any single day, and the trend fit is too noisy to say so.
+        <span class="inline">CAPA_CPU_SHIFT</span> therefore compares <em>windows</em>: for each
+        (container, metric) — <span class="inline">BUSY_PCT</span>,
+        <span class="inline">BUSY_P95</span> and <span class="inline">DB_CPU_PCT</span> — it takes the
+        median of the last <span class="inline">shift_days</span> (7) days against the median of the
+        <span class="inline">shift_baseline_days</span> (28) immediately before it. Since all three
+        metrics are percentages, <span class="inline">shift_pct</span> is their difference in
+        percentage <b>points</b>, never a ratio.</p>
+      <p>An <code>UP</code> flag needs all four of: the shift exceeding
+        <span class="inline">shift_min_pct</span> (15 points); a <em>full</em> recent window; enough
+        baseline days; and an N-of-M confirmation — <em>every</em> day of the recent window above
+        <span class="inline">base_med + MAX(base_mad_sigma, cpu_min_mad_pct)</span>. That last rule is
+        what separates a genuine step from one loud day dragging a 7-day median: a single spike moves
+        a median but cannot put all seven days over the line. <code>DOWN</code> is the mirror image
+        (informational — workload left, or a container moved off). Every input is exposed, so a flag
+        can be re-derived by hand, and the row exists even when nothing is flagged: it is the current
+        <em>state</em> of the series, one row each, so a poller can read it unconditionally.
+        <span class="inline">BUSY_PEAK</span> is deliberately excluded — it moves with
+        <span class="inline">BUSY_PCT</span>'s busiest hours and would only duplicate the alert.</p>
+
+      <h3>AWR gaps don't get to lie</h3>
+      <p>A missing stretch of snapshots doesn't leave a hole in a counter series — the next snapshot
+        simply differences against a much older one, and that single long interval is attributed to
+        the day it ends on. A 36-hour average is not a day, and it is certainly not a peak hour. So
+        both CPU daily views publish <span class="inline">max_interval_hours</span>,
+        <span class="inline">day_gap</span> and a <span class="inline">gap_flag</span> that is
+        <code>'Y'</code> when any interval of the day is longer than
+        <span class="inline">cpu_gap_hours</span>. The day stays in the series (it is still data, and
+        the forecast wants it), but the percentile and peak-window figures are computed only from
+        intervals within the limit, and both <span class="inline">CAPA_CPU_ANOM</span> and
+        <span class="inline">CAPA_CPU_SHIFT</span> refuse to score a gap day or let it into a
+        baseline.</p>
+      <div class="callout warn">
+        <span class="ico">!</span>
+        <p><strong>Why the default is a loose 12 hours.</strong> The flag <em>suppresses</em>
+        anomaly scoring, so an over-sensitive value doesn't make the tool careful — it silences the
+        whole CPU anomaly layer on any site whose snapshot intervals are wide.</p>
+      </div>
+
+      <!-- ===================== SERIES ===================== -->
+      <div class="section-head" id="series">
+        <span class="eyebrow">Generic series</span>
+        <h2>Anything with a ceiling</h2>
+        <p>Tablespaces aren't the only thing that fills up. One generic pair of views covers the rest
+          — and any future one — with no new code.</p>
+      </div>
+      <p><span class="inline">CAPD_SERIES_DAILY</span> is keyed by a <code>series</code> name and
+        carries <span class="inline">(dbid, con_dbid, series, day_dt, value, limit_value, unit,
+        n_samples)</span>. <span class="inline">CAPF_SERIES_FORECAST</span> then applies deliberately
+        plain OLS with the same M9.1 bands and the same quality ladder, and adds
+        <span class="inline">days_to_limit</span> — with the one difference that the ceiling isn't a
+        global percentage knob but a per-series <span class="inline">limit_value</span> carried up
+        from the daily view. A fourth series would cost a <code>UNION ALL</code> branch and nothing
+        else.</p>
+      <div class="tablewrap">
+        <table>
+          <caption>The shipped fixed-ceiling series</caption>
+          <thead><tr><th>Series</th><th>Value</th><th>Ceiling</th></tr></thead>
+          <tbody>
+            <tr><td><span class="k">PROCESSES</span> / <span class="k">SESSIONS</span></td><td class="def">The day's peak utilisation from <code>MAX_UTILIZATION</code>, summed across RAC instances</td><td class="def">The summed init parameters. NULL — no ceiling — if any instance reads <code>UNLIMITED</code>, rather than an understated sum</td></tr>
+            <tr><td><span class="k">REDO_GB_DAY</span></td><td class="def">Redo generated per day in GiB, from the <code>redo size</code> counter deltas (one stream per database)</td><td class="def">None. FRA / archive-destination sizing is an operator decision, so this is a trend, never an alert</td></tr>
+            <tr><td><span class="k">DB_SIZE_GB</span></td><td class="def">Total database size — the summed used bytes across permanent tablespaces</td><td class="def">The summed tablespace ceilings, inheriting the UNDO/TEMP exclusion and any operator overrides</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The saturation point is <span class="inline">series_sat_pct</span> (default <b>90</b>) percent
+        of the ceiling, not 100 — hitting <code>processes</code> exactly is an outage, so the useful
+        answer is the days until 90%. Crossing it raises <code>SERIES_LIMIT</code> /
+        <code>SERIES_NEARLIMIT</code>, and the same lo/hi range from the slope's confidence interval
+        applies.</p>
+      <div class="callout">
+        <span class="ico">i</span>
+        <p><strong><code>MAX_UTILIZATION</code> is a high-water mark since instance startup.</strong>
+        Within one startup epoch the daily maximum is simply the end-of-day high-water mark — exactly
+        the number a DBA compares against <code>processes</code>. But a restart <em>resets</em> it,
+        which shows up as a step down and degrades R² rather than lying.</p>
+      </div>
+
+      <!-- ===================== OVERRIDES ===================== -->
+      <div class="section-head" id="overrides">
+        <span class="eyebrow">Operator input</span>
+        <h2>When the recorded limit isn't the real one</h2>
+        <p>The autoextend <code>maxsize</code> in AWR is a promise the storage may not be able to
+          keep.</p>
+      </div>
+      <p>A 32 GiB <code>maxsize</code> on a 10 GiB filesystem or diskgroup is not 32 GiB of headroom,
+        and a <span class="inline">days_to_full</span> computed against it is a comfortable lie.
+        <span class="inline">CAP_TBSPC_OVERRIDE</span> — the third persisted table — lets you state
+        the ceiling that actually exists, and silence the staging tablespace that is
+        <em>supposed</em> to fill up:</p>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Column</th><th>Effect</th></tr></thead>
+          <tbody>
+            <tr><td><span class="k">limit_bytes</span></td><td class="def">Replaces the computed ceiling for that tablespace.</td></tr>
+            <tr><td><span class="k">exclude_flag</span></td><td class="def"><code>'Y'</code> drops the tablespace from the whole pipeline — no forecast, no anomaly, no alert, no report row.</td></tr>
+            <tr><td><span class="k">dbid</span> / <span class="k">con_dbid</span></td><td class="def"><code>0</code> is a <b>wildcard</b> meaning "any", so one row can be a fleet-wide rule; the most specific matching row wins (a real <code>dbid</code> first, then a real <code>con_dbid</code>). <code>tablespace_name</code> is matched exactly — no patterns.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>The resolution happens once, in <span class="inline">CAPD_TBSPC_DAILY</span>, which is why
+        forecasts, anomalies, alerts and both reports honour it with no further code — including
+        <span class="inline">DB_SIZE_GB</span>, which sums that view.
+        <span class="inline">CAPF_TBSPC_FORECAST.limit_source</span> then reports which rule produced
+        the ceiling in use: <span class="k">OVERRIDE</span>, <span class="k">AUTOEXTEND</span> (the
+        datafile <code>maxsize</code>) or <span class="k">ALLOCATED</span> (the current allocated size,
+        when the files can't extend). Your rows survive
+        <span class="inline">@install.sql</span> and are removed only by
+        <span class="inline">@uninstall.sql</span>.</p>
+
+      <!-- ===================== INTEGRATION ===================== -->
+      <div class="section-head" id="integration">
+        <span class="eyebrow">The top layer</span>
+        <h2>The integration layer</h2>
+        <p><span class="k">CAPR_</span> exists so that monitoring systems and the two report drivers
+          all read the same rows.</p>
+      </div>
+      <p><span class="inline">CAPR_ALERTS</span> is the machine-readable surface: one row per
+        <em>current</em> issue, with a severity (CRIT / WARN / INFO) and sort rank, a
+        <code>kind</code>, the <span class="inline">(dbid, con_dbid)</span> keys plus the resolved
+        <code>db_pdb</code> label from <span class="inline">CAPR_CONTAINER</span>, the metric value
+        against its threshold, and a ready-to-page message. The kinds are
+        <code>TBSPC_FULL</code>, <code>TBSPC_NEARFULL</code>, <code>TBSPC_ANOM</code>,
+        <code>CPU_SAT</code>, <code>DBCPU_SAT</code>, <code>CPU_ANOM</code>, <code>CPU_SHIFT</code>,
+        <code>SERIES_LIMIT</code> and <code>SERIES_NEARLIMIT</code>. Anomaly kinds window on the
+        <span class="inline">anomaly_report_days</span> knob (14) — a different window from the
+        report's own presentation knob.</p>
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">SQL*Plus</span><span class="term__tag in">poll it</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> SELECT severity, kind, db_pdb, message FROM capr_alerts ORDER BY sev_rank;</pre>
+      </div>
+      <p>Alongside it sits one view per report section —
+        <span class="inline">CAPR_TBSPC_DAYS_TO_FULL</span>,
+        <span class="inline">CAPR_TBSPC_FORECAST</span>,
+        <span class="inline">CAPR_TBSPC_ANOMALIES</span>, <span class="inline">CAPR_CPU_TREND</span>,
+        <span class="inline">CAPR_CPU_ANOMALIES</span>, <span class="inline">CAPR_CPU_SHIFTS</span>,
+        <span class="inline">CAPR_ESM_COMPARE</span>, <span class="inline">CAPR_BACKTEST</span> and
+        <span class="inline">CAPR_SERIES</span>. Every unit conversion, severity marker, ranking and
+        display label is computed <em>once</em>, in the view. The text and HTML drivers only format
+        what those views hand them (the HTML driver computes chart geometry and nothing more), so the
+        two reports cannot show different numbers — and neither can disagree with what pages you.
+        The three views that depend on Tier 2 load after the ML file, in
+        <span class="inline">ddl/55_report_views_ml.sql</span>.</p>
+      <p>The ranking columns are how the drivers stay thin: severities and ranks such as
+        <span class="inline">rank_dtf</span>, <span class="inline">rank_report</span> and
+        <span class="inline">is_reportable</span> live in the view, so applying
+        <span class="inline">top_n</span> or "only tablespaces that are growing, near-full, or at
+        least <span class="inline">report_min_gb</span> GiB" is a plain <code>WHERE</code> clause in
+        both drivers. The full column list is in the
+        <a href="reference.html#objects">object index</a>.</p>
 
       <!-- ===================== ENGINES ===================== -->
       <div class="section-head" id="engines">
@@ -283,17 +637,19 @@
         <div class="track-card a" style="border-top-color:var(--accent)">
           <div class="tk">Tier 1 · always on</div>
           <h4>Pure SQL — a straight trend line</h4>
-          <p>Standard linear regression. Every forecast is just slope × days + starting point, and
-            every anomaly is explained by its median and MAD — so you can check any number by hand.
-            Nothing to train, nothing hidden.</p>
-          <div class="meta"><span><b>Reaches:</b> +30 / +90 / +180 / +365 days</span>
+          <p>Linear regression, or Theil–Sen when you select it. Every forecast is just slope × days
+            + starting point, every band comes from the fit's own residuals, and every anomaly is
+            explained by its median and MAD — so you can check any number by hand. Nothing to train,
+            nothing hidden.</p>
+          <div class="meta"><span><b>Reaches:</b> +30 / +90 / +180 / +365 days, with 95% bands</span>
             <span><b>Needs:</b> nothing beyond the views</span></div>
         </div>
         <div class="track-card b">
           <div class="tk">Tier 2 · optional</div>
           <h4>OML ESM — exponential smoothing</h4>
-          <p>One model per series via <code>DBMS_DATA_MINING</code>. Tablespaces use Holt (trend);
-            CPU uses additive Winters (weekly seasonality). Shown against Tier 1 in section 6.</p>
+          <p>One model per series via <code>DBMS_DATA_MINING</code>. CPU uses additive Winters (weekly
+            seasonality); tablespaces default to AUTO, where the backtest picks between Holt and
+            additive Winters per series. Shown against Tier 1 in section 6, and scored in 6c.</p>
           <div class="meta"><span><b>Reaches:</b> +30 only — 19c hard-caps the horizon at 30 steps</span>
             <span><b>Needs:</b> <span class="inline">CREATE MINING MODEL</span></span></div>
         </div>
@@ -304,30 +660,35 @@
         <span class="inline">EXSM_PREDICTION_STEP</span> above 30 at <em>any</em> series length
         (verified: 30 valid, 31 fails at 121/300/600 rows). So ESM forecasts only ever reach +30 days;
         +90/+180/+365 in <span class="inline">CAPF_COMPARE</span> come from Tier 1 alone. The package
-        caps the step automatically.</p>
+        caps the step automatically — which is also why an ESM backtest twin may be scored on fewer
+        holdout days than its REGR counterpart.</p>
       </div>
+      <p>Tier 2 is trained only where it makes sense: a series must grade
+        <span class="pill ok">OK</span> or <span class="pill warn">LOW_CONFIDENCE</span> before a
+        model is built, so a flat or near-full-but-static tablespace gets none.</p>
 
       <!-- ===================== STATE ===================== -->
       <div class="section-head" id="state">
         <span class="eyebrow">Architecture</span>
         <h2>Persisted state</h2>
-        <p>The suite writes exactly two tables of its own — and nothing else, ever.</p>
+        <p>The suite writes exactly three tables of its own — and nothing else, ever.</p>
       </div>
       <div class="tablewrap">
         <table>
           <thead><tr><th>Table</th><th>Holds</th><th>Survives re-install?</th></tr></thead>
           <tbody>
             <tr><td><span class="kt">CAP_CONFIG</span></td><td>Tuning knobs (name/value), MERGE-seeded</td><td><span class="pill ok">yes</span> — MERGE only seeds missing keys</td></tr>
-            <tr><td><span class="kt">CAP_ML_MODEL</span></td><td>Tier 2 model registry</td><td><span class="pill ok">yes</span> — <code>00_drop</code> leaves it alone</td></tr>
+            <tr><td><span class="kt">CAP_TBSPC_OVERRIDE</span></td><td>Operator-set tablespace ceilings and exclusions</td><td><span class="pill ok">yes</span> — <code>00_drop</code> leaves it alone</td></tr>
+            <tr><td><span class="kt">CAP_ML_MODEL</span></td><td>Tier 2 model registry (type, how it was chosen, holdout scores)</td><td><span class="pill ok">yes</span> — <code>00_drop</code> leaves it alone</td></tr>
           </tbody>
         </table>
       </div>
-      <p>Re-running <span class="inline">@install.sql</span> preserves your tuning and trained models;
-        it's idempotent and non-destructive. The OML models themselves are schema objects
-        (<span class="inline">DM$*</span>). For a full teardown, see
+      <p>Re-running <span class="inline">@install.sql</span> preserves your tuning, your overrides and
+        your trained models; it's idempotent and non-destructive. The OML models themselves are schema
+        objects (<span class="inline">DM$*</span>). For a full teardown, see
         <a href="reference.html#teardown">Teardown</a> in the reference (a single
-        <span class="inline">@uninstall.sql</span>). The report and all
-        <span class="inline">CAPV/CAPD/CAPF/CAPA</span> views only ever SELECT.</p>
+        <span class="inline">@uninstall.sql</span>). The reports and all
+        <span class="inline">CAPV/CAPD/CAPF/CAPA/CAPR</span> views only ever SELECT.</p>
 
       <nav class="pager" id="pager" aria-label="Previous and next page"></nav>
 

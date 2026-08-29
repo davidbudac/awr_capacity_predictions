@@ -2,3 +2,8 @@ reports/
 *.log
 .DS_Store
 .claude/
+
+# bench harness: local credentials and run output
+bench/env.sh
+bench/results/
+bench/logs/

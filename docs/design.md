@@ -396,19 +396,21 @@ no partitioned ESM) via `DBMS_DATA_MINING.CREATE_MODEL2(mining_function =>
   else the lowest MAPE, else Holt) and the new `model_type` column names it.
   Per-candidate detail stays in `CAPF_ESM_CANDIDATE`.
 
-### Retraining (shipped commented-out for v1 minimalism)
+### Retraining (M8.3 — opt-in, never part of `install.sql`)
 
-```sql
--- BEGIN
---   DBMS_SCHEDULER.CREATE_JOB(
---     job_name        => 'CAP_ESM_WEEKLY',
---     job_type        => 'PLSQL_BLOCK',
---     job_action      => 'BEGIN cap_forecast_ml.train_all(20); END;',
---     repeat_interval => 'FREQ=WEEKLY;BYDAY=SUN;BYHOUR=2',
---     enabled         => TRUE);
--- END;
--- /
-```
+`@install_jobs.sql` at the repo root creates two `DBMS_SCHEDULER` jobs, both
+**DISABLED**, idempotently: `CAP_ML_RETRAIN` (weekly, Sun 02:00,
+`cap_forecast_ml.train_all`) and `CAP_REPORT_SPOOL_JOB` (daily 03:00), which
+calls the `cap_report_spool(p_dir)` procedure the same script creates. That
+procedure writes a pollable `<dir>/cap_alerts.txt` snapshot of `CAPR_ALERTS`
+through `UTL_FILE` — *not* the formatted report, because SQL\*Plus spooling
+cannot happen inside a scheduler job; keep driving `report/report.sql` from
+cron for that. The directory object is not created for you: the script checks
+`ALL_DIRECTORIES` and prints the exact `CREATE DIRECTORY` / `GRANT READ, WRITE`
+DDL if it is missing (`DEFINE report_dir` overrides the default `CAP_REPORTS`).
+The `_JOB` suffix on the second job is not decoration: jobs share the schema
+namespace with procedures, so `CAP_REPORT_SPOOL` for both would be ORA-27477.
+`@uninstall_jobs.sql` drops both jobs and the procedure.
 
 ## Layer 6 — integration + report views (`CAPR_*`, M7.2/M8.1/M8.2)
 
@@ -423,7 +425,7 @@ M8.2, for the bundled reports themselves:
 - `CAPR_ALERTS` is the pollable alert surface: one row per current issue with
   `severity` (CRIT/WARN/INFO + numeric `sev_rank`), `kind` (`TBSPC_FULL`,
   `TBSPC_NEARFULL`, `TBSPC_ANOM`, `CPU_SAT`, `DBCPU_SAT`, `CPU_ANOM`,
-  `CPU_SHIFT`), keys, `value` vs
+  `CPU_SHIFT`, `SERIES_LIMIT`, `SERIES_NEARLIMIT`), keys, `value` vs
   `threshold` (+ `unit`), and a ready-to-page `message`. The forecast kinds
   gate on `quality = 'OK'`; `TBSPC_NEARFULL` deliberately does **not** (M7.1:
   a 97%-full tablespace with an unfittable series must still surface — that's
@@ -447,6 +449,7 @@ the two drivers, and they cannot drift.
 | `CAPR_CPU_SHIFTS` | 5b | the M10.3 level shifts: flagged rows only, both medians, both window lengths and the N-of-M counts, ranked by `|shift_pct|` via `rank_shift` |
 | `CAPR_ESM_COMPARE` | 6a/6b | REGR vs ESM pivoted per (container, series, horizon), in raw units *and* GiB; filter on `series_kind`. Inherits `is_reportable` / `rank_report` from `CAPR_TBSPC_FORECAST` (CPU rows: always `'Y'`, rank 0) so 6a shows exactly section 2's tablespaces |
 | `CAPR_BACKTEST` | 6c | the M9.4 holdout scorecard pivoted per series, incl. the `better` verdict |
+| `CAPR_SERIES` | 7 | the M11 fixed-ceiling series: `cur_val` / `cur_limit` / `sat_value` in the series' own `unit`, `pct_of_limit`, `days_to_limit` with its `limit_worst` / `limit_best` range, `quality`, a `sev` marker and `rank_series` (soonest to hit its limit first) |
 
 All of them resolve `db_pdb` through `CAPR_CONTAINER` themselves. The last
 three read `CAPF_COMPARE` / `CAPF_BACKTEST`, which `ddl/50_ml.sql` creates
@@ -458,8 +461,11 @@ regression that has no section of its own.
 
 ## Report
 
-`report/report.sql` spools a read-only text report (7 sections: an
-at-a-glance alert roll-up from `CAPR_ALERTS`, then the six detail sections) to
+`report/report.sql` spools a read-only text report (8 sections: an
+at-a-glance alert roll-up from `CAPR_ALERTS`, then the seven detail sections —
+days-to-full, tablespace forecast, tablespace anomalies, CPU trend, CPU
+anomalies + level shifts, ESM/backtest compare, and the M11 fixed-ceiling
+series) to
 `reports/cap_report_<db>_<ts>.txt`. Identity comes from `SYS_CONTEXT` (no `V$`
 or catalog privileges needed, so any monitoring schema can run it). Since M8.2
 the sections consume **only** `CAPR_*` — they are `SELECT` + `COLUMN` formats
@@ -488,15 +494,63 @@ empty, while an argument that *was* passed survives — SQL*Plus only reassigns 
 `NEW_VALUE` on a fetched row. Both scripts `UNDEFINE 1 2 3` at the end, so a
 second script in the same session does not inherit the first one's arguments.
 
+**M7.5 — drill-down.** `report/drill_tbspc.sql <tablespace> [con_dbid]` and its
+CPU twin `report/drill_cpu.sql [metric] [con_dbid]` answer the question a
+summary report cannot: *why does this row say that?* Each prints and spools one
+series end to end — the fit header (slope / intercept / R² / slope CI /
+days-to-full or -saturation with the WORST/BEST range), the daily series over
+`train_days` with `fit`, `residual`, delta, gap and that day's `CAPA_*`
+baseline, a residual footer that re-derives `SUM(resid) = 0`, `resid_se` and
+`slope_ci` from scratch next to the values the view publishes, and one
+spelled-out arithmetic line per flagged day. That is the auditability goal made
+operational: the M9.1 bands can be checked with a calculator. Both arguments are
+optional and, like the report drivers, never prompt.
+
+**M8.4 — `doctor.sql`.** A read-only PASS/WARN/FAIL preflight, in one
+exception-wrapped anonymous block so a missing privilege prints one WARN line
+instead of aborting: pack access, direct `DBA_HIST_*` reads, `SESSION_PRIVS`,
+AWR retention and interval per dbid, days of history per source versus
+`min_train_days`, invalid `CAP*` objects and the detected seam mode — closing
+with a plain-English explanation of why forecasts would read
+`INSUFFICIENT_HISTORY`. It queries `ALL_*` filtered on
+`SYS_CONTEXT('USERENV','CURRENT_SCHEMA')` rather than `USER_OBJECTS`, because
+the latter follows the *session* user and would report nothing useful when
+testing as SYSDBA with `CURRENT_SCHEMA` set elsewhere.
+
 ## Testing philosophy
 
 The fixture seam is the correctness gate: since we can't `INSERT` into
 `DBA_HIST_*`, `CAPV_*` are pointed at `CAP_FIXTURE_*` tables filled with exact,
 anchored, deterministic series. Every asserted number is a closed form recorded
 in `CAP_FIXTURE_META` (so `run_test.sql` reads expectations rather than
-re-deriving dates). `run_test.sql` prints PASS/FAIL and exits non-zero on any
-failure (CI-able); `run_test_ml.sql` adds the ESM assertion behind the
-`CREATE MINING MODEL` privilege.
+re-deriving dates). `run_test.sql` prints PASS/FAIL over **199** assertions and
+exits non-zero on any failure (CI-able); `run_test_ml.sql` adds **13** more
+behind the `CREATE MINING MODEL` privilege. The harness needs
+`CREATE TABLE/VIEW/TYPE/PROCEDURE` (+ `CREATE MINING MODEL` for Tier 2) and no
+`V$` access at all — report identity comes from `SYS_CONTEXT`.
+
+Two properties of the fixture are load-bearing enough to state as contracts:
+
+- **The M9.1 multiplier is computed twice, identically.** The installer works
+  out its expected bands with the same `t ≈ 1.96 + 2.4/df` approximation
+  `ddl/30_forecast_views.sql` uses. That is deliberate — it makes the
+  approximation part of the contract rather than an implementation detail — and
+  it means the view and the installer must change together, or the
+  `FIX_ZIGZAG` assertions break.
+- **Every failure mode gets its own series, and negative results are asserted
+  too.** `FIX_EXCLUDED` is 99% full and must appear *nowhere*; the day after
+  the CPU gap is 10 points off its baseline against a 9-point threshold and
+  must stay *unflagged*; `PROCESSES` sits at 50% of its limit and must raise
+  *no* alert of either kind. A test suite that only asserts what should appear
+  cannot catch a layer that has stopped filtering.
+
+**What fixtures cannot prove** is that the toolkit reads a *live* database
+sensibly — an idle test instance has no growth, no seasonality and nothing to
+detect. `bench/` (optional, never installed by `install.sql`) is a swingbench
+harness that drives a shaped daily load — OLTP growth in `SOETBS`, DSS CPU with
+flat storage, a weekday/weekend contrast for the `dow_weeks` baseline, and an
+injectable anomaly burst — so the same views can be exercised against genuine
+AWR history. See `bench/README.md`.
 
 ## Roadmap
 

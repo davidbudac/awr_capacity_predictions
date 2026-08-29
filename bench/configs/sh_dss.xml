@@ -1,0 +1,151 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  bench/configs/sh_dss.xml — Sales History (DSS) against PDB1.
+
+  The query-only counterpart to soe_oltp.xml: heavy rollups/cubes over SH with
+  essentially no data growth, so a DSS phase moves the CPU series while leaving
+  the tablespace series flat. That decoupling is what makes the report's CPU
+  trend and days-to-full readable as independent signals.
+
+  Credentials and host are placeholders — run_phase.sh overrides them with
+  charbench -u/-p/-cs. Concurrency is low by default: each of these queries can
+  saturate a core on its own, and the VM has two.
+-->
+<SwingBenchConfiguration xmlns="http://www.dominicgiles.com/swingbench/config">
+    <Name>SH DSS (capacity bench)</Name>
+    <Comment>Sales History rollups and cubes -- CPU-heavy, growth-free</Comment>
+    <Connection>
+        <UserName>overridden</UserName>
+        <Password>overridden</Password>
+        <ConnectString>overridden</ConnectString>
+        <DriverType>Oracle jdbc Driver</DriverType>
+        <Properties>
+            <Property Key="TcpNoDelay">true</Property>
+            <Property Key="FetchSize">20</Property>
+            <Property Key="StatementCaching">50</Property>
+            <Property Key="MaximumTxRetries">2</Property>
+        </Properties>
+    </Connection>
+    <Load>
+        <NumberOfUsers>3</NumberOfUsers>
+        <MinDelay>0</MinDelay>
+        <MaxDelay>0</MaxDelay>
+        <InterMinDelay>1000</InterMinDelay>
+        <InterMaxDelay>3000</InterMaxDelay>
+        <QueryTimeout>300</QueryTimeout>
+        <MaxTransactions>-1</MaxTransactions>
+        <RunTime>0:10</RunTime>
+        <LogonGroupCount>1</LogonGroupCount>
+        <LogonDelay>100</LogonDelay>
+        <LogOutPostTransaction>false</LogOutPostTransaction>
+        <WaitTillAllLogon>true</WaitTillAllLogon>
+        <StatsCollectionStart>0:0</StatsCollectionStart>
+        <StatsCollectionEnd>0:0</StatsCollectionEnd>
+        <ConnectionRefresh>0</ConnectionRefresh>
+        <TransactionList>
+        <Transaction>
+                <Id>Sales Rollup by Month and Channel</Id>
+                <ShortName>SRMC</ShortName>
+                <ClassName>com.dom.benchmarking.swingbench.benchmarks.saleshistory.SalesRollupByMonth</ClassName>
+                <Weight>65</Weight>
+                <Enabled>true</Enabled>
+            </Transaction>
+        <Transaction>
+                <Id>Sales Rollup by Week and Channel</Id>
+                <ShortName>SRWC</ShortName>
+                <ClassName>com.dom.benchmarking.swingbench.benchmarks.saleshistory.SalesRollupByWeek</ClassName>
+                <Weight>75</Weight>
+                <Enabled>true</Enabled>
+            </Transaction>
+        <Transaction>
+                <Id>Sales Cube by Month and Channel</Id>
+                <ShortName>SCMC</ShortName>
+                <ClassName>com.dom.benchmarking.swingbench.benchmarks.saleshistory.SalesCubeByMonth</ClassName>
+                <Weight>60</Weight>
+                <Enabled>true</Enabled>
+            </Transaction>
+        <Transaction>
+                <Id>Sales Cube by Week and Channel</Id>
+                <ShortName>SCWC</ShortName>
+                <ClassName>com.dom.benchmarking.swingbench.benchmarks.saleshistory.SalesCubeByWeek</ClassName>
+                <Weight>50</Weight>
+                <Enabled>true</Enabled>
+            </Transaction>
+        <Transaction>
+                <Id>Product Sales Cube and Rollup by Year</Id>
+                <ShortName>PSCR</ShortName>
+                <ClassName>com.dom.benchmarking.swingbench.benchmarks.saleshistory.ProductSalesRollupCube</ClassName>
+                <Weight>25</Weight>
+                <Enabled>true</Enabled>
+            </Transaction>
+        <Transaction>
+                <Id>Product Sales Cube and Rollup by Month</Id>
+                <ShortName>PMSCR</ShortName>
+                <ClassName>com.dom.benchmarking.swingbench.benchmarks.saleshistory.ProductMonthlySalesRollupCube</ClassName>
+                <Weight>20</Weight>
+                <Enabled>true</Enabled>
+            </Transaction>
+        <Transaction>
+                <Id>Sales Moving Average</Id>
+                <ShortName>SMA</ShortName>
+                <ClassName>com.dom.benchmarking.swingbench.benchmarks.saleshistory.SalesMovingAverage</ClassName>
+                <Weight>95</Weight>
+                <Enabled>true</Enabled>
+            </Transaction>
+        <Transaction>
+                <Id>Period to Period Sales Comparison</Id>
+                <ShortName>PPSC</ShortName>
+                <ClassName>com.dom.benchmarking.swingbench.benchmarks.saleshistory.PeriodToPeriodComparison</ClassName>
+                <Weight>15</Weight>
+                <Enabled>true</Enabled>
+            </Transaction>
+        <Transaction>
+                <Id>Week to Week Sales Comparison</Id>
+                <ShortName>WWSC</ShortName>
+                <ClassName>com.dom.benchmarking.swingbench.benchmarks.saleshistory.WeekToWeekComparison</ClassName>
+                <Weight>15</Weight>
+                <Enabled>true</Enabled>
+            </Transaction>
+        <Transaction>
+                <Id>Top Sales by Quarter</Id>
+                <ShortName>TSQ</ShortName>
+                <ClassName>com.dom.benchmarking.swingbench.benchmarks.saleshistory.TopSalesWithinQuarter</ClassName>
+                <Weight>55</Weight>
+                <Enabled>true</Enabled>
+            </Transaction>
+        <Transaction>
+                <Id>Top Sales by Week</Id>
+                <ShortName>TSW</ShortName>
+                <ClassName>com.dom.benchmarking.swingbench.benchmarks.saleshistory.TopSalesWithinWeek</ClassName>
+                <Weight>40</Weight>
+                <Enabled>true</Enabled>
+            </Transaction>
+        <Transaction>
+                <Id>Sales within Quarter by Country</Id>
+                <ShortName>SQC</ShortName>
+                <ClassName>com.dom.benchmarking.swingbench.benchmarks.saleshistory.SalesByQuarterCountry</ClassName>
+                <Weight>75</Weight>
+                <Enabled>true</Enabled>
+            </Transaction>
+        <Transaction>
+                <Id>Sales within Week by Country</Id>
+                <ShortName>SWC</ShortName>
+                <ClassName>com.dom.benchmarking.swingbench.benchmarks.saleshistory.SalesByWeekCountry</ClassName>
+                <Weight>100</Weight>
+                <Enabled>true</Enabled>
+            </Transaction>
+        </TransactionList>
+    </Load>
+    <Preferences>
+        <StartMode>auto</StartMode>
+        <Output>swingbench</Output>
+        <JumpToEvents>true</JumpToEvents>
+        <TimingsIncludeSleep>false</TimingsIncludeSleep>
+        <TimingsIn>milliseconds</TimingsIn>
+        <StatisticsLevel>simple</StatisticsLevel>
+        <OutputFile>results.xml</OutputFile>
+        <Charts DefaultChart="Overview"/>
+        <AllowedErrorCodes/>
+        <RefreshRate>10</RefreshRate>
+    </Preferences>
+</SwingBenchConfiguration>
