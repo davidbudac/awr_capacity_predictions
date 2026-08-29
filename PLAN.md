@@ -29,21 +29,41 @@ every new number (see `test/run_test.sql`).
 - [x] **M7.3 At-a-glance block for the text report.** Done: section 0 in
       `report.sql` (counts + alert list) built from `CAPR_ALERTS`, same view
       the HTML banner reads.
-- [ ] **M7.4 Bound sections 2 and 6.** Apply `top_n` / "growing or ≥ X GB"
-      filter so a 500-tablespace DB doesn't print 500 + 2000 rows. New knob
-      `report_min_gb`.
-- [ ] **M7.5 Drill-down script** `report/drill_tbspc.sql <tablespace>` (and a
-      CPU twin): daily series, fit line, residuals, anomaly arithmetic for one
-      series.
-- [ ] **M7.6 Positional report args.** `@report/report.sql [top_n] [anomaly_days] [show_esm]`
-      with `defaults.sql` as fallback (COLUMN NEW_VALUE default trick for
-      unset `&1..&3`); no more editing `defaults.sql`.
-- [ ] **M7.7 Cleanups.** ~~Remove the dead `CAP_CONFIG.anomaly_report_days`~~
-      (no longer dead: M8.1's `CAPR_ALERTS` uses it as the alert window; the
-      report `anomaly_days` DEFINE stays presentation-only — both kept, docs
-      say which is which); `TO_CHAR(..,'FM')` the header knobs
-      (`WARN<=        90`); label GiB consistently; cap/NULL `accel_ratio`
-      when `|slope|` is below a floor.
+- [x] **M7.4 Bound sections 2 and 6.** Done: `CAPR_TBSPC_FORECAST` computes
+      `is_reportable` (growing OR near-full OR `cur_used >= report_min_gb` GiB
+      — near-full is in the disjunction so M7.1's rule still holds) and
+      `rank_report` (reportable first, growing first, then biggest);
+      `CAPR_ESM_COMPARE` inherits both (CPU rows always `'Y'` / rank 0). Text
+      and HTML apply the identical `WHERE is_reportable='Y' AND rank_report <=
+      top_n` and print the bound in the section header. New knob
+      `report_min_gb` (1). Fixture: FIX_FLAT is the one `'N'`.
+- [x] **M7.5 Drill-down script.** Done: `report/drill_tbspc.sql <tablespace>
+      [con_dbid]` and its CPU twin `report/drill_cpu.sql [metric] [con_dbid]`
+      (metric = `BUSY_PCT` default | `BUSY_P95` | `BUSY_PEAK` | `DB_CPU_SEC` |
+      `DB_CPU_PCT` | `DB_CPU_P95`) print + spool one series end-to-end: fit
+      header (slope/intercept/R2/slope CI/days-to-full|sat with WORST/BEST),
+      the daily series over `train_days` with `fit`, `residual`, delta, gap and
+      the CAPA_* baseline per day, a residual footer proving `SUM(resid)=0` and
+      re-deriving `resid_se` + `slope_ci` from scratch, and one spelled-out
+      arithmetic line per flagged day. Optional args via the COLUMN NEW_VALUE
+      zero-row trick (never prompts) and `UNDEFINE`d at the end.
+- [x] **M7.6 Positional report args.** Done: `@report/report.sql [top_n]
+      [anomaly_days] [show_esm]` and the same for `report_html.sql`, with
+      `report/defaults.sql` still the fallback source of truth. Unset `&1..&3`
+      are defined-as-empty by the zero-row `COLUMN 1 NEW_VALUE 1` trick (a
+      passed argument survives it), so neither form ever prompts; both scripts
+      `UNDEFINE 1 2 3` at the end. Verified non-interactively on 19c with 0, 1
+      and 3 arguments.
+- [x] **M7.7 Cleanups.** Done: `anomaly_report_days` KEPT (it is
+      `CAPR_ALERTS`' window; the report's `anomaly_days` DEFINE stays
+      presentation-only) and README / `docs/reference.html` now say which
+      window is which; every header knob goes through
+      `TO_CHAR(..,'FM9999990')`, so the text report prints
+      `WARN<=90 CRIT<=30 ; CPU saturation 80%` and `reaches 80%`; GiB / MiB
+      labels unified across text + HTML wherever the number is `/1073741824`
+      (`/1048576`); `accel_ratio` is NULL when
+      `|slope| < accel_slope_floor_bpd` (new knob, 1 MiB/day), so a near-flat
+      series can no longer show a 500x acceleration.
 
 ## M8 — Integration surface
 
@@ -101,10 +121,21 @@ every new number (see `test/run_test.sql`).
       `CAPF_ESM_BACKTEST`, never leak into `CAPF_ESM_FORECAST`/`CAPF_COMPARE`).
       Section 6c (text + HTML) shows MAPE/bias per engine + BETTER verdict.
       Feeds ESM model-type selection in M10.4.
-- [ ] **M9.5 Tablespace limit overrides / exclusions.** `CAP_TBSPC_OVERRIDE
-      (dbid, con_dbid, tablespace_name, limit_bytes, exclude_flag)`: autoextend
-      `maxsize` is not real headroom when the filesystem / ASM DG is smaller;
-      also silences staging/scratch tablespaces.
+- [x] **M9.5 Tablespace limit overrides / exclusions.** Done:
+      `CAP_TBSPC_OVERRIDE (dbid, con_dbid, tablespace_name, limit_bytes,
+      exclude_flag, note)` — the THIRD persisted table (created idempotently in
+      `ddl/05_config.sql`, preserved by `00_drop`, dropped only by
+      `uninstall.sql`). Autoextend `maxsize` is not real headroom when the
+      filesystem / ASM DG is smaller, so a row replaces the computed limit;
+      `exclude_flag='Y'` silences staging/scratch tablespaces entirely.
+      Applied once in `CAPD_TBSPC_DAILY` (an `ores` CTE resolves the most
+      specific of the matching rows — `dbid`/`con_dbid` `0` are wildcards — so
+      the LEFT JOIN cannot fan out), which means forecasts, anomalies,
+      `CAPR_ALERTS` and both reports honour it with no further code. New
+      `limit_source` (`OVERRIDE`/`AUTOEXTEND`/`ALLOCATED`) rides through
+      `CAPF_TBSPC_FORECAST`. Fixtures `FIX_OVERRIDE` (FIX_LINEAR's twin capped
+      at 2 GiB: 4990 days-to-full becomes 74) and `FIX_EXCLUDED` (99% full,
+      excluded via the wildcard row, must appear nowhere) assert it.
 
 ## M10 — CPU / capacity analysis
 

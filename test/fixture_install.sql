@@ -19,6 +19,11 @@
 --   FIX_ZIGZAG   : 10 MiB/day +-20 MiB alternating -- deterministic residuals
 --                  for the M9.1 prediction-interval + M9.4 backtest closed
 --                  forms (expectations computed in-loop below).
+--   FIX_OVERRIDE : FIX_LINEAR's twin (10 MiB/day, 50 GiB maxsize) with a
+--                  CAP_TBSPC_OVERRIDE limit of 2 GiB -> days_to_full 4990
+--                  becomes OVERRIDE_DTF, limit_source 'OVERRIDE' (M9.5).
+--   FIX_EXCLUDED : 99% full and would shout, but exclude_flag='Y' (matched via
+--                  the dbid/con_dbid = 0 wildcard) removes it everywhere (M9.5).
 --   CPU          : two snapshots per day (06:00 = the overnight interval,
 --                  18:00 = the daytime/peak interval). Weekday 20% night /
 --                  60% day (daily avg 40%), weekend 10% / 30% (avg 20%), one
@@ -148,6 +153,8 @@ BEGIN
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 14, 'FIX_NEARFULL', 'PERMANENT', c_bs);
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 15, 'FIX_FILLING',  'PERMANENT', c_bs);
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 16, 'FIX_ZIGZAG',   'PERMANENT', c_bs);
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 17, 'FIX_OVERRIDE', 'PERMANENT', c_bs);
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 18, 'FIX_EXCLUDED', 'PERMANENT', c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 10, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 11, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 12, c_bs);
@@ -155,6 +162,8 @@ BEGIN
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 14, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 15, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 16, c_bs);
+    INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 17, c_bs);
+    INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 18, c_bs);
 
     -- Container naming (M7.2): the row every fixture series resolves through
     -- (con_dbid = dbid -> label is the db_name alone), plus one synthetic PDB
@@ -226,6 +235,26 @@ BEGIN
         v_used := 12800 + 1280 * i + CASE WHEN MOD(i, 2) = 0 THEN 2560 ELSE -2560 END;
         INSERT INTO cap_fixture_tbspc_usage
         VALUES (c_dbid, c_con, 2001 + 2 * i, 16, v_used, v_max50g, v_used);
+
+        -- FIX_OVERRIDE (M9.5) : byte-for-byte FIX_LINEAR (10 MiB/day, 50 GiB
+        -- autoextend maxsize), so WITHOUT an override it would forecast
+        -- days_to_full = 4990. A CAP_TBSPC_OVERRIDE row (inserted after this
+        -- block) caps the real ceiling at 2 GiB -- days_to_full collapses to
+        -- OVERRIDE_DTF and limit_source becomes 'OVERRIDE'. The pair
+        -- FIX_LINEAR / FIX_OVERRIDE is therefore a controlled experiment:
+        -- identical data, different limit, and only the override explains it.
+        v_used := 1280 * i + 12800;
+        INSERT INTO cap_fixture_tbspc_usage
+        VALUES (c_dbid, c_con, 2001 + 2 * i, 17, v_used, v_max50g, v_used);
+
+        -- FIX_EXCLUDED (M9.5) : constant 126720 of maxsize 128000 blocks =
+        -- exactly 99.0% full, which WOULD raise a TBSPC_NEARFULL CRIT. An
+        -- exclude_flag='Y' override (via the dbid=0/con_dbid=0 WILDCARD, so
+        -- the wildcard match path is exercised too) removes it at
+        -- CAPD_TBSPC_DAILY, so it must appear NOWHERE downstream -- the
+        -- loudest possible series making the quietest possible noise.
+        INSERT INTO cap_fixture_tbspc_usage
+        VALUES (c_dbid, c_con, 2001 + 2 * i, 18, 128000, 128000, 126720);
 
         -- FIX_GAP : 60 MiB/day = 7680 blocks/day, but with a 3-day AWR gap
         -- (days 100-102 have NO usage sample). The post-gap day (103) sees a
@@ -306,6 +335,14 @@ BEGIN
         FLOOR((192000 - (1280 * c_nd + 12800)) * c_bs / 10485760));                             -- 20
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('FILLING_PCT',
         ROUND(100 * (1280 * c_nd + 12800) / 192000, 1));                                        -- 86.7
+    -- M9.5 FIX_OVERRIDE closed forms. The series is FIX_LINEAR's twin, so its
+    -- last-day usage is the same (1,363,148,800 bytes); only the ceiling
+    -- differs -- 2 GiB from CAP_TBSPC_OVERRIDE instead of the 50 GiB maxsize.
+    -- Written as a bare NUMBER literal for the same reason c_50g is: the
+    -- 2*1024*1024*1024 product would overflow PLS_INTEGER first.
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('OVERRIDE_LIMIT', 2147483648);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('OVERRIDE_DTF',
+        FLOOR((2147483648 - (1280 * c_nd + 12800) * c_bs) / 10485760));                         -- 74
 
     -- ---- M9.1/M9.4 expectations for FIX_ZIGZAG, computed from first
     -- principles in exact NUMBER arithmetic over the SAME windows the views
@@ -387,5 +424,57 @@ BEGIN
         || ' probe=' || TO_CHAR(v_base + v_probe,'YYYY-MM-DD Dy'));
 END;
 /
+
+-- =====================================================================
+-- M9.5 -- CAP_TBSPC_OVERRIDE fixture rows.
+-- =====================================================================
+-- CHICKEN AND EGG: the harness order is fixture_install -> install.sql, and
+-- CAP_TBSPC_OVERRIDE is created by ddl/05_config.sql -- i.e. AFTER this script.
+-- But the override rows must already be there when the CAPD/CAPF views are
+-- first queried, and ddl/00_drop.sql deliberately does NOT drop the table (it
+-- is operator data that survives a re-install), so seeding it here is safe:
+-- install.sql's own CREATE swallows ORA-00955, finds the table we made, and
+-- leaves these rows alone. Hence the create below is a verbatim copy of the
+-- one in ddl/05_config.sql -- keep the two in sync if the shape ever changes.
+DECLARE
+BEGIN
+    EXECUTE IMMEDIATE 'CREATE TABLE cap_tbspc_override (
+        dbid            NUMBER        DEFAULT 0   NOT NULL,
+        con_dbid        NUMBER        DEFAULT 0   NOT NULL,
+        tablespace_name VARCHAR2(30)              NOT NULL,
+        limit_bytes     NUMBER,
+        exclude_flag    CHAR(1)       DEFAULT ''N'' NOT NULL,
+        note            VARCHAR2(200),
+        CONSTRAINT cap_tbspc_override_pk PRIMARY KEY (dbid, con_dbid, tablespace_name),
+        CONSTRAINT cap_tbspc_override_ck CHECK (exclude_flag IN (''Y'',''N''))
+    )';
+EXCEPTION
+    WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF;
+END;
+/
+
+-- Re-runnable: clear only THIS fixture's rows (every fixture tablespace is
+-- named FIX_%, under dbid 42424242 or the wildcard 0), then re-seed. An
+-- operator's real rows in the same schema are never touched.
+DELETE FROM cap_tbspc_override WHERE tablespace_name LIKE 'FIX!_%' ESCAPE '!';
+
+INSERT INTO cap_tbspc_override (dbid, con_dbid, tablespace_name, limit_bytes, exclude_flag, note)
+VALUES (42424242, 42424242, 'FIX_OVERRIDE', 2147483648, 'N',
+        'M9.5: real ceiling is 2 GiB, not the 50 GiB autoextend maxsize.');
+
+-- A LESS specific duplicate for the same tablespace. The exact-key row above
+-- must win the specificity ranking in CAPD_TBSPC_DAILY.ores, so OVERRIDE_DTF
+-- is computed against 2 GiB and never against this 1 GiB decoy.
+INSERT INTO cap_tbspc_override (dbid, con_dbid, tablespace_name, limit_bytes, exclude_flag, note)
+VALUES (0, 0, 'FIX_OVERRIDE', 1073741824, 'N',
+        'M9.5: wildcard decoy -- the exact-key row must outrank this.');
+
+-- Pure WILDCARD row (any dbid, any con_dbid): exercises the "fleet-wide rule"
+-- matching path as well as exclude_flag.
+INSERT INTO cap_tbspc_override (dbid, con_dbid, tablespace_name, limit_bytes, exclude_flag, note)
+VALUES (0, 0, 'FIX_EXCLUDED', NULL, 'Y',
+        'M9.5: scratch tablespace -- excluded from every layer.');
+
+COMMIT;
 
 PROMPT Fixtures installed.  Next: @install.sql (seam_mode=fixture), then test/run_test.sql

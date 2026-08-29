@@ -18,4 +18,16 @@ BEGIN
     END LOOP;
 END;
 /
+
+-- M9.5: CAP_TBSPC_OVERRIDE is a PERSISTED operator table, not a fixture table,
+-- so it is never dropped here -- only the rows this fixture seeded (every
+-- fixture tablespace is named FIX_%) are removed. ORA-00942 means the suite
+-- was never installed in this schema, which is fine.
+BEGIN
+    EXECUTE IMMEDIATE q'[DELETE FROM cap_tbspc_override WHERE tablespace_name LIKE 'FIX!_%' ESCAPE '!']';
+    COMMIT;
+EXCEPTION
+    WHEN OTHERS THEN IF SQLCODE != -942 THEN RAISE; END IF;
+END;
+/
 PROMPT Fixture tables dropped.

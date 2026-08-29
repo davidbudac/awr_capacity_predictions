@@ -7,19 +7,25 @@
 -- and the horizon is within Oracle's ESM cap (+30 on 19c); +180/365 are
 -- REGR-only by design. Reached only when show_esm != 'N'.
 --
+-- M7.4: 6a applies the same is_reportable / rank_report bound as section 2 --
+-- inherited by CAPR_ESM_COMPARE from CAPR_TBSPC_FORECAST, so the two sections
+-- always show the same tablespaces (4 horizons each, hence 4x the rows). 6b's
+-- CPU rows carry is_reportable='Y', rank_report=0 and are never bounded.
+--
 PROMPT
 PROMPT == 6. TIER 2 (ESM) vs TIER 1 (REGR) ==
 PROMPT    &esm_ok OML ESM model(s) trained (OK). If 0: run  EXEC cap_forecast_ml.train_all
 PROMPT    ESM reaches +30 only (19c hard horizon cap) and only for fresh models;
 PROMPT    +90/180/365 are REGR-only.
 PROMPT
-PROMPT  6a. Tablespaces (GB):
+PROMPT  6a. Tablespaces (GiB) -- the same &ts_shown of &ts_total tablespace(s) as
+PROMPT      section 2 (growing, near-full, or >= &min_gb GiB used, top &top_n):
 
 COLUMN db_pdb     FORMAT A20          HEADING 'DB/PDB'
 COLUMN series_key FORMAT A16          HEADING 'TABLESPACE'
 COLUMN h          FORMAT 9990          HEADING 'HORIZON'
-COLUMN regr       FORMAT 99990.00      HEADING 'REGR_GB'
-COLUMN esm        FORMAT 99990.00      HEADING 'ESM_GB'
+COLUMN regr       FORMAT 99990.00      HEADING 'REGR_GIB'
+COLUMN esm        FORMAT 99990.00      HEADING 'ESM_GIB'
 COLUMN esm_lo     FORMAT 99990.00      HEADING 'ESM_LO'
 COLUMN esm_hi     FORMAT 99990.00      HEADING 'ESM_HI'
 
@@ -32,7 +38,9 @@ SELECT db_pdb,
        esm_hi_gb AS esm_hi
 FROM   capr_esm_compare
 WHERE  series_kind = 'TBSPC'
-ORDER  BY con_dbid, series_key, horizon_days;
+  AND  is_reportable = 'Y'
+  AND  rank_report <= &top_n
+ORDER  BY rank_report, horizon_days;
 
 PROMPT
 PROMPT  6b. CPU (busy% / DB CPU sec):

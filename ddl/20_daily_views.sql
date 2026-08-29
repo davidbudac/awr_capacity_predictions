@@ -25,11 +25,25 @@ SET DEFINE OFF
 -- CAPD_TBSPC_DAILY
 --   used_bytes  = last-of-day used blocks * block size
 --   size_bytes  = last-of-day allocated blocks * block size
---   limit_bytes = maxsize*bs when autoextend on (maxsize>0), else size*bs
+--   limit_bytes = maxsize*bs when autoextend on (maxsize>0), else size*bs,
+--                 UNLESS a CAP_TBSPC_OVERRIDE row supplies a real ceiling
+--   limit_source = OVERRIDE | AUTOEXTEND | ALLOCATED -- which of those three
+--                 produced limit_bytes, carried all the way to the report
 -- TBSPC_SPACE_USAGE carries no instance_number/timestamp, so we derive the
 -- day by joining snap_id -> CAPV_SNAPSHOT (MIN end_interval_time across
 -- instances for that snap). UNDO + TEMPORARY tablespaces are excluded
 -- (their "usage" is transient and not a growth signal).
+--
+-- M9.5 overrides: CAP_TBSPC_OVERRIDE (dbid, con_dbid, tablespace_name) rows
+-- either replace limit_bytes (autoextend maxsize is not real headroom when
+-- the filesystem / ASM diskgroup behind it is smaller) or drop the tablespace
+-- from the series entirely (exclude_flag = 'Y' -- staging / scratch). dbid = 0
+-- and con_dbid = 0 are wildcards meaning "any"; when several rows match, the
+-- `ores` CTE below keeps only the MOST SPECIFIC one (real dbid beats the
+-- wildcard first, then real con_dbid), so exactly one override can apply per
+-- tablespace and the LEFT JOIN cannot fan out. Applying it HERE -- the single
+-- entry point to the daily series -- means every downstream layer (delta,
+-- forecast, anomaly, alerts, reports) honours it with no further code.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capd_tbspc_daily AS
 WITH snap_time AS (
@@ -53,6 +67,25 @@ WITH snap_time AS (
         JOIN   snap_time st
           ON   st.dbid = u.dbid AND st.snap_id = u.snap_id
      ),
+     -- M9.5: resolve at most ONE override row per (dbid, con_dbid, name).
+     -- Built over the tablespace DIM (small) rather than the daily rows, so
+     -- the ranking runs once per series, not once per day.
+     ores AS (
+        SELECT dbid, con_dbid, tablespace_name, limit_bytes, exclude_flag
+        FROM (
+            SELECT t.dbid, t.con_dbid, t.tablespace_name,
+                   o.limit_bytes, o.exclude_flag,
+                   ROW_NUMBER() OVER (PARTITION BY t.dbid, t.con_dbid, t.tablespace_name
+                                      ORDER BY CASE WHEN o.dbid     <> 0 THEN 0 ELSE 1 END,
+                                               CASE WHEN o.con_dbid <> 0 THEN 0 ELSE 1 END) AS rn
+            FROM   (SELECT DISTINCT dbid, con_dbid, tablespace_name FROM capv_tablespace) t
+            JOIN   cap_tbspc_override o
+              ON   o.tablespace_name = t.tablespace_name
+             AND   (o.dbid     = t.dbid     OR o.dbid     = 0)
+             AND   (o.con_dbid = t.con_dbid OR o.con_dbid = 0)
+        )
+        WHERE rn = 1
+     ),
      last_of_day AS (
         SELECT dbid, con_dbid, tablespace_id, day_dt,
                MAX(used_blocks) KEEP (DENSE_RANK LAST ORDER BY eit) AS used_blocks,
@@ -69,10 +102,15 @@ SELECT l.dbid,
        l.day_dt,
        l.used_blocks * COALESCE(t.block_size, b.block_size)  AS used_bytes,
        l.size_blocks * COALESCE(t.block_size, b.block_size)  AS size_bytes,
-       CASE WHEN l.max_blocks > 0
-            THEN l.max_blocks  * COALESCE(t.block_size, b.block_size)
-            ELSE l.size_blocks * COALESCE(t.block_size, b.block_size)
-       END                                                   AS limit_bytes,
+       NVL(o.limit_bytes,
+           CASE WHEN l.max_blocks > 0
+                THEN l.max_blocks  * COALESCE(t.block_size, b.block_size)
+                ELSE l.size_blocks * COALESCE(t.block_size, b.block_size)
+           END)                                              AS limit_bytes,
+       CASE WHEN o.limit_bytes IS NOT NULL THEN 'OVERRIDE'
+            WHEN l.max_blocks > 0          THEN 'AUTOEXTEND'
+            ELSE                                'ALLOCATED'
+       END                                                   AS limit_source,
        COALESCE(t.block_size, b.block_size)                  AS block_size,
        l.n_samples
 FROM   last_of_day l
@@ -83,8 +121,12 @@ JOIN   capv_tablespace t
 -- tablespace dim's block_size keeps every permanent tablespace in the series.
 LEFT   JOIN bsize b
   ON   b.dbid = l.dbid AND b.con_dbid = l.con_dbid AND b.tablespace_id = l.tablespace_id
+-- M9.5: at most one row per series by construction (ores keeps rn = 1).
+LEFT   JOIN ores o
+  ON   o.dbid = l.dbid AND o.con_dbid = l.con_dbid AND o.tablespace_name = t.tablespace_name
 WHERE  t.contents NOT IN ('UNDO','TEMPORARY')
-  AND  COALESCE(t.block_size, b.block_size) IS NOT NULL;
+  AND  COALESCE(t.block_size, b.block_size) IS NOT NULL
+  AND  NVL(o.exclude_flag, 'N') = 'N';
 
 -- --------------------------------------------------------------------
 -- CAPD_TBSPC_DELTA -- change since the previous SAMPLED day. Negative deltas

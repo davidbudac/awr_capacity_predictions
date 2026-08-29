@@ -132,8 +132,13 @@ BEGIN
     SELECT COUNT(*) INTO v_n FROM capr_alerts
       WHERE kind = 'TBSPC_FULL' AND series_key = 'FIX_FILLING' AND severity = 'CRIT';
     chk_int('FILLING TBSPC_FULL CRIT alert raised', v_n, 1);
-    SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'TBSPC_FULL';
-    chk_int('TBSPC_FULL alerts only for FIX_FILLING', v_n, 1);
+    -- FIX_OVERRIDE also lands inside the dtf_warn window, but only BECAUSE of
+    -- its M9.5 override (2 GiB ceiling -> 74 days); on its raw 50 GiB maxsize
+    -- it would be 4990 days away. So the "no other series alerts" check names
+    -- both rather than counting to 1.
+    SELECT COUNT(*) INTO v_n FROM capr_alerts
+      WHERE kind = 'TBSPC_FULL' AND series_key NOT IN ('FIX_FILLING','FIX_OVERRIDE');
+    chk_int('no TBSPC_FULL alerts beyond FILLING/OVERRIDE', v_n, 0);
 
     DBMS_OUTPUT.PUT_LINE('=== M9.1 intervals: FIX_LINEAR (zero residuals -> bands collapse) ===');
     SELECT proj_30_bytes, proj_30_lo, proj_30_hi
@@ -301,6 +306,77 @@ BEGIN
     SELECT COUNT(*) INTO v_n FROM capa_cpu_anom
       WHERE dbid = v_dbid AND anomaly_flag = 'HIGH';
     chk_int('CPU HIGH count (only injected)', v_n, 1);
+
+    DBMS_OUTPUT.PUT_LINE('=== M9.5 overrides (CAP_TBSPC_OVERRIDE) ===');
+    -- FIX_OVERRIDE is FIX_LINEAR's data with a 2 GiB override instead of the
+    -- 50 GiB autoextend maxsize, so every difference between the two below is
+    -- attributable to the override alone.
+    SELECT limit_bytes, days_to_full, quality INTO v_num, v_n, v_str
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_OVERRIDE';
+    chk_int('OVERRIDE limit_bytes (2 GiB, exact key beats wildcard decoy)',
+            v_num, meta_n('OVERRIDE_LIMIT'));
+    chk_int('OVERRIDE days_to_full', v_n, meta_n('OVERRIDE_DTF'));
+    chk_str('OVERRIDE quality', v_str, 'OK');
+    SELECT limit_source INTO v_str
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_OVERRIDE';
+    chk_str('OVERRIDE limit_source', v_str, 'OVERRIDE');
+    -- The two un-overridden limit_source branches, for contrast.
+    SELECT limit_source INTO v_str
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
+    chk_str('LINEAR limit_source (autoextend maxsize)', v_str, 'AUTOEXTEND');
+    SELECT limit_source INTO v_str
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_FLAT';
+    chk_str('FLAT limit_source (no autoextend)', v_str, 'ALLOCATED');
+    -- FIX_EXCLUDED is 99% full: if the exclusion leaked, it would be loud.
+    SELECT COUNT(*) INTO v_n FROM capd_tbspc_daily
+      WHERE tablespace_name = 'FIX_EXCLUDED';
+    chk_int('EXCLUDED absent from CAPD_TBSPC_DAILY', v_n, 0);
+    SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+      WHERE tablespace_name = 'FIX_EXCLUDED';
+    chk_int('EXCLUDED absent from CAPF_TBSPC_FORECAST', v_n, 0);
+    SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE series_key = 'FIX_EXCLUDED';
+    chk_int('EXCLUDED raises no CAPR_ALERTS', v_n, 0);
+
+    DBMS_OUTPUT.PUT_LINE('=== M7.4 report bound / M7.7 accel floor ===');
+    -- M7.7: accel_ratio is meaningless when the baseline slope is ~0, so it is
+    -- NULL below accel_slope_floor_bpd (1 MiB/day) instead of an absurd ratio.
+    SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'accel_slope_floor_bpd';
+    chk_int('knob accel_slope_floor_bpd (1 MiB/day)', v_num, 1048576);
+    SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+      WHERE dbid = v_dbid AND tablespace_name = 'FIX_FLAT' AND accel_ratio IS NULL;
+    chk_int('FIX_FLAT accel_ratio IS NULL (slope 0)', v_n, 1);
+    SELECT accel_ratio INTO v_num FROM capf_tbspc_forecast
+      WHERE dbid = v_dbid AND tablespace_name = 'FIX_LINEAR';
+    chk_close('FIX_LINEAR accel_ratio (10 MiB/day recent = full)', v_num, 1, 0.000001);
+
+    -- M7.4: sections 2 and 6a print only reportable rows -- growing, or
+    -- near-full, or >= report_min_gb GiB -- capped at top_n by rank_report.
+    SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'report_min_gb';
+    chk_int('knob report_min_gb', v_num, 1);
+    SELECT is_reportable INTO v_str FROM capr_tbspc_forecast
+      WHERE dbid = v_dbid AND tablespace_name = 'FIX_FLAT';
+    chk_str('FIX_FLAT not reportable (flat, 0.39 GiB, 67% used)', v_str, 'N');
+    SELECT is_reportable INTO v_str FROM capr_tbspc_forecast
+      WHERE dbid = v_dbid AND tablespace_name = 'FIX_NEARFULL';
+    chk_str('FIX_NEARFULL reportable (flat + under 1 GiB, but 97% full)', v_str, 'Y');
+    SELECT is_reportable INTO v_str FROM capr_tbspc_forecast
+      WHERE dbid = v_dbid AND tablespace_name = 'FIX_LINEAR';
+    chk_str('FIX_LINEAR reportable (growing)', v_str, 'Y');
+    SELECT rank_report INTO v_num  FROM capr_tbspc_forecast
+      WHERE dbid = v_dbid AND tablespace_name = 'FIX_GAP';
+    SELECT rank_report INTO v_num2 FROM capr_tbspc_forecast
+      WHERE dbid = v_dbid AND tablespace_name = 'FIX_NEARFULL';
+    SELECT rank_report INTO v_num3 FROM capr_tbspc_forecast
+      WHERE dbid = v_dbid AND tablespace_name = 'FIX_FLAT';
+    chk_true('rank_report: growing FIX_GAP before flat FIX_NEARFULL', v_num < v_num2);
+    chk_true('rank_report: reportable FIX_NEARFULL before unreportable FIX_FLAT',
+             v_num2 < v_num3);
+    SELECT COUNT(*) INTO v_n FROM capr_esm_compare
+      WHERE series_kind = 'TBSPC' AND series_key = 'FIX_FLAT' AND is_reportable <> 'N';
+    chk_int('CAPR_ESM_COMPARE inherits FIX_FLAT is_reportable=N', v_n, 0);
+    SELECT COUNT(*) INTO v_n FROM capr_esm_compare
+      WHERE series_kind = 'CPU' AND (is_reportable <> 'Y' OR rank_report <> 0);
+    chk_int('CAPR_ESM_COMPARE never bounds CPU rows', v_n, 0);
 
     DBMS_OUTPUT.PUT_LINE('----------------------------------------');
     DBMS_OUTPUT.PUT_LINE('RESULT: ' || g_pass || ' passed, ' || g_fail || ' failed');

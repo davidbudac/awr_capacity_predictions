@@ -67,8 +67,8 @@
         <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
           <span class="term__title">SQL*Plus</span><span class="term__tag in">you run</span></div>
 <pre>sqlplus / as sysdba              <span class="c-cmt">-- or any monitoring schema</span>
-<span class="c-prompt">SQL&gt;</span> @report/defaults.sql
-<span class="c-prompt">SQL&gt;</span> @report/report.sql</pre>
+<span class="c-prompt">SQL&gt;</span> @report/report.sql               <span class="c-cmt">-- defaults</span>
+<span class="c-prompt">SQL&gt;</span> @report/report.sql 5 7 N         <span class="c-cmt">-- top_n / anomaly_days / show_esm</span></pre>
       </div>
 
       <p>Launch it from the <b>repo root</b>: SQL*Plus resolves <span class="inline">@@</span> includes
@@ -82,10 +82,26 @@
 
       <div class="callout tip">
         <span class="ico">▸</span>
-        <p><strong>Presentation lives in one file.</strong> To change
+        <p><strong>Presentation lives in one file — or on the command line.</strong> To change
         <span class="inline">top_n</span>, <span class="inline">anomaly_days</span>, or
-        <span class="inline">show_esm</span>, edit <span class="inline">report/defaults.sql</span> — the
-        single source of truth for presentation. Everything else is analytics config (see below).</p>
+        <span class="inline">show_esm</span> for every run, edit
+        <span class="inline">report/defaults.sql</span> — the single source of truth for
+        presentation. To change one run, pass them positionally:
+        <span class="inline">@report/report.sql [top_n] [anomaly_days] [show_esm]</span>
+        (same for <span class="inline">report_html.sql</span>); an omitted argument falls back to
+        that file. Everything else is analytics config (see below).</p>
+      </div>
+
+      <div class="callout tip">
+        <span class="ico">▸</span>
+        <p><strong>Drill into one series.</strong> When a row looks wrong,
+        <span class="inline">@report/drill_tbspc.sql SYSAUX</span> (name required) and
+        <span class="inline">@report/drill_cpu.sql BUSY_P95</span> (metric optional, default
+        <span class="inline">BUSY_PCT</span>; both take an optional <span class="inline">con_dbid</span>)
+        print and spool <span class="inline">reports/cap_drill_&lt;name&gt;_&lt;ts&gt;.txt</span>: the fit
+        header, the daily series with fitted value, residual, delta, gap and the day's anomaly baseline,
+        a residual footer that re-derives <span class="inline">resid_se</span> and the slope CI from
+        scratch, and one spelled-out arithmetic line per flagged day. Read-only, and never prompts.</p>
       </div>
 
       <!-- ===================== HTML REPORT ===================== -->

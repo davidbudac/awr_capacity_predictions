@@ -62,10 +62,11 @@ BEGIN
         END;
     END LOOP;
 
-    -- NOTE: the two PERSISTED tables (CAP_CONFIG, CAP_ML_MODEL) are deliberately
-    -- NOT dropped here. A re-install must preserve operator config overrides and
-    -- the trained-model registry (05_config / 50_ml recreate them idempotently
-    -- and MERGE-seed only missing keys). Dropping CAP_ML_MODEL here would also
+    -- NOTE: the three PERSISTED tables (CAP_CONFIG, CAP_TBSPC_OVERRIDE,
+    -- CAP_ML_MODEL) are deliberately NOT dropped here. A re-install must preserve
+    -- operator config overrides, the hand-set tablespace limits / exclusions
+    -- (M9.5) and the trained-model registry (05_config / 50_ml recreate them
+    -- idempotently and MERGE-seed only missing keys). Dropping CAP_ML_MODEL would
     -- orphan the OML models (drop_all needs the registry to find them). Full
     -- teardown lives in uninstall.sql.
 

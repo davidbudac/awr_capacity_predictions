@@ -16,6 +16,12 @@ for making changes safely.
 - **Config, not constants.** Thresholds live in `CAP_CONFIG`, read via a one-row
   `cfg` CTE. Add a knob there (idempotent MERGE in `ddl/05_config.sql`) rather
   than hard-coding.
+- **`CAP_TBSPC_OVERRIDE` is the third persisted table** (with `CAP_CONFIG` and
+  `CAP_ML_MODEL`): operator-set tablespace ceilings + exclusions, created
+  idempotently at the bottom of `ddl/05_config.sql`, applied once in
+  `CAPD_TBSPC_DAILY`, NOT dropped by `ddl/00_drop.sql`, dropped only by
+  `uninstall.sql`. `dbid`/`con_dbid` `0` are wildcards; the most specific
+  matching row wins.
 - **19c syntax floor.** Inline `OVER (PARTITION BY ... ORDER BY ...)` on every
   window call — the standalone `WINDOW` clause is 21c+. No 21c/23c features.
 
@@ -41,6 +47,17 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
   terminator), truncating a CREATE VIEW mid-statement with a baffling
   ORA-00936 pointing at the comment. Safe inside PL/SQL blocks (`/`
   terminates those). Bit us in ddl/30 (M9.1).
+- **A substitution variable followed by `.` swallows the dot** in PROMPT text
+  (`top &top_n.` prints `top 3`); rephrase. `AUDIT` is a reserved word
+  (ORA-00936 pointing at the SELECT). Default `SERVEROUTPUT` (WORD_WRAPPED)
+  strips leading blanks from DBMS_OUTPUT lines.
+- **`USER_OBJECTS` / `USER_DEPENDENCIES` follow the SESSION user, not
+  `CURRENT_SCHEMA`.** When testing as SYSDBA with `ALTER SESSION SET
+  CURRENT_SCHEMA = CAPTEST`, query `ALL_*` filtered on
+  `owner = SYS_CONTEXT('USERENV','CURRENT_SCHEMA')` (doctor.sql does).
+- **Positional args:** `COLUMN 1 NEW_VALUE 1` + a zero-row SELECT defines an
+  unpassed `&1` as empty and leaves a passed one intact (verified 19c);
+  scripts `UNDEFINE 1 2 3` at the end so a later script doesn't inherit them.
 - **`@@` includes resolve relative to the OUTERMOST caller** on 19c, so run
   `install.sql` / `report/report.sql` from the repo root and use full paths
   (`@@ddl/...`, `@@report/sections/...`).

@@ -14,7 +14,10 @@
 -- Run from the REPO ROOT so the @@report/defaults.sql include resolves
 -- (SQL*Plus @@ is relative to the outermost caller's directory on 19c):
 --   sqlplus user/pw@svc
---   SQL> @report/report_html.sql
+--   SQL> @report/report_html.sql              -- defaults from report/defaults.sql
+--   SQL> @report/report_html.sql 25 60 Y      -- top_n / anomaly_days / show_esm
+-- Arguments are positional and optional (M7.6); each one omitted falls back to
+-- report/defaults.sql. show_esm is AUTO | Y | N.
 --
 -- Requires the suite installed (any seam mode). Tier 2 rows appear only if
 -- cap_forecast_ml.train_all has been run.
@@ -37,9 +40,33 @@ ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD';
 
 -- Presentation knobs (top_n / anomaly_days / show_esm). Loaded here so a bare
 -- `@report/report_html.sql` never prompts / hangs on an undefined substitution
--- var. To change them, edit report/defaults.sql (single source of truth,
--- shared with the text report).
+-- var. To change them for every run, edit report/defaults.sql (single source of
+-- truth, shared with the text report); to change one run, pass them
+-- positionally (M7.6):
+--   @report/report_html.sql [top_n] [anomaly_days] [show_esm]
 @@report/defaults.sql
+
+-- M7.6: make &1..&3 safe to reference whether or not they were passed. A
+-- COLUMN ... NEW_VALUE whose query returns NO rows defines the variable as
+-- empty instead of leaving it undefined (an undefined &1 would PROMPT, and a
+-- non-interactive caller's next heredoc line would be eaten as the answer);
+-- an argument that WAS passed keeps its value -- SQL*Plus only reassigns
+-- NEW_VALUE on a fetched row. TERMOUT is already OFF for this whole script.
+COLUMN 1 NEW_VALUE 1 NOPRINT
+COLUMN 2 NEW_VALUE 2 NOPRINT
+COLUMN 3 NEW_VALUE 3 NOPRINT
+SELECT NULL AS "1", NULL AS "2", NULL AS "3" FROM dual WHERE 1 = 0;
+
+-- Effective knobs = positional argument, else the defaults.sql value. An
+-- omitted argument is the empty string, and '' IS NULL in Oracle, so NVL
+-- picks the default. Re-DEFINEs the same three names bound below.
+COLUMN eff_top_n NEW_VALUE top_n        NOPRINT
+COLUMN eff_anom  NEW_VALUE anomaly_days NOPRINT
+COLUMN eff_esm   NEW_VALUE show_esm     NOPRINT
+SELECT NVL('&1', '&top_n')                  AS eff_top_n,
+       NVL('&2', '&anomaly_days')           AS eff_anom,
+       NVL(UPPER('&3'), UPPER('&show_esm')) AS eff_esm
+FROM   dual;
 
 -- --------------------------------------------------------------------
 -- Resolve identity, config knobs, ESM availability, report path (once).
@@ -59,6 +86,7 @@ COLUMN esm_ok   NEW_VALUE esm_ok   NOPRINT
 COLUMN train_days     NEW_VALUE train_days     NOPRINT
 COLUMN min_train_days NEW_VALUE min_train_days NOPRINT
 COLUMN r2_gate        NEW_VALUE r2_gate        NOPRINT
+COLUMN min_gb         NEW_VALUE min_gb         NOPRINT
 
 -- Identity via SYS_CONTEXT (no catalog/v$ privileges needed, so the report
 -- runs from any monitoring schema, not just one with SELECT_CATALOG_ROLE).
@@ -88,7 +116,8 @@ SELECT (SELECT cfg_value FROM cap_config WHERE cfg_name='dtf_warn')       AS dtf
        (SELECT COUNT(*)  FROM cap_ml_model WHERE status='OK')             AS esm_ok,
        (SELECT cfg_value FROM cap_config WHERE cfg_name='train_days')     AS train_days,
        (SELECT cfg_value FROM cap_config WHERE cfg_name='min_train_days') AS min_train_days,
-       (SELECT cfg_value FROM cap_config WHERE cfg_name='r2_gate')        AS r2_gate
+       (SELECT cfg_value FROM cap_config WHERE cfg_name='r2_gate')        AS r2_gate,
+       (SELECT cfg_value FROM cap_config WHERE cfg_name='report_min_gb')  AS min_gb
 FROM   dual;
 
 -- --------------------------------------------------------------------
@@ -112,6 +141,7 @@ VARIABLE b_esm_ok       NUMBER
 VARIABLE b_train_days     NUMBER
 VARIABLE b_min_train_days NUMBER
 VARIABLE b_r2_gate        NUMBER
+VARIABLE b_min_gb         NUMBER
 VARIABLE b_cap_db       VARCHAR2(200)
 VARIABLE b_cap_host     VARCHAR2(200)
 VARIABLE b_cap_user     VARCHAR2(200)
@@ -131,6 +161,7 @@ BEGIN
   :b_train_days     := &train_days;
   :b_min_train_days := &min_train_days;
   :b_r2_gate        := &r2_gate;
+  :b_min_gb         := &min_gb;
   :b_cap_db       := '&cap_db';
   :b_cap_host     := '&cap_host';
   :b_cap_user     := '&cap_user';
@@ -164,6 +195,7 @@ DECLARE
   train_days     NUMBER := :b_train_days;      -- primary linear-fit window (days)
   min_train_days NUMBER := :b_min_train_days;  -- below this REGR_COUNT => INSUFFICIENT_HISTORY
   r2_gate        NUMBER := :b_r2_gate;         -- R2 below this => LOW_CONFIDENCE
+  min_gb         NUMBER := :b_min_gb;          -- M7.4 section 2/6a size bound (GiB)
 
   cap_db   VARCHAR2(200) := :b_cap_db;
   cap_host VARCHAR2(200) := :b_cap_host;
@@ -197,6 +229,9 @@ DECLARE
 
   v_cnt        PLS_INTEGER;
   v_total_ts   PLS_INTEGER;
+  v_ts_all     PLS_INTEGER;   -- M7.4: total tablespaces, for the section 2/6a bound headings
+  v_ts_shown   PLS_INTEGER;   -- M7.4: how many of them sections 2/6a actually print
+                              -- (v_total_ts is reused as a scratch counter later on)
   v_last_day_n NUMBER;
   v_xmin       NUMBER;
   v_xmax       NUMBER;
@@ -267,8 +302,8 @@ DECLARE
   v_hquality    VARCHAR2(30);
   v_hero_gb     NUMBER;
   v_proj_gb     NUMBER;
-  v_hlimit_gb   NUMBER;            -- total allocated limit (GB), NULL if not meaningful
-  v_rate_gb_mo  NUMBER;           -- signed slope in GB/month
+  v_hlimit_gb   NUMBER;            -- total allocated limit (GiB), NULL if not meaningful
+  v_rate_gb_mo  NUMBER;           -- signed slope in GiB/month
   v_days_to_lim NUMBER;
   v_head        VARCHAR2(600);
   v_hpill       VARCHAR2(120);
@@ -513,17 +548,17 @@ DECLARE
   END time_phrase;
 
   ----------------------------------------------------------------------
-  -- fmt_size_gb: format a GB quantity for humans, promoting to TB once it
-  -- reaches 1024 GB. One decimal for GB, two for TB. NULL -> "unknown".
+  -- fmt_size_gb: format a GiB quantity for humans, promoting to TiB once it
+  -- reaches 1024 GiB. One decimal for GiB, two for TiB. NULL -> "unknown".
   -- Callers pass ABS() when they want a magnitude (e.g. a shrink rate).
   ----------------------------------------------------------------------
   FUNCTION fmt_size_gb(gb IN NUMBER) RETURN VARCHAR2 IS
   BEGIN
     IF gb IS NULL THEN RETURN 'unknown'; END IF;
     IF ABS(gb) >= 1024 THEN
-      RETURN TO_CHAR(gb / 1024, 'FM999999990.00') || ' TB';
+      RETURN TO_CHAR(gb / 1024, 'FM999999990.00') || ' TiB';
     END IF;
-    RETURN TO_CHAR(gb, 'FM999999990.0') || ' GB';
+    RETURN TO_CHAR(gb, 'FM999999990.0') || ' GiB';
   END fmt_size_gb;
 
   FUNCTION scale_x(day_n IN NUMBER, xmin IN NUMBER, xmax IN NUMBER) RETURN NUMBER IS
@@ -639,7 +674,7 @@ DECLARE
 
   ----------------------------------------------------------------------
   -- emit_y_axis: n_lines evenly spaced horizontal gridlines with rounded
-  -- value labels (e.g. GB or %). unit is appended to the label as literal
+  -- value labels (e.g. GiB or %). unit is appended to the label as literal
   -- text (a leading space is the caller's responsibility).
   ----------------------------------------------------------------------
   PROCEDURE emit_y_axis(ymin IN NUMBER, ymax IN NUMBER, unit IN VARCHAR2, n_lines IN PLS_INTEGER DEFAULT 5) IS
@@ -651,7 +686,7 @@ DECLARE
     IF ymax = ymin OR n_lines < 2 THEN RETURN; END IF;
     step := (ymax - ymin) / (n_lines - 1);
     -- Label precision follows the gridline step, else small-range charts
-    -- (e.g. a 0-1.5 GB tablespace) would label every line "0" or "1".
+    -- (e.g. a 0-1.5 GiB tablespace) would label every line "0" or "1".
     fmt := CASE WHEN step < 1  THEN 'FM999999990.00'
                 WHEN step < 10 THEN 'FM999999990.0'
                 ELSE 'FM999999990' END;
@@ -1202,7 +1237,7 @@ BEGIN
 
       p('<svg viewBox="0 0 ' || TO_CHAR(c_hw, 'FM9990') || ' ' || TO_CHAR(c_hh, 'FM9990')
         || '" class="hero-svg" role="img" aria-label="Whole database total size chart">');
-      emit_yaxis_box(v_ymin, v_ymax, ' GB', c_hml, c_hw - c_hmr, c_hmt, c_hh - c_hmb, 5);
+      emit_yaxis_box(v_ymin, v_ymax, ' GiB', c_hml, c_hw - c_hmr, c_hmt, c_hh - c_hmb, 5);
       p('<text class="axis-label" x="' || fmt_px(lin(v_xmin, v_xmin, v_xmax, c_hml, c_hw - c_hmr))
         || '" y="' || fmt_px(c_hh - 6) || '" text-anchor="start">'
         || TO_CHAR(c_epoch + v_xmin, 'YYYY-MM-DD') || '</text>');
@@ -1452,7 +1487,7 @@ BEGIN
           ) LOOP
             v_delta_gb := NVL(a.used_delta_bytes, 0) / 1073741824;
             IF NVL(a.used_delta_bytes, 0) >= 0 THEN
-              v_tip := a.d_str || ': grew ' || TO_CHAR(v_delta_gb, 'FM999990.0') || ' GB in one day';
+              v_tip := a.d_str || ': grew ' || TO_CHAR(v_delta_gb, 'FM999990.0') || ' GiB in one day';
               IF a.median_rate_bpd IS NULL OR a.median_rate_bpd <= 0 THEN
                 v_tip := v_tip || ', vs almost no usual growth';
               ELSE
@@ -1464,7 +1499,7 @@ BEGIN
                 END IF;
               END IF;
             ELSE
-              v_tip := a.d_str || ': shrank ' || TO_CHAR(ABS(v_delta_gb), 'FM999990.0') || ' GB in one day';
+              v_tip := a.d_str || ': shrank ' || TO_CHAR(ABS(v_delta_gb), 'FM999990.0') || ' GiB in one day';
             END IF;
             p('<circle class="anom-dot" cx="'
               || fmt_px(lin(a.day_dt - c_epoch, v_xmin, v_xmax, c_tllm, c_tlw - c_tlrm))
@@ -1527,7 +1562,7 @@ BEGIN
       || TO_CHAR(r.pct_used, 'FM990.0') || '% full right now'
       || info_icon('how full it is today; this needs no forecast and is shown whatever the fit quality') || '</h4>');
     p('<div class="g-line">using ' || TO_CHAR(r.cur_gb, 'FM999999990.0')
-      || ' of ' || TO_CHAR(r.lim_gb, 'FM999999990.0') || ' GB today</div>');
+      || ' of ' || TO_CHAR(r.lim_gb, 'FM999999990.0') || ' GiB today</div>');
     IF r.quality <> 'OK' THEN
       p('<div class="g-line">growth cannot be forecast reliably (' || esc(r.quality) || ')</div>');
     END IF;
@@ -1567,9 +1602,9 @@ BEGIN
     END IF;
     IF r.lim_gb IS NOT NULL THEN
       p('<div class="g-line">using ' || TO_CHAR(r.cur_gb, 'FM999999990.0')
-        || ' of ' || TO_CHAR(r.lim_gb, 'FM999999990.0') || ' GB today</div>');
+        || ' of ' || TO_CHAR(r.lim_gb, 'FM999999990.0') || ' GiB today</div>');
     ELSE
-      p('<div class="g-line">using ' || TO_CHAR(r.cur_gb, 'FM999999990.0') || ' GB today</div>');
+      p('<div class="g-line">using ' || TO_CHAR(r.cur_gb, 'FM999999990.0') || ' GiB today</div>');
     END IF;
     p('</div>');
   END LOOP;
@@ -1694,9 +1729,9 @@ BEGIN
     IF NOT any_rows THEN
       p('<table class="tbl"><thead><tr>'
         || '<th>DB/PDB' || info_icon('which database or container this row belongs to, relevant when one report covers a fleet')
-        || '</th><th>TABLESPACE</th><th class="num">CUR_GB</th><th class="num">LIMIT_GB</th>'
+        || '</th><th>TABLESPACE</th><th class="num">CUR_GIB</th><th class="num">LIMIT_GIB</th>'
         || '<th>FILL</th>'
-        || '<th class="num">MB/DAY' || info_icon('the average megabytes this tablespace grows per day')
+        || '<th class="num">MIB/DAY' || info_icon('the average mebibytes (MiB) this tablespace grows per day')
         || '</th><th class="num">DAYS_FULL' || info_icon('estimated days until it reaches its allocated limit at the current rate')
         || '</th><th class="num">RANGE' || info_icon('worst-to-best case days-to-full from the statistical uncertainty of the growth rate; never = it may not fill at the slow end')
         || '</th><th>SEV' || info_icon('how urgent this is: CRIT is within the critical window, WARN within the warning window')
@@ -1752,7 +1787,7 @@ BEGIN
   ) LOOP
     IF NOT any_rows THEN
       p('<table class="tbl"><thead><tr>'
-        || '<th>DB/PDB</th><th>TABLESPACE</th><th class="num">CUR_GB</th><th class="num">LIMIT_GB</th>'
+        || '<th>DB/PDB</th><th>TABLESPACE</th><th class="num">CUR_GIB</th><th class="num">LIMIT_GIB</th>'
         || '<th>FILL</th>'
         || '<th class="num">DAYS_FULL</th><th>SEV</th><th>QUALITY</th>'
         || '</tr></thead><tbody>');
@@ -1777,9 +1812,22 @@ BEGIN
   -- Section 2: tablespace forecast
   ----------------------------------------------------------------------
   p('<section id="s2">');
-  p('<h2>2. Tablespace forecast (GB)</h2>');
+  -- M7.4: the table below is bounded (is_reportable + rank_report, decided in
+  -- CAPR_TBSPC_FORECAST), so say so in the heading -- exactly like the text
+  -- report's section 2 header.
+  SELECT COUNT(*) INTO v_ts_all FROM capr_tbspc_forecast;
+  SELECT COUNT(*) INTO v_ts_shown FROM capr_tbspc_forecast
+  WHERE  is_reportable = 'Y' AND rank_report <= top_n;
+  v_total_ts := v_ts_all;
+  p('<h2>2. Tablespace forecast (GiB) '
+      || '<span style="font-weight:400;color:var(--muted);font-size:12px">('
+      || v_ts_shown || ' of ' || v_ts_all || ': growing, near-full, or &ge; '
+      || RTRIM(TO_CHAR(min_gb, 'FM99999990.999'), '.') || ' GiB, top '
+      || top_n || ')</span></h2>');
   p('<p class="desc">Where each tablespace is headed in size over the next six months. '
-      || 'current / +30 / +90 / +180, plus ESM +30 (Tier 2, 19c hard-capped at +30).</p>');
+      || 'current / +30 / +90 / +180, plus ESM +30 (Tier 2, 19c hard-capped at +30). '
+      || 'Small, flat, half-empty tablespaces are left out (knob report_min_gb); '
+      || 'CAPR_TBSPC_FORECAST still has every row.</p>');
 
   ----------------------------------------------------------------------
   -- Chart grid: history + REGR projection (+180) + ESM+30 point/CI + limit
@@ -1791,7 +1839,6 @@ BEGIN
   ----------------------------------------------------------------------
   chart_legend;
 
-  SELECT COUNT(*) INTO v_total_ts FROM capr_tbspc_forecast;
   IF v_total_ts > top_n THEN
     p('<div class="note">Chart grid capped at top ' || top_n || ' of ' || v_total_ts
       || ' tablespaces (by days-to-full, NULLS LAST, then name); ' || (v_total_ts - top_n)
@@ -1871,7 +1918,7 @@ BEGIN
         -- COALESCE, not nz(): nz's '&ndash;' placeholder would be re-escaped
         -- by chart_open's esc() and render as literal "&amp;ndash;" text.
         v_subtitle := 'cur ' || COALESCE(TO_CHAR(f.cur_bytes / 1073741824, 'FM999999990.00'), 'n/a')
-                      || ' GB | limit ' || COALESCE(TO_CHAR(v_limit_gb, 'FM999999990.00'), 'n/a') || ' GB';
+                      || ' GiB | limit ' || COALESCE(TO_CHAR(v_limit_gb, 'FM999999990.00'), 'n/a') || ' GiB';
         IF v_limit_gb IS NOT NULL AND NOT v_show_limit THEN
           v_subtitle := v_subtitle || ' (line hidden, out of chart scale)';
         END IF;
@@ -1879,7 +1926,7 @@ BEGIN
 
         p('<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="'
           || esc(f.tablespace_name) || ' growth chart">');
-        emit_y_axis(v_ymin, v_ymax, ' GB');
+        emit_y_axis(v_ymin, v_ymax, ' GiB');
         emit_x_axis(v_xmin, v_xmax);
         chart_axes_frame;
         IF v_show_limit THEN
@@ -1933,14 +1980,16 @@ BEGIN
            quality,
            esm30
     FROM   capr_tbspc_forecast
-    ORDER  BY con_dbid, tablespace_name
+    WHERE  is_reportable = 'Y'
+      AND  rank_report <= top_n
+    ORDER  BY rank_report
   ) LOOP
     IF NOT any_rows THEN
       p('<table class="tbl"><thead><tr>'
         || '<th>DB/PDB</th><th>TABLESPACE</th>'
         || '<th class="num">TRAIN_N' || info_icon('how many days of history the estimate is based on -- more is better')
-        || '</th><th class="num">CUR_GB</th>'
-        || '<th class="num">+30_GB</th><th class="num">+90_GB</th><th class="num">+180_GB</th>'
+        || '</th><th class="num">CUR_GIB</th>'
+        || '<th class="num">+30_GIB</th><th class="num">+90_GIB</th><th class="num">+180_GIB</th>'
         || '<th class="num">180_LO</th><th class="num">180_HI'
         || info_icon('95% prediction band on the +180-day projection; the actual value should land between LO and HI 95 times out of 100 if growth stays like the recent past')
         || '</th><th class="num">R2' || info_icon('how closely growth follows a straight line: 1.00 = perfectly steady, near 0 = erratic')
@@ -1998,10 +2047,10 @@ BEGIN
       p('<table class="tbl"><thead><tr>'
         || '<th>DB/PDB</th><th>TABLESPACE</th><th>DAY</th>'
         || '<th class="num">GAP' || info_icon('days since the previous sample -- a big gap can inflate a one-day change')
-        || '</th><th class="num">DELTA_MB</th>'
-        || '<th class="num">RATE_MB/D' || info_icon('how fast it grew that day, in megabytes per day')
-        || '</th><th class="num">MED_MB/D' || info_icon('its usual daily growth rate over the recent baseline window')
-        || '</th><th class="num">THR_MB/D' || info_icon('how far from usual a day must be before it is flagged')
+        || '</th><th class="num">DELTA_MIB</th>'
+        || '<th class="num">RATE_MIB/D' || info_icon('how fast it grew that day, in mebibytes (MiB) per day')
+        || '</th><th class="num">MED_MIB/D' || info_icon('its usual daily growth rate over the recent baseline window')
+        || '</th><th class="num">THR_MIB/D' || info_icon('how far from usual a day must be before it is flagged')
         || '</th><th class="num">ROBUST_Z' || info_icon('how far outside its normal range this day was -- 3 or more is clearly unusual')
         || '</th><th>FLAG' || info_icon('the direction of the flagged change for this day') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
@@ -2288,7 +2337,12 @@ BEGIN
         || '<code>EXEC cap_forecast_ml.train_all</code>. ESM reaches +30 only (19c hard horizon '
         || 'cap) and only for fresh models; +90/180/365 are REGR-only.</p>');
 
-    p('<h3 style="font-size:13px;margin:16px 0 6px">6a. Tablespaces (GB)</h3>');
+    -- 6a carries the SAME M7.4 bound as section 2 (inherited by
+    -- CAPR_ESM_COMPARE from CAPR_TBSPC_FORECAST), so both sections list the
+    -- same tablespaces. 6b's CPU rows are never bounded.
+    p('<h3 style="font-size:13px;margin:16px 0 6px">6a. Tablespaces (GiB) '
+      || '<span style="font-weight:400;color:var(--muted);font-size:12px">(the same '
+      || v_ts_shown || ' of ' || v_ts_all || ' as section 2)</span></h3>');
     any_rows := FALSE;
     FOR r IN (
       SELECT db_pdb, series_key, horizon_days AS h,
@@ -2298,12 +2352,14 @@ BEGIN
              esm_hi_gb AS esm_hi
       FROM   capr_esm_compare
       WHERE  series_kind = 'TBSPC'
-      ORDER  BY con_dbid, series_key, horizon_days
+        AND  is_reportable = 'Y'
+        AND  rank_report <= top_n
+      ORDER  BY rank_report, horizon_days
     ) LOOP
       IF NOT any_rows THEN
         p('<table class="tbl"><thead><tr>'
-          || '<th>DB/PDB</th><th>TABLESPACE</th><th class="num">HORIZON</th><th class="num">REGR_GB</th>'
-          || '<th class="num">ESM_GB</th><th class="num">ESM_LO</th><th class="num">ESM_HI</th></tr></thead><tbody>');
+          || '<th>DB/PDB</th><th>TABLESPACE</th><th class="num">HORIZON</th><th class="num">REGR_GIB</th>'
+          || '<th class="num">ESM_GIB</th><th class="num">ESM_LO</th><th class="num">ESM_HI</th></tr></thead><tbody>');
         any_rows := TRUE;
       END IF;
       p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.series_key) || '</td>'
@@ -2402,6 +2458,13 @@ SPOOL OFF
 
 SET DEFINE '&'
 SET TERMOUT ON
+
+-- M7.6: positional arguments stay DEFINEd for the rest of the SQL*Plus
+-- session, so drop them -- otherwise a following `@report/report.sql` with no
+-- arguments would silently inherit this run's.
+UNDEFINE 1
+UNDEFINE 2
+UNDEFINE 3
 PROMPT
 PROMPT Report written to: &cap_path
 PROMPT

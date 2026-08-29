@@ -14,10 +14,11 @@ This document explains *why* each layer is shaped the way it is. For usage see
   serves local AWR, a fleet warehouse, or test fixtures.
 - **Read-only.** Nothing the report touches is ever modified; only the suite's
   own config/registry tables are written.
-- **Idempotent, non-destructive re-install.** The two persisted tables
-  (`CAP_CONFIG`, `CAP_ML_MODEL`) are created only if absent and MERGE-seeded for
-  missing keys, and `00_drop` deliberately does *not* drop them — so an
-  operator's config overrides and trained-model registry survive `@install.sql`.
+- **Idempotent, non-destructive re-install.** The three persisted tables
+  (`CAP_CONFIG`, `CAP_TBSPC_OVERRIDE`, `CAP_ML_MODEL`) are created only if
+  absent and MERGE-seeded for missing keys, and `00_drop` deliberately does
+  *not* drop them — so an operator's config overrides, hand-set tablespace
+  limits and trained-model registry survive `@install.sql`.
   Full teardown is `@uninstall.sql`.
 - **19c floor.** No 21c+ syntax (notably: no standalone `WINDOW` clause).
 
@@ -66,6 +67,23 @@ row per day.
   else `size*bs`. `UNDO`/`TEMPORARY` are excluded (their usage is transient).
   The usage table has no `instance_number`, so the day is derived by joining
   `snap_id` to the per-snap `MIN(end_interval_time)`.
+  **Limit overrides and exclusions (M9.5):** the autoextend `maxsize` AWR
+  records is only a promise the *storage* may not be able to keep — a 32 GiB
+  maxsize on a 10 GiB filesystem or ASM diskgroup is not 32 GiB of headroom,
+  and a days-to-full computed against it is a comfortable lie. So this view
+  left-joins `CAP_TBSPC_OVERRIDE` (the third persisted table): a matching row's
+  `limit_bytes` replaces the computed limit, and `exclude_flag='Y'` drops the
+  tablespace from the series entirely — the way a staging / scratch / import
+  tablespace stops generating noise. Matching is on the exact
+  `tablespace_name`, with `dbid = 0` and/or `con_dbid = 0` acting as wildcards
+  meaning "any", so one row can be a fleet-wide rule; when several rows match,
+  an `ores` CTE ranks them (real `dbid` beats the wildcard first, then real
+  `con_dbid`) and keeps only the most specific, so the join can never fan out.
+  A new `limit_source` column (`OVERRIDE` | `AUTOEXTEND` | `ALLOCATED`) says
+  which rule produced `limit_bytes` and rides through `CAPF_TBSPC_FORECAST`
+  to the report. Applying all of this at the single entry point to the daily
+  series means every downstream layer — delta, forecast, anomaly, `CAPR_ALERTS`
+  — honours it with no further code.
 - **`CAPD_TBSPC_DELTA`** — change since the previous *sampled* day. Exposes
   `day_gap` (calendar days since the last sample) and `used_rate_bpd =
   used_delta_bytes / day_gap`, so a multi-day AWR gap is not mistaken for a
@@ -237,11 +255,11 @@ the two drivers, and they cannot drift.
 | view | section | notes |
 | --- | --- | --- |
 | `CAPR_TBSPC_DAYS_TO_FULL` | 1a + 1b | `pct_used`, GiB/MiB numeric columns, `sev_dtf` (days) and `sev_nearfull` (percent) markers, the M9.1 `dtf_worst`/`dtf_best` range, plus `rank_dtf` / `rank_nearfull` (`ROW_NUMBER`) so a driver applies `top_n` with `WHERE rank_* <= n` instead of its own `ORDER BY … FETCH FIRST` |
-| `CAPR_TBSPC_FORECAST` | 2 | GiB projections + the +180 band, `train_n`, `r2`, `quality`, the Tier 2 `esm30`/`esm30_lo`/`esm30_hi` point, raw byte columns and `rank_chart` for the HTML chart grid |
+| `CAPR_TBSPC_FORECAST` | 2 | GiB projections + the +180 band, `train_n`, `r2`, `quality`, the Tier 2 `esm30`/`esm30_lo`/`esm30_hi` point, raw byte columns and `rank_chart` for the HTML chart grid, plus the M7.4 bound `is_reportable` / `rank_report` |
 | `CAPR_TBSPC_ANOMALIES` | 3 | flagged rows only, MiB conversions, `day_str`, and `days_ago` = `MAX(day_dt)` over `CAPD_TBSPC_DAILY` minus the row's day, so the report window is `WHERE days_ago < anomaly_days` |
 | `CAPR_CPU_TREND` | 4 | per (container, metric) trend with `sat_worst`/`sat_best` |
 | `CAPR_CPU_ANOMALIES` | 5 | same contract as the tablespace anomaly view |
-| `CAPR_ESM_COMPARE` | 6a/6b | REGR vs ESM pivoted per (container, series, horizon), in raw units *and* GiB; filter on `series_kind` |
+| `CAPR_ESM_COMPARE` | 6a/6b | REGR vs ESM pivoted per (container, series, horizon), in raw units *and* GiB; filter on `series_kind`. Inherits `is_reportable` / `rank_report` from `CAPR_TBSPC_FORECAST` (CPU rows: always `'Y'`, rank 0) so 6a shows exactly section 2's tablespaces |
 | `CAPR_BACKTEST` | 6c | the M9.4 holdout scorecard pivoted per series, incl. the `better` verdict |
 
 All of them resolve `db_pdb` through `CAPR_CONTAINER` themselves. The last
@@ -263,6 +281,26 @@ and nothing else. `show_esm` = `AUTO`/`Y`/`N` controls
 the Tier 2 section (AUTO prints a hint when no models are trained). Section 1
 ranks days-to-full across **all** fit qualities (marker column says how much
 to trust each row) and adds a near-full-now ranking by `pct_used` (M7.1).
+
+**M7.4 — sections 2 and 6a are bounded.** A 500-tablespace database used to
+print 500 forecast rows and 2000 compare rows. The views now decide, once:
+`is_reportable` = growing **or** near-full **or** at least `report_min_gb` GiB
+used (near-full is in the disjunction on purpose — M7.1's rule that a nearly
+full tablespace never disappears outranks a size cutoff), and `rank_report`
+orders reportable first, then growing, then biggest. Both drivers apply the
+identical `WHERE is_reportable = 'Y' AND rank_report <= top_n` and print the
+resulting bound in the section header ("Showing 7 of 8 tablespace(s) …"); the
+views keep every row for other consumers.
+
+**M7.6 — positional arguments.** `@report/report.sql [top_n] [anomaly_days]
+[show_esm]` and the same for `report_html.sql`. `report/defaults.sql` stays the
+fallback source of truth: both drivers load it, then override each value with
+its argument if one was passed. Unset `&1..&3` cannot prompt (a prompt would
+hang a non-interactive run and swallow the next heredoc line) because a
+`COLUMN 1 NEW_VALUE 1` whose query returns **no rows** defines the variable as
+empty, while an argument that *was* passed survives — SQL*Plus only reassigns a
+`NEW_VALUE` on a fetched row. Both scripts `UNDEFINE 1 2 3` at the end, so a
+second script in the same session does not inherit the first one's arguments.
 
 ## Testing philosophy
 

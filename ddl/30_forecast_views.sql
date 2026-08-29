@@ -39,13 +39,14 @@ WITH cfg AS (
         SELECT MAX(CASE WHEN cfg_name = 'train_days'     THEN cfg_value END) AS train_days,
                MAX(CASE WHEN cfg_name = 'recent_days'    THEN cfg_value END) AS recent_days,
                MAX(CASE WHEN cfg_name = 'min_train_days' THEN cfg_value END) AS min_train_days,
-               MAX(CASE WHEN cfg_name = 'r2_gate'        THEN cfg_value END) AS r2_gate
+               MAX(CASE WHEN cfg_name = 'r2_gate'        THEN cfg_value END) AS r2_gate,
+               MAX(CASE WHEN cfg_name = 'accel_slope_floor_bpd' THEN cfg_value END) AS accel_floor
         FROM   cap_config
      ),
      d AS (
         SELECT dbid, con_dbid, tablespace_name, day_dt,
                day_dt - DATE '2020-01-01' AS day_n,
-               used_bytes, limit_bytes
+               used_bytes, limit_bytes, limit_source
         FROM   capd_tbspc_daily
      ),
      b AS (
@@ -129,7 +130,10 @@ WITH cfg AS (
      cur AS (
         SELECT dbid, con_dbid, tablespace_name,
                MAX(used_bytes)  KEEP (DENSE_RANK LAST ORDER BY day_dt) AS cur_used,
-               MAX(limit_bytes) KEEP (DENSE_RANK LAST ORDER BY day_dt) AS limit_bytes
+               MAX(limit_bytes) KEEP (DENSE_RANK LAST ORDER BY day_dt) AS limit_bytes,
+               -- M9.5: where limit_bytes came from (OVERRIDE | AUTOEXTEND |
+               -- ALLOCATED), so the report can flag a hand-set ceiling.
+               MAX(limit_source) KEEP (DENSE_RANK LAST ORDER BY day_dt) AS limit_source
         FROM   d
         GROUP  BY dbid, con_dbid, tablespace_name
      )
@@ -140,6 +144,7 @@ SELECT f.dbid,
        f.n                                                AS train_n,
        c.cur_used,
        c.limit_bytes,
+       c.limit_source,
        -- How full RIGHT NOW, independent of any fit: the report's "near-full
        -- now" ranking keys off this so a 97%-full tablespace is never hidden
        -- by a LOW_CONFIDENCE/INSUFFICIENT_HISTORY fit (M7.1).
@@ -179,7 +184,11 @@ SELECT f.dbid,
             THEN FLOOR((c.limit_bytes - c.cur_used) / (f.slope - f.slope_ci))
        END                                                AS days_to_full_hi,
        r.recent_slope                                     AS recent_slope_bpd,
-       CASE WHEN f.slope <> 0
+       -- M7.7: only meaningful when the baseline slope is real growth. Below
+       -- accel_slope_floor_bpd (default 1 MiB/day) a near-flat series divides
+       -- by ~0 and reports an absurd 500x "acceleration", so the ratio is NULL
+       -- instead. slope = 0 (FLAT) was already NULL and still is.
+       CASE WHEN ABS(f.slope) >= cfg.accel_floor
             THEN r.recent_slope / f.slope
        END                                                AS accel_ratio,
        CASE WHEN f.n  < cfg.min_train_days     THEN 'INSUFFICIENT_HISTORY'

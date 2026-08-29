@@ -43,8 +43,9 @@ CAPR_*  integration CAPR_CONTAINER (display labels) + CAPR_ALERTS (one row per
 report/             read-only SQL*Plus text report (7 sections) + HTML twin
 ```
 
-Only **two** tables are persisted: `CAP_CONFIG` (tuning knobs, MERGE-seeded)
-and `CAP_ML_MODEL` (Tier 2 registry). OML models themselves are schema objects.
+Only **three** tables are persisted: `CAP_CONFIG` (tuning knobs, MERGE-seeded),
+`CAP_TBSPC_OVERRIDE` (limit overrides / exclusions) and `CAP_ML_MODEL` (Tier 2
+registry). OML models themselves are schema objects.
 
 The **seam** is the portability trick: all analytics are written once against
 the thin `CAPV_*` views, so the identical SQL runs against local `DBA_HIST_*`,
@@ -77,12 +78,47 @@ Uninstall: `@uninstall.sql`.
 ```sql
 sqlplus / as sysdba              -- run from the REPO ROOT (@@ include paths)
 SQL> @report/report.sql          -- spools reports/cap_report_<db>_<ts>.txt
+SQL> @report/report.sql 5 7 N    -- top_n / anomaly_days / show_esm, positionally
 ```
 
-`report.sql` auto-loads `report/defaults.sql` (so a bare run never prompts); to
-change `top_n` / `anomaly_days` / `show_esm`, edit that file.
+Both drivers take the same three **optional positional arguments**
+`[top_n] [anomaly_days] [show_esm]` (`@report/report_html.sql 25 60 Y` too). Any
+argument you leave off falls back to `report/defaults.sql`, which both scripts
+auto-load — so a bare run never prompts, and editing that file still changes the
+defaults for every run.
 
 Read-only: the report only SELECTs; it creates/modifies no database object.
+
+### Drill-down
+
+When a report row looks wrong, drill into that one series and check the
+arithmetic by hand:
+
+```sql
+SQL> @report/drill_tbspc.sql SYSAUX          -- one tablespace (name required)
+SQL> @report/drill_tbspc.sql SYSAUX 2482321  -- ... in one container only
+SQL> @report/drill_cpu.sql                   -- BUSY_PCT (default metric)
+SQL> @report/drill_cpu.sql DB_CPU_PCT        -- or BUSY_P95 | BUSY_PEAK |
+                                             -- BUSY_PCT | DB_CPU_SEC | DB_CPU_P95
+```
+
+Each prints to screen and spools `reports/cap_drill_<name>_<ts>.txt`:
+
+1. the **fit header** — slope, intercept, R², the 95% slope CI and
+   days-to-full / days-to-saturation with its WORST/BEST range;
+2. the **daily series** over the `train_days` window — actual, fitted
+   (`icept + slope * day_n`), residual, day-over-day delta, AWR gap, and that
+   day's median / MAD-sigma / threshold / robust-z from the `CAPA_*` view;
+3. a **residual footer** — `SUM(residual)` (0 by construction),
+   `resid_se = sqrt(SSE/(n-2))` and `slope_ci` recomputed from scratch next to
+   the value the view publishes, so the M9.1 prediction bands can be re-derived
+   with a calculator;
+4. **anomaly arithmetic** — one spelled-out line per flagged day
+   (`value - median = dev`, `threshold = GREATEST(k*sigma, floor)`) with the
+   `CAP_CONFIG` knob values shown.
+
+Both arguments of each script are optional and never prompt; `drill_tbspc.sql`
+with no tablespace prints usage and stops. Read-only, like everything else.
 
 ## HTML report
 
@@ -142,11 +178,46 @@ Key knobs: `train_days` (90), `recent_days` (28), `min_train_days` (14),
 `r2_gate` (0.60), `mad_k` (3), `mad_window_days` (28), `cpu_sat_pct` (80),
 `abs_floor_bytes` (100 MiB), `dow_weeks` (8), `dtf_warn`/`dtf_crit` (90/30),
 `nearfull_warn_pct`/`nearfull_crit_pct` (90/97), `anomaly_report_days` (14,
-the `CAPR_ALERTS` anomaly window), `backtest_holdout_days` (28),
+the `CAPR_ALERTS` anomaly window -- distinct from the report's own
+`anomaly_days` presentation knob, which bounds sections 3 and 5),
+`backtest_holdout_days` (28), `report_min_gb` (1: sections 2 and 6a print a
+tablespace only if it is growing, near-full, or at least this many GiB),
+`accel_slope_floor_bpd` (1 MiB/day: below this `|slope|`, `accel_ratio` is NULL
+instead of a meaningless ratio off a flat series),
 `peak_hour_from`/`peak_hour_to` (8/18, the busy-hour window for `BUSY_PEAK` /
 `DB_CPU_PEAK`), `cpu_sat_on_p95` (1: `CPU_SAT` alerts follow the p95 busy-hour
 trend rather than the daily average).
 Run `SELECT * FROM cap_config ORDER BY cfg_name;` for the full annotated list.
+
+### Limit overrides / exclusions
+
+The autoextend `maxsize` recorded in AWR is a promise the *storage* may not be
+able to keep: a 32 GiB maxsize on a 10 GiB filesystem or ASM diskgroup is not
+32 GiB of headroom, and a days-to-full computed against it is a comfortable
+lie. `CAP_TBSPC_OVERRIDE` lets you state the real ceiling — and silence the
+staging tablespace that is *supposed* to fill up:
+
+```sql
+-- the real ceiling is the 200 GiB diskgroup, not the 2 TB datafile maxsize
+INSERT INTO cap_tbspc_override (dbid, con_dbid, tablespace_name, limit_bytes, note)
+VALUES (1234567890, 2345678901, 'APPDATA', 200 * 1024 * 1024 * 1024,
+        'DG +DATA is 200G; maxsize is fiction');
+
+-- stop forecasting the nightly-truncated staging tablespace, in every database
+INSERT INTO cap_tbspc_override (dbid, con_dbid, tablespace_name, exclude_flag, note)
+VALUES (0, 0, 'STAGING', 'Y', 'reloaded nightly -- growth is meaningless');
+
+COMMIT;
+```
+
+`tablespace_name` is matched **exactly** (no patterns); `dbid = 0` and
+`con_dbid = 0` are **wildcards** meaning "any", so one row can be a fleet-wide
+rule and a more specific row overrides it (a real `dbid` wins first, then a
+real `con_dbid`). The override is applied in `CAPD_TBSPC_DAILY`, so every
+layer above it — forecasts, anomalies, `CAPR_ALERTS`, both reports — honours it
+automatically. `CAPF_TBSPC_FORECAST.limit_source` reports which rule applied
+(`OVERRIDE` / `AUTOEXTEND` / `ALLOCATED`). The table is persisted: your rows
+survive `@install.sql` and are removed only by `@uninstall.sql`.
 
 ## Alerting / integration
 
@@ -258,10 +329,11 @@ suite depends on it.
   the delta by it, so a multi-day gap is not mistaken for a one-day spike. (The
   CPU busy% over a gap is a valid multi-day average attributed to the ending
   day — a documented minor limitation, not gap-normalized.)
-- **Re-install preserves your tuning and models.** `CAP_CONFIG` overrides and
-  the `CAP_ML_MODEL` registry (and its OML models) survive `@install.sql`
-  (`00_drop` no longer drops the two persisted tables; the MERGE seeds only
-  missing keys). Use `@uninstall.sql` for a full teardown.
+- **Re-install preserves your tuning, overrides and models.** `CAP_CONFIG`
+  knobs, `CAP_TBSPC_OVERRIDE` rows and the `CAP_ML_MODEL` registry (and its OML
+  models) survive `@install.sql` (`00_drop` no longer drops the three persisted
+  tables; the MERGE seeds only missing keys). Use `@uninstall.sql` for a full
+  teardown.
 - **Container identity.** Analytics key on `(dbid, con_dbid)`; `con_dbid`
   separates PDBs (their `TS#` values collide), and `dbid` is folded into ESM
   model names + report correlations so a cross-database `con_dbid` collision

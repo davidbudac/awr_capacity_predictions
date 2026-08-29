@@ -18,6 +18,11 @@
 --                          (container, series, horizon) with REGR vs ESM side
 --                          by side, in raw units AND GiB (6a prints GiB,
 --                          6b raw); filter on series_kind.
+--
+-- M7.4: both carry is_reportable ('Y'/'N') + rank_report, so both report
+-- drivers bound sections 2 and 6a with the identical
+--   WHERE is_reportable = 'Y' AND rank_report <= &top_n
+-- while the views themselves still expose every row to other consumers.
 --   CAPR_BACKTEST       -- section 6c: the M9.4 holdout scorecard pivoted to
 --                          one row per series, incl. the BETTER verdict.
 --
@@ -36,6 +41,28 @@ SET DEFINE OFF
 -- a plain WHERE.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_tbspc_forecast AS
+WITH cfg AS (
+        SELECT MAX(CASE WHEN cfg_name = 'report_min_gb'     THEN cfg_value END) AS report_min_gb,
+               MAX(CASE WHEN cfg_name = 'nearfull_warn_pct' THEN cfg_value END) AS nf_warn
+        FROM   cap_config
+     ),
+     f AS (
+        -- M7.4 reportability, decided once here so section 2 (this view) and
+        -- section 6a (CAPR_ESM_COMPARE, which joins this one) bound the same
+        -- set of tablespaces. A row is worth printing when it is GROWING, or
+        -- already NEAR-FULL, or simply BIG (>= report_min_gb GiB) -- which
+        -- leaves out exactly the small, flat, half-empty tablespaces that turn
+        -- a 500-tablespace database into 500 lines of noise. cur_used IS NULL
+        -- reports as 'Y': the bound must never hide a row we cannot judge.
+        SELECT t.*,
+               CASE WHEN t.cur_used IS NULL                           THEN 'Y'
+                    WHEN NVL(t.slope_bpd, 0) > 0                      THEN 'Y'
+                    WHEN t.cur_used >= cfg.report_min_gb * 1073741824 THEN 'Y'
+                    WHEN NVL(t.pct_used, 0) >= cfg.nf_warn            THEN 'Y'
+                    ELSE 'N'
+               END                                                    AS is_reportable
+        FROM   capf_tbspc_forecast t CROSS JOIN cfg
+     )
 SELECT f.dbid,
        f.con_dbid,
        NVL(cn.db_pdb, TO_CHAR(f.con_dbid)) AS db_pdb,
@@ -47,6 +74,7 @@ SELECT f.dbid,
        -- raw bytes, for chart geometry and for consumers that want no rounding
        f.cur_used                          AS cur_bytes,
        f.limit_bytes,
+       f.limit_source,
        f.slope_bpd,
        -- display columns (GiB)
        f.cur_used       / 1073741824       AS cur_gb,
@@ -59,9 +87,18 @@ SELECT f.dbid,
        e.value          / 1073741824       AS esm30,
        e.lower_bound    / 1073741824       AS esm30_lo,
        e.upper_bound    / 1073741824       AS esm30_hi,
+       f.is_reportable,
+       -- rank_report: reportable rows first, then growing ones, then the
+       -- biggest -- so  WHERE is_reportable='Y' AND rank_report <= top_n
+       -- keeps the top_n rows that matter and a non-reportable row can never
+       -- consume a slot ahead of a reportable one.
+       ROW_NUMBER() OVER (ORDER BY CASE WHEN f.is_reportable = 'Y' THEN 0 ELSE 1 END,
+                                   CASE WHEN NVL(f.slope_bpd, 0) > 0 THEN 0 ELSE 1 END,
+                                   f.cur_used DESC NULLS LAST,
+                                   f.con_dbid, f.tablespace_name)  AS rank_report,
        ROW_NUMBER() OVER (ORDER BY f.days_to_full NULLS LAST,
                                    f.tablespace_name)  AS rank_chart
-FROM   capf_tbspc_forecast f
+FROM   f
 LEFT   JOIN capr_container cn
   ON   cn.dbid = f.dbid AND cn.con_dbid = f.con_dbid
 LEFT   JOIN (SELECT dbid, con_dbid, series_key, value, lower_bound, upper_bound
@@ -90,10 +127,23 @@ SELECT f.dbid,
        MAX(CASE WHEN f.engine = 'REGR' THEN f.value END)       / 1073741824 AS regr_gb,
        MAX(CASE WHEN f.engine = 'ESM'  THEN f.value END)       / 1073741824 AS esm_gb,
        MAX(CASE WHEN f.engine = 'ESM'  THEN f.lower_bound END) / 1073741824 AS esm_lo_gb,
-       MAX(CASE WHEN f.engine = 'ESM'  THEN f.upper_bound END) / 1073741824 AS esm_hi_gb
+       MAX(CASE WHEN f.engine = 'ESM'  THEN f.upper_bound END) / 1073741824 AS esm_hi_gb,
+       -- M7.4: section 6a applies the SAME bound as section 2, INHERITED from
+       -- CAPR_TBSPC_FORECAST rather than recomputed, so the two sections can
+       -- never disagree about which tablespaces are worth printing. CPU rows
+       -- (6b) are always reportable with rank_report 0, so the identical
+       -- WHERE is_reportable='Y' AND rank_report <= top_n never drops them.
+       CASE WHEN f.series_kind = 'TBSPC'
+            THEN NVL(MAX(tf.is_reportable), 'Y') ELSE 'Y' END  AS is_reportable,
+       CASE WHEN f.series_kind = 'TBSPC'
+            THEN NVL(MAX(tf.rank_report), 0)     ELSE 0   END  AS rank_report
 FROM   capf_compare f
 LEFT   JOIN capr_container cn
   ON   cn.dbid = f.dbid AND cn.con_dbid = f.con_dbid
+LEFT   JOIN capr_tbspc_forecast tf
+  ON   f.series_kind = 'TBSPC'
+ AND   tf.dbid = f.dbid AND tf.con_dbid = f.con_dbid
+ AND   tf.tablespace_name = f.series_key
 GROUP  BY f.dbid, f.con_dbid, f.series_kind, f.series_key, f.horizon_days;
 
 -- --------------------------------------------------------------------
