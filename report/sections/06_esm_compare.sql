@@ -16,7 +16,8 @@ PROMPT
 PROMPT == 6. TIER 2 (ESM) vs TIER 1 (REGR) ==
 PROMPT    &esm_ok OML ESM model(s) trained (OK). If 0: run  EXEC cap_forecast_ml.train_all
 PROMPT    ESM reaches +30 only (19c hard horizon cap) and only for fresh models;
-PROMPT    +90/180/365 are REGR-only.
+PROMPT    +90/180/365 are REGR-only. ESM_MODEL names the ESM variant behind the
+PROMPT    ESM column: HOLT = EXSM_HOLT, ADDW = EXSM_ADDWINTERS with a 7-day season.
 PROMPT
 PROMPT  6a. Tablespaces (GiB) -- the same &ts_shown of &ts_total tablespace(s) as
 PROMPT      section 2 (growing, near-full, or >= &min_gb GiB used, top &top_n):
@@ -28,6 +29,7 @@ COLUMN regr       FORMAT 99990.00      HEADING 'REGR_GIB'
 COLUMN esm        FORMAT 99990.00      HEADING 'ESM_GIB'
 COLUMN esm_lo     FORMAT 99990.00      HEADING 'ESM_LO'
 COLUMN esm_hi     FORMAT 99990.00      HEADING 'ESM_HI'
+COLUMN esm_model  FORMAT A9            HEADING 'ESM_MODEL'
 
 SELECT db_pdb,
        series_key,
@@ -35,7 +37,8 @@ SELECT db_pdb,
        regr_gb   AS regr,
        esm_gb    AS esm,
        esm_lo_gb AS esm_lo,
-       esm_hi_gb AS esm_hi
+       esm_hi_gb AS esm_hi,
+       esm_model
 FROM   capr_esm_compare
 WHERE  series_kind = 'TBSPC'
   AND  is_reportable = 'Y'
@@ -57,7 +60,8 @@ SELECT db_pdb,
        regr,
        esm,
        esm_lo,
-       esm_hi
+       esm_hi,
+       esm_model
 FROM   capr_esm_compare
 WHERE  series_kind = 'CPU'
 ORDER  BY con_dbid, series_key, horizon_days;
@@ -68,6 +72,8 @@ PROMPT      Each engine forecast the last holdout window from data BEFORE it;
 PROMPT      MAPE% = mean abs error vs actuals, BIAS% >0 = over-forecast. ESM
 PROMPT      columns fill after  EXEC cap_forecast_ml.train_backtest  (ESM may
 PROMPT      cover fewer days than REGR: 19c 30-step cap and rows/4 floor).
+PROMPT      ESM_PICK (M10.4) = the model type AUTO chose and why, as
+PROMPT      "<type> H=<Holt MAPE%> W=<AddWinters MAPE%>" over the same holdout.
 
 COLUMN series_kind FORMAT A6           HEADING 'KIND'
 COLUMN series_key  FORMAT A16          HEADING 'SERIES'
@@ -77,6 +83,7 @@ COLUMN regr_bias   FORMAT S99990.00    HEADING 'REGR_BIAS%'
 COLUMN esm_mape    FORMAT 99990.00     HEADING 'ESM_MAPE%'
 COLUMN esm_bias    FORMAT S99990.00    HEADING 'ESM_BIAS%'
 COLUMN better      FORMAT A6           HEADING 'BETTER'
+COLUMN esm_pick    FORMAT A20          HEADING 'ESM_PICK'
 
 SELECT db_pdb,
        series_kind,
@@ -86,6 +93,7 @@ SELECT db_pdb,
        regr_bias,
        esm_mape,
        esm_bias,
-       better
+       better,
+       esm_pick
 FROM   capr_backtest
 ORDER  BY con_dbid, series_kind, series_key;

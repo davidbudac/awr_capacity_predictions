@@ -17,11 +17,22 @@ CREATE OR REPLACE PACKAGE cap_forecast_ml AS
 
     -- Train an ESM model per permanent tablespace, limited to the p_top_n most
     -- capacity-critical (nearest days_to_full, then largest current usage).
-    -- EXSM_HOLT: additive trend, no seasonality (tablespace growth is not weekly).
+    -- M10.4 quality gate: only series whose Tier 1 quality is OK or
+    -- LOW_CONFIDENCE are eligible -- FLAT / INSUFFICIENT_HISTORY are skipped.
+    -- M10.4 model type, from CAP_CONFIG:
+    --   esm_tbspc_model        0 = EXSM_HOLT (additive trend, no seasonality)
+    --                          1 = EXSM_ADDWINTERS with weekly seasonality (7)
+    --                          2 = AUTO (default) -- train both candidates as
+    --                              backtest twins and keep the lower-MAPE one
+    --   esm_select_by_backtest 1 (default) enables the AUTO comparison; 0 makes
+    --                          AUTO fall back to EXSM_HOLT without training twins
+    -- The chosen type and both candidate MAPEs are recorded on the model's
+    -- CAP_ML_MODEL row (model_type / chosen_by / mape_holt / mape_addw).
     PROCEDURE train_tablespaces(p_top_n IN NUMBER DEFAULT 20);
 
-    -- Train ESM models for host busy% and DB CPU seconds. EXSM_HW (Holt-Winters)
-    -- with weekly seasonality (EXSM_SEASONALITY = 7).
+    -- Train ESM models for host busy% and DB CPU seconds. EXSM_ADDWINTERS
+    -- (Holt-Winters additive) with weekly seasonality (EXSM_SEASONALITY = 7).
+    -- Same M10.4 quality gate, applied to CAPF_CPU_TREND.
     PROCEDURE train_cpu;
 
     -- Convenience: train_tablespaces(p_top_n) then train_cpu.
@@ -32,6 +43,9 @@ CREATE OR REPLACE PACKAGE cap_forecast_ml AS
     -- HELD OUT, so CAPF_BACKTEST can score their forecasts against the real
     -- values. Separate model names (CBT* prefixes); never appear in
     -- CAPF_ESM_FORECAST / CAPF_COMPARE. Re-run after data grows to refresh.
+    -- M10.4: tablespaces get ONE TWIN PER CANDIDATE model type (EXSM_HOLT and
+    -- EXSM_ADDWINTERS/7), scored separately in CAPF_ESM_CANDIDATE; CPU series
+    -- have a single candidate. train_tablespaces calls this itself when AUTO.
     PROCEDURE train_backtest(p_top_n        IN NUMBER DEFAULT 20,
                              p_holdout_days IN NUMBER DEFAULT NULL);
 

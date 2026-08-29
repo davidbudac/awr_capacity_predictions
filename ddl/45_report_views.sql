@@ -16,7 +16,8 @@
 --                     extensions / Zabbix / Nagios / a scheduler job:
 --                       severity   CRIT | WARN | INFO  (sev_rank 1|2|3)
 --                       kind       TBSPC_FULL | TBSPC_NEARFULL | TBSPC_ANOM |
---                                  CPU_SAT | DBCPU_SAT | CPU_ANOM
+--                                  CPU_SAT | DBCPU_SAT | CPU_ANOM |
+--                                  CPU_SHIFT | SERIES_LIMIT | SERIES_NEARLIMIT
 --                     plus keys (dbid, con_dbid, db_pdb, series_key), the
 --                     observation day, the metric value vs its threshold, and
 --                     a ready-to-page plain-text message.
@@ -57,6 +58,15 @@ FROM   capv_container c;
 --   TBSPC_ANOM     capa_tbspc_anom flagged within the last anomaly_report_days
 --                  (HIGH growth -> WARN, LOW/shrink -> INFO).
 --   CPU_ANOM       capa_cpu_anom, same window/severity mapping.
+--   CPU_SHIFT      capa_cpu_shift (M10.3): a flagged sustained level shift.
+--                  UP -> WARN, DOWN -> INFO. No day window applies -- the
+--                  view already holds only the CURRENT state of each series.
+--   SERIES_LIMIT   capf_series_forecast (M11): quality=OK, days_to_limit
+--                  <= dtf_warn -- the fixed-ceiling series reaching
+--                  series_sat_pct% of its limit.
+--   SERIES_NEARLIMIT capf_series_forecast: pct_of_limit >= nearfull_warn_pct
+--                  now, at ANY fit quality (the M7.1 rule, applied to
+--                  processes / sessions / total DB size).
 -- value/threshold carry the number that crossed and the limit it crossed
 -- (units in the unit column), so a poller can alarm without parsing message.
 -- db_pdb resolves through CAPR_CONTAINER; unknown containers degrade to the
@@ -73,7 +83,9 @@ WITH cfg AS (
                -- which host-busy trend drives CPU_SAT (M10.1): p95 of the
                -- day's snapshot intervals (default) or the daily average
                CASE WHEN MAX(CASE WHEN cfg_name = 'cpu_sat_on_p95' THEN cfg_value END) = 0
-                    THEN 'BUSY_PCT' ELSE 'BUSY_P95' END                       AS cpu_sat_metric
+                    THEN 'BUSY_PCT' ELSE 'BUSY_P95' END                       AS cpu_sat_metric,
+               -- M11: the "call it full here" fraction for a fixed-ceiling series
+               MAX(CASE WHEN cfg_name = 'series_sat_pct'      THEN cfg_value END) AS series_sat
         FROM   cap_config
      ),
      alerts AS (
@@ -151,6 +163,29 @@ WITH cfg AS (
           AND  t.days_to_sat IS NOT NULL
           AND  t.days_to_sat <= cfg.dtf_warn
         UNION ALL
+        -- ---- CPU_SHIFT: a sustained step in a CPU series (M10.3). Not a
+        -- forecast and not an outlier -- the level the machine runs at TODAY
+        -- differs from the level it ran at a month ago, which is a capacity
+        -- fact even when no single day ever looked odd. UP is a WARN (someone
+        -- added load); DOWN is INFO (load left -- worth knowing, not paging).
+        SELECT CASE WHEN s.shift_flag = 'UP' THEN 'WARN' ELSE 'INFO' END,
+               'CPU_SHIFT',
+               s.dbid, s.con_dbid,
+               s.metric,
+               s.last_day,
+               s.shift_pct,
+               s.threshold_pct,
+               'PCT',
+               CASE s.metric WHEN 'DB_CPU_PCT' THEN 'DB CPU' ELSE 'Host CPU' END
+                 || ' (' || s.metric || ') shifted '
+                 || TO_CHAR(s.shift_pct, 'FMS9999990.0') || ' pts: last '
+                 || TO_CHAR(s.recent_days, 'FM9999990') || ' days median '
+                 || TO_CHAR(s.recent_med, 'FM99999990.0') || '% vs prior '
+                 || TO_CHAR(s.base_days, 'FM9999990') || ' days '
+                 || TO_CHAR(s.base_med, 'FM99999990.0') || '%'
+        FROM   capa_cpu_shift s CROSS JOIN cfg
+        WHERE  s.shift_flag IS NOT NULL
+        UNION ALL
         -- ---- TBSPC_ANOM: flagged growth-rate days in the alert window ----
         SELECT CASE WHEN a.anomaly_flag = 'HIGH' THEN 'WARN' ELSE 'INFO' END,
                'TBSPC_ANOM',
@@ -189,6 +224,49 @@ WITH cfg AS (
         FROM   capa_cpu_anom a CROSS JOIN cfg
         WHERE  a.anomaly_flag IS NOT NULL
           AND  a.day_dt > (SELECT MAX(day_dt) FROM capd_cpu_daily) - cfg.anom_days
+        UNION ALL
+        -- ---- SERIES_LIMIT (M11): a fixed-ceiling series (PROCESSES /
+        -- SESSIONS / DB_SIZE_GB) is forecast to reach series_sat_pct% of its
+        -- ceiling inside the warning window. Same OK-quality gate and same
+        -- dtf_warn/dtf_crit thresholds as TBSPC_FULL / CPU_SAT, so a poller
+        -- treats all three identically. REDO_GB_DAY has no ceiling, so it can
+        -- never appear here.
+        SELECT CASE WHEN s.days_to_limit <= cfg.dtf_crit THEN 'CRIT' ELSE 'WARN' END,
+               'SERIES_LIMIT',
+               s.dbid, s.con_dbid,
+               s.series,
+               s.last_day,
+               s.days_to_limit,
+               CASE WHEN s.days_to_limit <= cfg.dtf_crit THEN cfg.dtf_crit ELSE cfg.dtf_warn END,
+               'DAYS',
+               s.series || ' forecast to reach ' || TO_CHAR(cfg.series_sat, 'FM990')
+                 || '% of its limit (' || TO_CHAR(s.cur_limit, 'FM99999999990.99')
+                 || ' ' || s.unit || ') in ' || TO_CHAR(s.days_to_limit, 'FM9999990')
+                 || ' days (now ' || TO_CHAR(s.cur_val, 'FM99999999990.99')
+                 || ', ' || TO_CHAR(s.pct_of_limit, 'FM990.0') || '% of limit)'
+        FROM   capf_series_forecast s CROSS JOIN cfg
+        WHERE  s.quality = 'OK'
+          AND  s.days_to_limit IS NOT NULL
+          AND  s.days_to_limit <= cfg.dtf_warn
+        UNION ALL
+        -- ---- SERIES_NEARLIMIT (M11): already close to the ceiling RIGHT NOW,
+        -- at ANY fit quality -- the M7.1 rule applied to the new series. A
+        -- session count sitting at 95% of `sessions` is an outage waiting for
+        -- a busy Monday whether or not its trend is fittable.
+        SELECT CASE WHEN s.pct_of_limit >= cfg.nf_crit THEN 'CRIT' ELSE 'WARN' END,
+               'SERIES_NEARLIMIT',
+               s.dbid, s.con_dbid,
+               s.series,
+               s.last_day,
+               s.pct_of_limit,
+               CASE WHEN s.pct_of_limit >= cfg.nf_crit THEN cfg.nf_crit ELSE cfg.nf_warn END,
+               'PCT',
+               s.series || ' is at ' || TO_CHAR(s.pct_of_limit, 'FM990.0')
+                 || '% of its limit now (' || TO_CHAR(s.cur_val, 'FM99999999990.99')
+                 || ' of ' || TO_CHAR(s.cur_limit, 'FM99999999990.99') || ' ' || s.unit
+                 || '; forecast quality ' || s.quality || ')'
+        FROM   capf_series_forecast s CROSS JOIN cfg
+        WHERE  s.pct_of_limit >= cfg.nf_warn
      )
 SELECT a.severity,
        CASE a.severity WHEN 'CRIT' THEN 1 WHEN 'WARN' THEN 2 ELSE 3 END AS sev_rank,
@@ -350,3 +428,93 @@ FROM   capa_cpu_anom a
 LEFT   JOIN capr_container c
   ON   c.dbid = a.dbid AND c.con_dbid = a.con_dbid
 WHERE  a.anomaly_flag IS NOT NULL;
+
+-- --------------------------------------------------------------------
+-- CAPR_CPU_SHIFTS -- report section 5's second block (M10.3). Flagged rows
+-- only (shift_flag IS NOT NULL), db_pdb resolved, and the window sizes and
+-- both medians carried through so the section can print the whole claim on
+-- one line without re-reading CAP_CONFIG. Ordered by the biggest absolute
+-- move first via rank_shift, so a driver bounds it with a plain WHERE.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capr_cpu_shifts AS
+SELECT s.dbid,
+       s.con_dbid,
+       NVL(c.db_pdb, TO_CHAR(s.con_dbid))    AS db_pdb,
+       s.metric,
+       s.last_day,
+       TO_CHAR(s.last_day, 'YYYY-MM-DD')     AS day_str,
+       s.recent_days,
+       s.base_days,
+       s.recent_med,
+       s.base_med,
+       s.shift_pct,
+       s.base_mad_sigma,
+       s.n_recent,
+       s.n_base,
+       s.n_above,
+       s.n_below,
+       s.threshold_pct,
+       s.shift_flag,
+       CASE WHEN s.shift_flag = 'UP' THEN 'WARN' ELSE 'INFO' END AS sev,
+       ROW_NUMBER() OVER (ORDER BY ABS(s.shift_pct) DESC NULLS LAST,
+                                   s.con_dbid, s.metric)         AS rank_shift
+FROM   capa_cpu_shift s
+LEFT   JOIN capr_container c
+  ON   c.dbid = s.dbid AND c.con_dbid = s.con_dbid
+WHERE  s.shift_flag IS NOT NULL;
+
+-- --------------------------------------------------------------------
+-- CAPR_SERIES (M11) -- report section 7: the fixed-ceiling series
+-- (PROCESSES / SESSIONS / REDO_GB_DAY / DB_SIZE_GB), one row per
+-- (container, series). Same contract as the other CAPR_ views: db_pdb is
+-- already resolved, every severity marker is computed here, and rank_series
+-- lets a driver bound the list with a plain WHERE.
+--   sev keys off days_to_limit (dtf_crit/dtf_warn) when the fit is OK, and
+--   otherwise off pct_of_limit (nearfull_crit_pct/nearfull_warn_pct) -- the
+--   two CAPR_ALERTS branches, collapsed into one column for display.
+--   limit_worst / limit_best are the M9.1 days-to-limit range (lo = worst
+--   case / soonest; best empty = might never get there).
+-- Series with no ceiling (REDO_GB_DAY) simply carry NULL limit columns and
+-- an 'ok' severity: they are a trend, not a countdown.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capr_series AS
+WITH cfg AS (
+        SELECT MAX(CASE WHEN cfg_name = 'dtf_warn'          THEN cfg_value END) AS dtf_warn,
+               MAX(CASE WHEN cfg_name = 'dtf_crit'          THEN cfg_value END) AS dtf_crit,
+               MAX(CASE WHEN cfg_name = 'nearfull_warn_pct' THEN cfg_value END) AS nf_warn,
+               MAX(CASE WHEN cfg_name = 'nearfull_crit_pct' THEN cfg_value END) AS nf_crit
+        FROM   cap_config
+     )
+SELECT s.dbid,
+       s.con_dbid,
+       NVL(c.db_pdb, TO_CHAR(s.con_dbid))  AS db_pdb,
+       s.series,
+       s.unit,
+       s.last_day,
+       s.train_n,
+       s.cur_val,
+       s.cur_limit,
+       s.pct_of_limit,
+       s.sat_value,
+       s.slope_per_day,
+       s.r2,
+       s.proj_30,
+       s.proj_90,
+       s.days_to_limit,
+       s.days_to_limit_lo                  AS limit_worst,
+       s.days_to_limit_hi                  AS limit_best,
+       CASE WHEN s.quality = 'OK' AND s.days_to_limit <= cfg.dtf_crit THEN 'CRIT'
+            WHEN s.quality = 'OK' AND s.days_to_limit <= cfg.dtf_warn THEN 'WARN'
+            WHEN s.pct_of_limit >= cfg.nf_crit                        THEN 'CRIT'
+            WHEN s.pct_of_limit >= cfg.nf_warn                        THEN 'WARN'
+            ELSE 'ok'
+       END                                 AS sev,
+       s.quality,
+       -- Most urgent first: soonest days_to_limit, then fullest, then name.
+       ROW_NUMBER() OVER (ORDER BY s.days_to_limit NULLS LAST,
+                                   s.pct_of_limit DESC NULLS LAST,
+                                   s.con_dbid, s.series) AS rank_series
+FROM   capf_series_forecast s
+CROSS  JOIN cfg
+LEFT   JOIN capr_container c
+  ON   c.dbid = s.dbid AND c.con_dbid = s.con_dbid;

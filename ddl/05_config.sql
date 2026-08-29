@@ -54,6 +54,8 @@ USING (
     UNION ALL SELECT 'cpu_min_mad_pct',      3,         'Floor (whole percent) on CPU MAD_sigma so an exactly-flat seasonal baseline still flags a real jump.' FROM dual
     UNION ALL SELECT 'cpu_min_dow_hist',     3,         'Minimum prior same-weekday observations before a CPU anomaly can flag.'                                FROM dual
     UNION ALL SELECT 'esm_prediction_step',  30,        'OML ESM forecast horizon in steps (days). Oracle 19c hard-caps this at 30.'                            FROM dual
+    UNION ALL SELECT 'esm_tbspc_model',       2,        'ESM model type for tablespaces: 0=EXSM_HOLT, 1=EXSM_ADDWINTERS(7), 2=AUTO (pick by backtest MAPE).'     FROM dual
+    UNION ALL SELECT 'esm_select_by_backtest',1,        '1 = AUTO trains both candidate backtest twins per tablespace and keeps the lower-MAPE one; 0 = AUTO falls back to EXSM_HOLT.' FROM dual
     UNION ALL SELECT 'nearfull_warn_pct',    90,        'Percent-used at/above which a tablespace raises a near-full-now WARN (any forecast quality).'          FROM dual
     UNION ALL SELECT 'nearfull_crit_pct',    97,        'Percent-used at/above which a tablespace raises a near-full-now CRIT (any forecast quality).'          FROM dual
     UNION ALL SELECT 'peak_hour_from',        8,         'Peak window start (hour of day, exclusive). A snapshot interval is "peak" when its end time falls in (from, to].' FROM dual
@@ -62,6 +64,14 @@ USING (
     UNION ALL SELECT 'backtest_holdout_days',28,        'Holdout window (days) CAPF_BACKTEST fits before and scores against; <=30 lets ESM cover it on 19c.'    FROM dual
     UNION ALL SELECT 'report_min_gb',         1,        'Report sections 2/6a print a tablespace only if it is growing, near-full, or at least this many GiB used.' FROM dual
     UNION ALL SELECT 'accel_slope_floor_bpd', 1048576,  'Minimum |slope| (bytes/day, default 1 MiB) before accel_ratio is computed; below it a near-flat series gets NULL.' FROM dual
+    UNION ALL SELECT 'slope_method',           0,        'M9.2 slope estimator for the CAPF_* fits. NUMERIC ENCODING: 0 = OLS (REGR_SLOPE, default), 1 = THEILSEN (median pairwise slope, robust to steps).' FROM dual
+    UNION ALL SELECT 'reset_on_shrink',        1,        'M9.3: 1 = restart a tablespace training window at the most recent large negative used_bytes step (post-purge fit); 0 = fit across the cliff.' FROM dual
+    UNION ALL SELECT 'shrink_mad_k',           6,        'M9.3 MAD multiplier: a daily delta below -GREATEST(k*MAD_sigma of the window deltas, abs_floor_bytes) is a shrink change-point.' FROM dual
+    UNION ALL SELECT 'cpu_gap_hours',          12,       'M10.5: a snapshot interval LONGER than this many hours is an AWR gap/downtime. Its day gets gap_flag=Y, is skipped by the CPU anomaly + shift baselines, and is left out of busy_p95/max/peak.' FROM dual
+    UNION ALL SELECT 'shift_days',              7,       'M10.3: length of the RECENT window (days) whose median CAPA_CPU_SHIFT compares against the baseline; also the N of the N-of-M rule.' FROM dual
+    UNION ALL SELECT 'shift_baseline_days',    28,       'M10.3: length of the BASELINE window (days) immediately before the recent window.'                                                   FROM dual
+    UNION ALL SELECT 'shift_min_pct',          15,       'M10.3: minimum |recent median - baseline median|, in percentage POINTS, before a level shift is flagged.'                            FROM dual
+    UNION ALL SELECT 'series_sat_pct',         90,        'M11: percent of a fixed-ceiling series'' limit (processes/sessions, DB size) treated as saturated for days_to_limit.' FROM dual
 ) s
 ON (c.cfg_name = s.cfg_name)
 WHEN NOT MATCHED THEN

@@ -152,6 +152,7 @@ PROMPT =========================================================================
 @@report/sections/04_cpu_trend.sql
 @@report/sections/05_cpu_anomalies.sql
 @@&esm_file
+@@report/sections/07_series.sql
 
 PROMPT
 PROMPT ================================================================================

@@ -1,7 +1,7 @@
 --
 -- ddl/11_seam_warehouse.sql -- CAPV_* seam over the awr-fleet-warehouse AWRV_* views.
 -- =====================================================================
--- WAREHOUSE mode. Re-points the six CAPV_* seam views at the fleet warehouse's
+-- WAREHOUSE mode. Re-points the CAPV_* seam views at the fleet warehouse's
 -- AWRV_* seam (its DBA_HIST-shaped views over the collected facts) instead of
 -- local DBA_HIST_*. Everything downstream (CAPD_/CAPF_/CAPA_/report) is
 -- byte-identical to local mode -- the whole point of the seam.
@@ -135,3 +135,48 @@ SELECT dbid                     AS dbid,
        db_name                  AS db_name,
        con_name                 AS con_name
 FROM   awrv_container;
+
+-- --------------------------------------------------------------------
+-- CAPV_RESOURCE_LIMIT (M11.1) -- WAREHOUSE GAP: the awr-fleet-warehouse
+-- collector does not gather DBA_HIST_RESOURCE_LIMIT yet (there is no
+-- awrw_resource_limit fact and hence no awrv_resource_limit seam view), so
+-- there is nothing to map onto. Rather than leave the object missing -- which
+-- would make CAPD_SERIES_DAILY and everything above it INVALID in warehouse
+-- mode -- this emits the exact column contract with ZERO ROWS. Downstream the
+-- PROCESSES / SESSIONS series simply do not appear for warehouse-mode
+-- databases; REDO_GB_DAY and DB_SIZE_GB work normally.
+--
+-- TODO (tracked in PLAN.md, M11.1): add awrw_resource_limit + awrv_resource_limit
+-- to the sibling repo's collector/facts/AWRV layer, then replace this stub with
+-- the pass-through the other CAPV_ views use. WHERE 1 = 0 keeps the optimizer
+-- from touching anything at all.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capv_resource_limit AS
+SELECT CAST(NULL AS NUMBER)        AS dbid,
+       CAST(NULL AS NUMBER)        AS con_dbid,
+       CAST(NULL AS NUMBER)        AS instance_number,
+       CAST(NULL AS NUMBER)        AS snap_id,
+       CAST(NULL AS VARCHAR2(30))  AS resource_name,
+       CAST(NULL AS NUMBER)        AS current_utilization,
+       CAST(NULL AS NUMBER)        AS max_utilization,
+       CAST(NULL AS NUMBER)        AS limit_value
+FROM   dual
+WHERE  1 = 0;
+
+-- --------------------------------------------------------------------
+-- CAPV_SYSSTAT (M11.2) -- the warehouse DOES collect DBA_HIST_SYSSTAT whole
+-- (awrw_sysstat, raw cumulative values), exposed as AWRV_SYSSTAT; the filter
+-- to 'redo size' happens here, mirroring the local seam.
+-- AWRV_SYSSTAT carries no CON_DBID (the warehouse keys SYSSTAT on DBID +
+-- instance, like AWRV_SNAPSHOT), so con_dbid := dbid -- which is right for
+-- redo anyway: it is one stream per database, recorded at the CDB level.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capv_sysstat AS
+SELECT dbid                     AS dbid,
+       dbid                     AS con_dbid,
+       instance_number          AS instance_number,
+       snap_id                  AS snap_id,
+       stat_name                AS stat_name,
+       value                    AS value
+FROM   awrv_sysstat
+WHERE  stat_name = 'redo size';

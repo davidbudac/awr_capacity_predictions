@@ -24,7 +24,7 @@ This document explains *why* each layer is shaped the way it is. For usage see
 
 ## Layer 1 — the seam (`CAPV_*`)
 
-Seven views re-present the AWR dictionary in a stable shape. Everything
+Nine views re-present the AWR dictionary in a stable shape. Everything
 downstream depends only on these, so swapping `ddl/10_seam_local.sql` for `11`
 (warehouse) or `12` (fixture) re-points the whole stack. Every view carries
 `(dbid, con_dbid)`.
@@ -55,6 +55,17 @@ downstream depends only on these, so swapping `ddl/10_seam_local.sql` for `11`
   (`con_name` stays NULL — no PDB-name dim collected yet); fixture mode reads
   `CAP_FIXTURE_CONTAINER`. Historical dictionaries only, same as the rest of
   the seam — never live `V$` views.
+- `CAPV_RESOURCE_LIMIT` / `CAPV_SYSSTAT` (M11) are the two newest seam views.
+  `DBA_HIST_RESOURCE_LIMIT` (filtered to `processes` / `sessions`) **does**
+  carry `CON_DBID` on 19c — verified — so PDBs stay separable; its
+  `LIMIT_VALUE` is a `VARCHAR2(10)` that can read `UNLIMITED`, converted here
+  to a NUMBER (non-numeric → NULL = "no ceiling"). `CAPV_SYSSTAT` is filtered
+  to `redo size`, a cumulative byte counter. The warehouse collects SYSSTAT
+  whole (`awrv_sysstat`, `con_dbid := dbid` — right for redo, which is one
+  stream per database) but has **no** resource-limit fact yet, so
+  `ddl/11_seam_warehouse.sql` emits `CAPV_RESOURCE_LIMIT` with the exact
+  column contract and `WHERE 1 = 0`: the stack stays valid in warehouse mode
+  and the `PROCESSES` / `SESSIONS` series simply have no rows there.
 
 ## Layer 2 — daily series (`CAPD_*`)
 
@@ -114,6 +125,31 @@ row per day.
   OSSTAT records under the CDB's `con_dbid`) is the per-PDB share of what the
   host was actually doing.
 
+**AWR gaps in the CPU series (M10.5).** A missing stretch of snapshots does not
+leave a hole in a counter series — the next snapshot simply differences against
+a much older one, and that *one* long interval is attributed to the day it ends
+on. A 36 h interval's average is not a day, and it is certainly not a "peak
+hour". So both CPU daily views mirror `CAPD_TBSPC_DELTA.day_gap` and expose
+`max_interval_hours` (longest interval ending that day), `gap_flag` (`'Y'` when
+that exceeds the `cpu_gap_hours` knob, default 12) and `day_gap` (calendar days
+since the previous day that *has* a row). The day is deliberately **kept** in
+the series — it is still data, and the forecast layer wants it — but:
+
+- `busy_p95` / `busy_max` / `busy_peak_pct` (and their `db_cpu_*` twins) are
+  computed only from intervals `≤ cpu_gap_hours`, so a multi-day average can
+  never masquerade as a peak hour; NULL if the day has no short interval at all.
+- the daily time-weighted averages (`busy_pct`, `db_cpu_pct`) still use **every**
+  valid interval, so they stay honest about the counters that were actually
+  recorded — on a gap day `db_cpu_pct` legitimately reads high, and `gap_flag`
+  is the column that says "this day carries more than a day".
+- `CAPA_CPU_ANOM` and `CAPA_CPU_SHIFT` (Layer 4) drop gap days from their
+  baselines and never flag one.
+
+Why 12 hours and not something tighter: `gap_flag` *suppresses* anomaly
+scoring, so an over-sensitive default would silence the whole CPU anomaly layer
+on any site whose snapshot interval is wide. Half a day is comfortably above
+every realistic AWR interval and still catches real outages.
+
 All `LAG`s use inline `OVER (...)` (19c has no `WINDOW` clause).
 
 ## Layer 3 — Tier 1 forecasts (`CAPF_*`)
@@ -138,8 +174,50 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   approximation is part of the contract (the fixture installer computes
   expectations with the same formula). A perfectly linear or flat series has
   SSE = 0, so its bands collapse onto the point projection.
-- **Quality** (priority order): `INSUFFICIENT_HISTORY` (`REGR_COUNT <
-  min_train_days`) → `FLAT` (`slope = 0`, or `R² IS NULL`) → `LOW_CONFIDENCE`
+- **Robust slope (M9.2)** — knob `slope_method` (`CAP_CONFIG` is numeric:
+  **0 = OLS**, the default, **1 = THEILSEN**). OLS minimises *squared* error, so
+  a single step — a bulk load, an import, a partition drop — drags the whole
+  slope with it: the `FIX_SPIKE` fixture grows at 5 MiB/day yet reads ~20 MiB/day
+  in OLS because of one +2 GiB day. The **Theil–Sen** estimator is the `MEDIAN`
+  of the pairwise slopes `(y_j − y_i)/(x_j − x_i)` over every `i < j` in the
+  training window (a self-join, O(n²) ≈ 4k pairs at 90 days); its 29% breakdown
+  point means a minority of stepped pairs cannot move it. The intercept is the
+  companion `MEDIAN(y − slope·x)`. **Both** estimators are always computed and
+  exposed (`ols_slope_bpd` / `ts_slope_bpd`, `ols_slope_per_day` /
+  `ts_slope_per_day`, `ts_icept`), and the `slope_method` column reports which
+  one the row actually used — it falls back to OLS if Theil–Sen could not be
+  computed. When THEILSEN is selected the chosen line drives `slope_bpd`,
+  `icept`, every `proj_*`, `days_to_full` / `days_to_sat`, **both** halves of
+  `accel_ratio` (mixing estimators would manufacture acceleration) and the
+  `slope = 0` FLAT test. `r2`, `resid_se`, `slope_ci_bpd` and the M9.1
+  half-widths stay **OLS** quantities: there is no closed-form Theil–Sen
+  prediction interval in SQL, so the bands are OLS residual bands drawn *around
+  the chosen line*, and `days_to_full_lo/hi` remain the OLS slope-CI range.
+  Acceptable for v1 and explicitly documented; with the default
+  `slope_method = 0` the output is byte-identical to before. Applies to
+  `CAPF_CPU_TREND` as well.
+- **Change-point reset (M9.3)** — knobs `reset_on_shrink` (1) and
+  `shrink_mad_k` (6), tablespaces only. After a purge or archive job the history
+  has a *cliff* in it, and a line fitted across the cliff is a fiction: it
+  under-states the slope and over-states the headroom. The training window
+  therefore **restarts** at the most recent day whose day-over-day delta is a
+  large negative step, `delta < −GREATEST(shrink_mad_k·MAD_σ(deltas),
+  abs_floor_bytes)`, where `MAD_σ = MEDIAN(|delta − MEDIAN(delta)|)·1.4826` over
+  the deltas of the full `train_days` window (two passes, as in Layer 4, but per
+  series over one window rather than rolling — so a plain `GROUP BY` suffices).
+  `abs_floor_bytes` stops an exactly-flat series (MAD = 0) from calling every
+  wiggle a cliff; `shrink_mad_k = 6` (vs `mad_k = 3` for anomalies) keeps this to
+  real cliffs, because it *restarts a fit* rather than merely raising a flag.
+  The reset day **itself is day 1 of the new window** — its `used_bytes` is
+  already the post-purge level, so including it costs nothing and buys a point.
+  `train_start` and `reset_day` (NULL = no reset) are exposed. If fewer than
+  `min_train_days` rows survive, quality is `INSUFFICIENT_HISTORY` — the honest
+  answer, because we genuinely do not yet know the post-purge growth rate. Note
+  that the purge day still shows up as a `LOW` `CAPA_TBSPC_ANOM`; the reset is
+  about the *fit*, not about hiding the event. The M9.4 backtest fits its own
+  window and is deliberately left alone.
+- **Quality** (priority order): `INSUFFICIENT_HISTORY` (`train_n <
+  min_train_days`) → `FLAT` (chosen `slope = 0`, or `R² IS NULL`) → `LOW_CONFIDENCE`
   (`R² < r2_gate`) → `OK`. Note the `FLAT` definition: Oracle's `REGR_R2`
   returns **1** for a zero-variance *y* (a truly flat series) and NULL only for
   zero-variance *x*, so flatness is detected by `slope = 0`, not by a NULL R².
@@ -150,6 +228,57 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   ceiling, so its `days_to_sat` is NULL. `CAPR_ALERTS.CPU_SAT` keys off
   `BUSY_P95` by default (`cpu_sat_on_p95 = 1`; set 0 for the daily average),
   and `DBCPU_SAT` fires per container off `DB_CPU_PCT`.
+
+## Layer 2b / 3b — fixed-ceiling series (M11)
+
+Three more series share one property with tablespaces: a value approaching a
+**hard ceiling that is not a byte count**. Rather than a view per series they
+land in one generic pair keyed by a `series` name, so the report, the alert
+view and any future series need no extra code.
+
+`CAPD_SERIES_DAILY (dbid, con_dbid, series, day_dt, value, limit_value, unit,
+n_samples)` — `ddl/25_series_daily.sql`, a UNION ALL of:
+
+| series | value | limit_value | unit |
+| --- | --- | --- | --- |
+| `PROCESSES` / `SESSIONS` | daily `MAX(max_utilization)` per instance, **summed** across instances | the `processes` / `sessions` parameter, summed across instances | `COUNT` |
+| `REDO_GB_DAY` | `SUM('redo size' deltas)/2³⁰` for the day | NULL — no ceiling | `GIB_PER_DAY` |
+| `DB_SIZE_GB` | `SUM(used_bytes)/2³⁰` over `CAPD_TBSPC_DAILY` | `SUM(limit_bytes)/2³⁰` | `GIB` |
+
+- `MAX_UTILIZATION` is a **high-water mark since instance startup**, so within
+  one startup epoch it is monotone and the daily MAX is the end-of-day HWM —
+  exactly the number a DBA compares against `processes`. A restart resets it,
+  which reads as a level shift (degrading R², not lying).
+- RAC: limits are per instance, so both the utilization and the ceiling are
+  summed. If **any** instance's limit is non-numeric (`UNLIMITED`) the day's
+  `limit_value` is NULL rather than an understated sum.
+- `REDO_GB_DAY` uses the identical diff-and-restart-guard as `CAPD_CPU_DAILY`
+  (LAG per `(dbid, con_dbid, instance)` by `snap_id`; drop the first snap of a
+  partition, negative deltas, and restart-spanning intervals). The delta is
+  attributed to the day the interval **ends** on.
+- `DB_SIZE_GB` inherits everything `CAPD_TBSPC_DAILY` already decided: **UNDO
+  and TEMPORARY are excluded**, and M9.5 overrides / exclusions are applied. So
+  "total DB size" means permanent-tablespace bytes actually used.
+
+`CAPF_SERIES_FORECAST` — `ddl/35_series_forecast.sql`, the same REGR fit, the
+same M9.1 prediction bands (`t ≈ 1.96 + 2.4/df`) and the same quality ladder as
+`CAPF_CPU_TREND`, but aimed at a per-series ceiling instead of a global percent:
+
+```
+sat_value     = limit_value · series_sat_pct/100        (knob, default 90)
+days_to_limit = FLOOR((sat_value − cur_val) / slope)    NULL if no limit or slope <= 0
+```
+
+`days_to_limit_lo/_hi` bound it with the 95% CI on the slope (lo = worst case);
+`pct_of_limit` is the how-close-now number, independent of the fit. The
+arithmetic is **copied**, not shared, on purpose: `CAPF_TBSPC_FORECAST` and
+`CAPF_CPU_TREND` grow robust slopes and change-point resets on their own
+schedule, while this view stays a plain, hand-auditable OLS fit.
+
+Two alert kinds and one report view ride on it: `SERIES_LIMIT` (quality `OK`,
+`days_to_limit <= dtf_warn`), `SERIES_NEARLIMIT` (`pct_of_limit >=
+nearfull_warn_pct` now, at **any** quality — the M7.1 rule again) and
+`CAPR_SERIES` (report section 7).
 
 ## Layer 4 — anomalies (`CAPA_*`)
 
@@ -169,7 +298,36 @@ current day** so a spike can't inflate its own baseline.
   (`day − 7·level`, generated with `CONNECT BY`), so weekly seasonality is
   handled deterministically. The MAD floor is `cpu_min_mad_pct` (3 points),
   which plays the flat-baseline-guard role that `abs_floor_bytes` plays for
-  bytes.
+  bytes. **M10.5**: a day carrying `gap_flag = 'Y'` is neither scored nor used
+  as a baseline observation — an AWR outage is an instrumentation event, not a
+  CPU event, and a 36 h average has no business dragging a same-weekday median
+  around. `gap_flag` and `day_gap` ride through so the report can say *why* a
+  visibly odd day is unflagged.
+- **`CAPA_CPU_SHIFT` (M10.3)** — the failure mode the two views above are
+  structurally blind to: a **sustained step**. A new release adds +18 points
+  and stays there; every individual day sits inside `k·MAD` of its own weekday
+  baseline, so nothing ever flags, and the trend fit is too noisy (low `R²`) to
+  say anything either — yet the machine now runs materially hotter than it did
+  a month ago. So this view compares **windows, not days**, per
+  `(dbid, con_dbid, metric ∈ {BUSY_PCT, BUSY_P95, DB_CPU_PCT})`:
+  `recent_med` over the last `shift_days` (7) against `base_med` over the
+  `shift_baseline_days` (28) immediately before it, with
+  `shift_pct = recent_med − base_med` in percentage **points**. `UP` requires
+  all four of: `shift_pct > shift_min_pct` (15); a full recent window
+  (`n_recent ≥ shift_days` — gap days are excluded from the source, so a window
+  with a gap in it cannot flag); enough baseline (`n_base ≥ shift_days`); and
+  the **N-of-M confirmation** `n_above ≥ shift_days`, i.e. *every* day of the
+  recent window sits above `base_med + max(base_mad_sigma, cpu_min_mad_pct)`.
+  That last clause is what separates a genuine step from one loud day dragging
+  a 7-day median: a single spike moves the median but cannot put all seven days
+  over the line. `DOWN` is the mirror image (workload left, a container was
+  moved off) and alerts as INFO, not WARN. One row per series — the **current
+  state**, not a per-day series — so a poller reads it unconditionally, and
+  every input (`recent_med`, `base_med`, `base_mad_sigma`, `n_recent`,
+  `n_base`, `n_above`, `n_below`, both thresholds) is exposed so a flag is
+  re-derivable by hand. `BUSY_PEAK` is deliberately not covered: it is already
+  a same-window average of `BUSY_PCT`'s busiest hours, so it shifts with them
+  and would only duplicate the alert.
 
 Self-join cost is O(days·window) at daily grain — fine for ≤ ~400 days, and it
 keeps every flag hand-recomputable.
@@ -180,10 +338,16 @@ keeps every flag hand-recomputable.
 no partitioned ESM) via `DBMS_DATA_MINING.CREATE_MODEL2(mining_function =>
 'TIME_SERIES')`, registered in `CAP_ML_MODEL`.
 
-- Tablespaces use `EXSM_HOLT` (additive trend, no seasonality); CPU series use
-  `EXSM_ADDWINTERS` with weekly seasonality (7). `data_query` is built as
-  literal-embedded per-series text (it can't bind); series keys are Oracle
+- CPU series use `EXSM_ADDWINTERS` with weekly seasonality (7). Tablespaces
+  **choose** between `EXSM_HOLT` (additive trend, no seasonality) and the same
+  `EXSM_ADDWINTERS(7)` — see "Model-type selection" below. `data_query` is built
+  as literal-embedded per-series text (it can't bind); series keys are Oracle
   identifiers so quote-doubling is injection-safe.
+- **Quality gate (M10.4)**: only series whose Tier 1 fit is `OK` or
+  `LOW_CONFIDENCE` are trainable — `FLAT` and `INSUFFICIENT_HISTORY` series have
+  no trend for ESM to learn, and letting them into the top-N would burn model
+  builds on noise. Tablespaces are gated on `CAPF_TBSPC_FORECAST.quality`, the
+  two CPU series on `CAPF_CPU_TREND.quality`.
 - **Horizon cap**: Oracle 19c rejects `EXSM_PREDICTION_STEP` above a HARD 30 at
   any series length (verified 30 valid / 31 invalid at 121, 300 and 600 rows;
   `ORA-40206`). `build_model` caps at `LEAST(30, cfg_step, FLOOR(rows/4))`, so no
@@ -209,8 +373,28 @@ no partitioned ESM) via `DBMS_DATA_MINING.CREATE_MODEL2(mining_function =>
   with zero models trained) — as `mape_pct` / `bias_pct` per series per
   engine, surfaced as report section 6c ("which engine was right"). ESM may
   cover fewer than holdout_days days (30-step cap + the rows/4 floor);
-  `n_days` records actual coverage. This feeds ESM model-type selection
-  (M10.4).
+  `n_days` records actual coverage.
+- **Model-type selection (M10.4)**: with `esm_tbspc_model = 2` (AUTO) and
+  `esm_select_by_backtest = 1` — both defaults — `train_tablespaces` first
+  builds **two** backtest twins per tablespace series, one per candidate
+  (`EXSM_HOLT` and `EXSM_ADDWINTERS(7)`), then trains the production model with
+  whichever scored the lower holdout MAPE in the new `CAPF_ESM_CANDIDATE` view
+  (one row per *(series, model_type)*). Ties, and "no evidence" (a candidate
+  that failed to train), go to `EXSM_HOLT` — the historical default and the
+  cheaper model. The decision and its evidence are written back onto the
+  production row: `CAP_ML_MODEL.model_type` / `chosen_by` (`AUTO_BACKTEST` |
+  `CONFIG` | `DEFAULT`) / `mape_holt` / `mape_addw`, which is what lets report
+  section 6c print *"ADDW H=2.90 W=1.20"* instead of an unexplained pick.
+  `esm_tbspc_model = 0 | 1` pins a type and skips the twins entirely;
+  `esm_select_by_backtest = 0` makes AUTO fall back to `EXSM_HOLT`.
+  The twins' names hash *(dbid | con_dbid | series_key | model_type)* so the two
+  candidates cannot collide, and `train_backtest` purges any twin of a series
+  that is no longer in the candidate set (which is how a pre-M10.4 twin, hashed
+  without the model type, gets cleaned up).
+  `CAPF_BACKTEST` keeps its one-row-per-*(series, engine)* shape: its ESM row is
+  the **selected** candidate (matched on the production model's `model_type`,
+  else the lowest MAPE, else Holt) and the new `model_type` column names it.
+  Per-candidate detail stays in `CAPF_ESM_CANDIDATE`.
 
 ### Retraining (shipped commented-out for v1 minimalism)
 
@@ -238,7 +422,8 @@ M8.2, for the bundled reports themselves:
   drifting.
 - `CAPR_ALERTS` is the pollable alert surface: one row per current issue with
   `severity` (CRIT/WARN/INFO + numeric `sev_rank`), `kind` (`TBSPC_FULL`,
-  `TBSPC_NEARFULL`, `TBSPC_ANOM`, `CPU_SAT`, `DBCPU_SAT`, `CPU_ANOM`), keys, `value` vs
+  `TBSPC_NEARFULL`, `TBSPC_ANOM`, `CPU_SAT`, `DBCPU_SAT`, `CPU_ANOM`,
+  `CPU_SHIFT`), keys, `value` vs
   `threshold` (+ `unit`), and a ready-to-page `message`. The forecast kinds
   gate on `quality = 'OK'`; `TBSPC_NEARFULL` deliberately does **not** (M7.1:
   a 97%-full tablespace with an unfittable series must still surface — that's
@@ -258,7 +443,8 @@ the two drivers, and they cannot drift.
 | `CAPR_TBSPC_FORECAST` | 2 | GiB projections + the +180 band, `train_n`, `r2`, `quality`, the Tier 2 `esm30`/`esm30_lo`/`esm30_hi` point, raw byte columns and `rank_chart` for the HTML chart grid, plus the M7.4 bound `is_reportable` / `rank_report` |
 | `CAPR_TBSPC_ANOMALIES` | 3 | flagged rows only, MiB conversions, `day_str`, and `days_ago` = `MAX(day_dt)` over `CAPD_TBSPC_DAILY` minus the row's day, so the report window is `WHERE days_ago < anomaly_days` |
 | `CAPR_CPU_TREND` | 4 | per (container, metric) trend with `sat_worst`/`sat_best` |
-| `CAPR_CPU_ANOMALIES` | 5 | same contract as the tablespace anomaly view |
+| `CAPR_CPU_ANOMALIES` | 5a | same contract as the tablespace anomaly view |
+| `CAPR_CPU_SHIFTS` | 5b | the M10.3 level shifts: flagged rows only, both medians, both window lengths and the N-of-M counts, ranked by `|shift_pct|` via `rank_shift` |
 | `CAPR_ESM_COMPARE` | 6a/6b | REGR vs ESM pivoted per (container, series, horizon), in raw units *and* GiB; filter on `series_kind`. Inherits `is_reportable` / `rank_report` from `CAPR_TBSPC_FORECAST` (CPU rows: always `'Y'`, rank 0) so 6a shows exactly section 2's tablespaces |
 | `CAPR_BACKTEST` | 6c | the M9.4 holdout scorecard pivoted per series, incl. the `better` verdict |
 

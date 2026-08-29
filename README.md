@@ -15,6 +15,9 @@ What it answers:
 - **Anomalies** — deterministic median + MAD flags that are reproducible by
   hand: every flag exposes value, baseline median, MAD-sigma, the k·sigma
   threshold, and a robust z-score.
+- **Fixed-ceiling series** — peak `processes` / `sessions` against the init
+  parameters, redo GiB/day (FRA / archive sizing), and total DB size against
+  the summed tablespace ceilings, each with the same days-to-limit machinery.
 - **Which engine to trust** — `CAPF_BACKTEST` replays the recent past
   (holdout) and scores each forecasting engine's MAPE/bias against what
   actually happened.
@@ -32,7 +35,8 @@ Two forecasting engines run side by side:
 CAPV_*  seam        DBA_HIST-shaped views  (local | warehouse | fixture source)
   |                 incl. CAPV_CONTAINER: (dbid, con_dbid) -> DB / PDB names
 CAPD_*  daily       one clean row per (series, day): blocks->bytes, counter
-  |                 deltas with restart guards
+  |                 deltas with restart guards; CAPD_SERIES_DAILY (M11) adds
+  |                 the fixed-ceiling series keyed by a `series` name
 CAPF_*  forecast    Tier 1 REGR fits (+ CAPF_ESM_FORECAST / CAPF_COMPARE for Tier 2)
 CAPA_*  anomaly     rolling median + MAD (tablespace: trailing window;
   |                 CPU: same-weekday seasonal baseline)
@@ -40,7 +44,7 @@ CAPR_*  integration CAPR_CONTAINER (display labels) + CAPR_ALERTS (one row per
   |                 current issue -- pollable by OEM / Zabbix / Nagios)
   |                 + one view per report section (M8.2), so the text and
   |                 HTML drivers only FORMAT and cannot drift
-report/             read-only SQL*Plus text report (7 sections) + HTML twin
+report/             read-only SQL*Plus text report (8 sections) + HTML twin
 ```
 
 Only **three** tables are persisted: `CAP_CONFIG` (tuning knobs, MERGE-seeded),
@@ -176,17 +180,32 @@ UPDATE cap_config SET cfg_value = 0.70 WHERE cfg_name = 'r2_gate';
 
 Key knobs: `train_days` (90), `recent_days` (28), `min_train_days` (14),
 `r2_gate` (0.60), `mad_k` (3), `mad_window_days` (28), `cpu_sat_pct` (80),
-`abs_floor_bytes` (100 MiB), `dow_weeks` (8), `dtf_warn`/`dtf_crit` (90/30),
+`abs_floor_bytes` (100 MiB), `dow_weeks` (8), `cpu_gap_hours` (12: a snapshot
+interval longer than this is an AWR gap -- its day is flagged, kept out of the
+CPU baselines, and left out of `busy_p95`/`busy_max`), `shift_days` (7),
+`shift_baseline_days` (28) and `shift_min_pct` (15) for level-shift detection,
+`dtf_warn`/`dtf_crit` (90/30),
 `nearfull_warn_pct`/`nearfull_crit_pct` (90/97), `anomaly_report_days` (14,
 the `CAPR_ALERTS` anomaly window -- distinct from the report's own
 `anomaly_days` presentation knob, which bounds sections 3 and 5),
-`backtest_holdout_days` (28), `report_min_gb` (1: sections 2 and 6a print a
-tablespace only if it is growing, near-full, or at least this many GiB),
+`backtest_holdout_days` (28), `esm_tbspc_model` (2 = AUTO: train both
+`EXSM_HOLT` and `EXSM_ADDWINTERS(7)` as holdout twins per tablespace and keep
+whichever had the lower backtest MAPE -- 0 pins `EXSM_HOLT`, 1 pins
+`EXSM_ADDWINTERS(7)`) and `esm_select_by_backtest` (1: set to 0 to skip the two
+extra trainings and let AUTO fall back to `EXSM_HOLT`), `report_min_gb` (1:
+sections 2 and 6a print a tablespace only if it is growing, near-full, or at
+least this many GiB),
 `accel_slope_floor_bpd` (1 MiB/day: below this `|slope|`, `accel_ratio` is NULL
-instead of a meaningless ratio off a flat series),
+instead of a meaningless ratio off a flat series), `slope_method` (0 = OLS,
+the default; 1 = Theil–Sen, the median of the pairwise slopes — robust to a
+one-off step such as a bulk load), `reset_on_shrink` (1: restart a tablespace's
+training window after the most recent big *shrink*, so a post-purge series is
+not fit across the cliff) and its `shrink_mad_k` (6) threshold,
 `peak_hour_from`/`peak_hour_to` (8/18, the busy-hour window for `BUSY_PEAK` /
 `DB_CPU_PEAK`), `cpu_sat_on_p95` (1: `CPU_SAT` alerts follow the p95 busy-hour
-trend rather than the daily average).
+trend rather than the daily average) and `series_sat_pct` (90: the percent of a
+fixed-ceiling series' limit — `processes`, `sessions`, total DB size — treated
+as saturated, since hitting `processes` exactly is an outage).
 Run `SELECT * FROM cap_config ORDER BY cfg_name;` for the full annotated list.
 
 ### Limit overrides / exclusions
@@ -223,7 +242,8 @@ survive `@install.sql` and are removed only by `@uninstall.sql`.
 
 `CAPR_ALERTS` is the machine-readable surface: one row per current issue —
 `severity` (CRIT/WARN/INFO), `kind` (`TBSPC_FULL`, `TBSPC_NEARFULL`,
-`TBSPC_ANOM`, `CPU_SAT`, `DBCPU_SAT`, `CPU_ANOM`), the `(dbid, con_dbid)` keys plus a
+`TBSPC_ANOM`, `CPU_SAT`, `DBCPU_SAT`, `CPU_ANOM`, `CPU_SHIFT`,
+`SERIES_LIMIT`, `SERIES_NEARLIMIT`), the `(dbid, con_dbid)` keys plus a
 resolved `db_pdb` label, the metric `value` vs its `threshold`, and a
 ready-to-page `message`. Poll it from an OEM metric extension, Zabbix, Nagios,
 or a scheduler job:

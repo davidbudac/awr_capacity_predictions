@@ -936,6 +936,7 @@ BEGIN
   p('<a href="#s4">4. CPU trend</a>');
   p('<a href="#s5">5. CPU anomalies</a>');
   p('<a href="#s6">6. ESM vs REGR</a>');
+  p('<a href="#s7">7. Fixed-ceiling series</a>');
   p('</nav>');
   p('<div class="wrap">');
 
@@ -2315,6 +2316,52 @@ BEGIN
   ELSE
     p('<div class="empty-note">No anomalies flagged in the selected window.</div>');
   END IF;
+
+  -- 5b: level shifts (M10.3). A different question from 5a -- not "was one
+  -- day odd?" but "does this machine run at a different level than it did a
+  -- month ago?", which no single-day test can answer.
+  p('<h3 style="font-size:13px;margin:16px 0 6px">Level shifts '
+      || info_icon('a sustained step in the level a series runs at -- the thing a single-day outlier test structurally cannot see')
+      || '</h3>');
+  p('<p class="desc">A sustained step, not a one-day spike: the median of the '
+      || 'recent window against the median of the baseline window before it. '
+      || 'Flagged only when the gap exceeds the threshold in percentage points '
+      || 'AND every day of the recent window stays on the same side of the '
+      || 'baseline median plus its MAD sigma.</p>');
+  any_rows := FALSE;
+  FOR r IN (
+    SELECT db_pdb, metric, recent_days, base_days, recent_med, base_med,
+           shift_pct, threshold_pct, n_above, n_below, n_recent, shift_flag, sev
+    FROM   capr_cpu_shifts
+    ORDER  BY rank_shift
+  ) LOOP
+    IF NOT any_rows THEN
+      p('<table class="tbl"><thead><tr>'
+        || '<th>DB/PDB</th><th>METRIC</th><th>WINDOWS</th>'
+        || '<th class="num">RECENT%' || info_icon('median over the recent window')
+        || '</th><th class="num">BASE%' || info_icon('median over the baseline window just before it')
+        || '</th><th class="num">SHIFT_PTS' || info_icon('recent median minus baseline median, in percentage points')
+        || '</th><th class="num">THRESH</th>'
+        || '<th class="num">N_OF_M' || info_icon('how many days of the recent window are past the baseline median plus its MAD sigma -- all of them, for a flag')
+        || '</th><th>FLAG</th></tr></thead><tbody>');
+      any_rows := TRUE;
+    END IF;
+    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.metric) || '</td>'
+      || '<td>' || TO_CHAR(r.recent_days, 'FM990') || ' vs ' || TO_CHAR(r.base_days, 'FM990') || ' d</td>'
+      || '<td class="num">' || nz(r.recent_med, 'FM9990.0') || '</td>'
+      || '<td class="num">' || nz(r.base_med, 'FM9990.0') || '</td>'
+      || '<td class="num">' || nz(r.shift_pct, 'FMS9990.0') || '</td>'
+      || '<td class="num">' || nz(r.threshold_pct, 'FM9990.0') || '</td>'
+      || '<td class="num">' || TO_CHAR(GREATEST(r.n_above, r.n_below), 'FM990')
+         || '/' || TO_CHAR(r.n_recent, 'FM990') || '</td>'
+      || '<td class="' || (CASE WHEN r.sev = 'WARN' THEN 'sev-warn' ELSE 'sev-ok' END)
+         || '">' || esc(r.shift_flag) || '</td></tr>');
+  END LOOP;
+  IF any_rows THEN
+    p('</tbody></table>');
+  ELSE
+    p('<div class="empty-note">No sustained level shifts detected.</div>');
+  END IF;
   p('</section>');
 
   ----------------------------------------------------------------------
@@ -2335,7 +2382,9 @@ BEGIN
     p('<p class="desc">A second opinion on the short-term forecast from a machine-learning model. '
         || esm_ok || ' OML ESM model(s) trained (OK). If 0: run '
         || '<code>EXEC cap_forecast_ml.train_all</code>. ESM reaches +30 only (19c hard horizon '
-        || 'cap) and only for fresh models; +90/180/365 are REGR-only.</p>');
+        || 'cap) and only for fresh models; +90/180/365 are REGR-only. ESM_MODEL names the '
+        || 'variant behind each ESM column: HOLT = EXSM_HOLT, ADDW = EXSM_ADDWINTERS with a '
+        || '7-day season.</p>');
 
     -- 6a carries the SAME M7.4 bound as section 2 (inherited by
     -- CAPR_ESM_COMPARE from CAPR_TBSPC_FORECAST), so both sections list the
@@ -2349,7 +2398,8 @@ BEGIN
              regr_gb   AS regr,
              esm_gb    AS esm,
              esm_lo_gb AS esm_lo,
-             esm_hi_gb AS esm_hi
+             esm_hi_gb AS esm_hi,
+             esm_model
       FROM   capr_esm_compare
       WHERE  series_kind = 'TBSPC'
         AND  is_reportable = 'Y'
@@ -2359,7 +2409,8 @@ BEGIN
       IF NOT any_rows THEN
         p('<table class="tbl"><thead><tr>'
           || '<th>DB/PDB</th><th>TABLESPACE</th><th class="num">HORIZON</th><th class="num">REGR_GIB</th>'
-          || '<th class="num">ESM_GIB</th><th class="num">ESM_LO</th><th class="num">ESM_HI</th></tr></thead><tbody>');
+          || '<th class="num">ESM_GIB</th><th class="num">ESM_LO</th><th class="num">ESM_HI</th>'
+          || '<th>ESM_MODEL</th></tr></thead><tbody>');
         any_rows := TRUE;
       END IF;
       p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.series_key) || '</td>'
@@ -2367,7 +2418,8 @@ BEGIN
         || '<td class="num">' || nz(r.regr) || '</td>'
         || '<td class="num">' || nz(r.esm) || '</td>'
         || '<td class="num">' || nz(r.esm_lo) || '</td>'
-        || '<td class="num">' || nz(r.esm_hi) || '</td></tr>');
+        || '<td class="num">' || nz(r.esm_hi) || '</td>'
+        || '<td>' || NVL(esc(r.esm_model), '&ndash;') || '</td></tr>');
     END LOOP;
     IF any_rows THEN
       p('</tbody></table>');
@@ -2378,7 +2430,8 @@ BEGIN
     p('<h3 style="font-size:13px;margin:16px 0 6px">6b. CPU (busy% / DB CPU sec)</h3>');
     any_rows := FALSE;
     FOR r IN (
-      SELECT db_pdb, series_key, horizon_days AS h, regr, esm, esm_lo, esm_hi
+      SELECT db_pdb, series_key, horizon_days AS h, regr, esm, esm_lo, esm_hi,
+             esm_model
       FROM   capr_esm_compare
       WHERE  series_kind = 'CPU'
       ORDER  BY con_dbid, series_key, horizon_days
@@ -2386,7 +2439,8 @@ BEGIN
       IF NOT any_rows THEN
         p('<table class="tbl"><thead><tr>'
           || '<th>DB/PDB</th><th>METRIC</th><th class="num">HORIZON</th><th class="num">REGR</th>'
-          || '<th class="num">ESM</th><th class="num">ESM_LO</th><th class="num">ESM_HI</th></tr></thead><tbody>');
+          || '<th class="num">ESM</th><th class="num">ESM_LO</th><th class="num">ESM_HI</th>'
+          || '<th>ESM_MODEL</th></tr></thead><tbody>');
         any_rows := TRUE;
       END IF;
       p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.series_key) || '</td>'
@@ -2394,7 +2448,8 @@ BEGIN
         || '<td class="num">' || nz(r.regr, 'FM99999990.00') || '</td>'
         || '<td class="num">' || nz(r.esm, 'FM99999990.00') || '</td>'
         || '<td class="num">' || nz(r.esm_lo, 'FM99999990.00') || '</td>'
-        || '<td class="num">' || nz(r.esm_hi, 'FM99999990.00') || '</td></tr>');
+        || '<td class="num">' || nz(r.esm_hi, 'FM99999990.00') || '</td>'
+        || '<td>' || NVL(esc(r.esm_model), '&ndash;') || '</td></tr>');
     END LOOP;
     IF any_rows THEN
       p('</tbody></table>');
@@ -2412,7 +2467,7 @@ BEGIN
     any_rows := FALSE;
     FOR r IN (
       SELECT db_pdb, series_kind, series_key, cutoff_day,
-             regr_mape, regr_bias, esm_mape, esm_bias, better
+             regr_mape, regr_bias, esm_mape, esm_bias, better, esm_pick
       FROM   capr_backtest
       ORDER  BY con_dbid, series_kind, series_key
     ) LOOP
@@ -2421,7 +2476,12 @@ BEGIN
           || '<th>DB/PDB</th><th>KIND</th><th>SERIES</th><th>CUTOFF</th>'
           || '<th class="num">REGR_MAPE%</th><th class="num">REGR_BIAS%</th>'
           || '<th class="num">ESM_MAPE%</th><th class="num">ESM_BIAS%</th>'
-          || '<th>BETTER</th></tr></thead><tbody>');
+          || '<th>BETTER</th><th>ESM_PICK '
+          || info_icon('which ESM variant this series was trained with and why: '
+                    || 'H = the EXSM_HOLT candidate''s holdout MAPE, W = the '
+                    || 'EXSM_ADDWINTERS(7) candidate''s. AUTO keeps the lower one '
+                    || '(knobs esm_tbspc_model / esm_select_by_backtest)')
+          || '</th></tr></thead><tbody>');
         any_rows := TRUE;
       END IF;
       p('<tr><td>' || esc(r.db_pdb) || '</td>'
@@ -2433,7 +2493,8 @@ BEGIN
         || '<td class="num">' || nz(r.esm_bias, 'FMS99990.00') || '</td>'
         || '<td>' || CASE WHEN r.better IS NULL THEN '&ndash;'
                           ELSE '<span class="pill pill-ok">' || r.better || '</span>' END
-        || '</td></tr>');
+        || '</td>'
+        || '<td>' || NVL(esc(r.esm_pick), '&ndash;') || '</td></tr>');
     END LOOP;
     IF any_rows THEN
       p('</tbody></table>');
@@ -2441,6 +2502,61 @@ BEGIN
       p('<div class="empty-note">No backtest rows yet (needs enough history before the holdout window; '
         || 'ESM rows appear after <code>EXEC cap_forecast_ml.train_backtest</code>).</div>');
     END IF;
+  END IF;
+  p('</section>');
+
+  ----------------------------------------------------------------------
+  -- Section 7: fixed-ceiling series (M11) -- processes / sessions / redo /
+  -- total DB size. Deliberately minimal: one table straight off CAPR_SERIES,
+  -- the same view report/sections/07_series.sql reads.
+  ----------------------------------------------------------------------
+  p('<section id="s7">');
+  p('<h2>7. Fixed-ceiling series '
+      || info_icon('peak processes and sessions against the init parameters, redo written per day, and total database size against the summed tablespace ceilings')
+      || '</h2>');
+  p('<p class="desc">Series with a hard ceiling that is not a tablespace. '
+      || 'PROCESSES / SESSIONS are the AWR peak-concurrency high-water marks against the '
+      || 'init parameter (summed over RAC instances); DB_SIZE_GB is total permanent-tablespace '
+      || 'usage against the sum of the same tablespaces&#39; ceilings; REDO_GB_DAY has no ceiling '
+      || 'and is a sizing trend for the FRA / archive destination. DAYS_LIM is the projected '
+      || 'days until the series reaches SAT, and WORST/BEST bound it with the 95% CI on the slope.</p>');
+
+  any_rows := FALSE;
+  FOR r IN (
+    SELECT db_pdb, series, unit, cur_val, cur_limit, sat_value, pct_of_limit,
+           slope_per_day, r2, days_to_limit, limit_worst, limit_best, sev, quality
+    FROM   capr_series
+    ORDER  BY rank_series
+  ) LOOP
+    IF NOT any_rows THEN
+      p('<table class="tbl"><thead><tr>'
+        || '<th>DB/PDB</th><th>SERIES</th><th>UNIT</th><th class="num">CURRENT</th>'
+        || '<th class="num">LIMIT</th><th class="num">SAT'
+        || info_icon('the fraction of the limit treated as saturated -- the level DAYS_LIM counts down to')
+        || '</th><th class="num">PCT_LIM</th><th class="num">SLOPE/DAY</th><th class="num">R2</th>'
+        || '<th class="num">DAYS_LIM</th><th class="num">WORST</th><th class="num">BEST</th>'
+        || '<th>SEV</th><th>QUALITY</th></tr></thead><tbody>');
+      any_rows := TRUE;
+    END IF;
+    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.series) || '</td>'
+      || '<td>' || esc(r.unit) || '</td>'
+      || '<td class="num">' || nz(r.cur_val) || '</td>'
+      || '<td class="num">' || nz(r.cur_limit) || '</td>'
+      || '<td class="num">' || nz(r.sat_value) || '</td>'
+      || '<td class="num">' || nz(r.pct_of_limit, 'FM9990.0') || '</td>'
+      || '<td class="num">' || nz(r.slope_per_day, 'FM999999990.0000') || '</td>'
+      || '<td class="num">' || nz(r.r2, 'FM90.999') || '</td>'
+      || '<td class="num">' || nz(r.days_to_limit, 'FM99999990') || '</td>'
+      || '<td class="num">' || nz(r.limit_worst, 'FM99999990') || '</td>'
+      || '<td class="num">' || nz(r.limit_best, 'FM99999990') || '</td>'
+      || '<td>' || sev_pill(r.sev) || '</td>'
+      || '<td>' || quality_pill(r.quality) || '</td></tr>');
+  END LOOP;
+  IF any_rows THEN
+    p('</tbody></table>');
+  ELSE
+    p('<div class="empty-note">No fixed-ceiling series yet (needs DBA_HIST_RESOURCE_LIMIT / '
+      || 'DBA_HIST_SYSSTAT history, or tablespace history for DB_SIZE_GB).</div>');
   END IF;
   p('</section>');
 

@@ -24,13 +24,32 @@
 --                  becomes OVERRIDE_DTF, limit_source 'OVERRIDE' (M9.5).
 --   FIX_EXCLUDED : 99% full and would shout, but exclude_flag='Y' (matched via
 --                  the dbid/con_dbid = 0 wildcard) removes it everywhere (M9.5).
+--   FIX_PURGE    : 10 MiB/day, a -600 MiB purge at day 90, then 10 MiB/day
+--                  again -- the M9.3 change-point reset (fit must restart at
+--                  the cliff and read 10 MiB/day, not the across-the-cliff
+--                  slope).
 --   CPU          : two snapshots per day (06:00 = the overnight interval,
 --                  18:00 = the daytime/peak interval). Weekday 20% night /
 --                  60% day (daily avg 40%), weekend 10% / 30% (avg 20%), one
 --                  +30pt Tuesday (70%/70%), one restart at day 60 (startup_time
 --                  change + counter reset, morning snapshot missing so the
---                  whole day drops). Exercises M10.1 (p95/max/peak-window)
---                  and M10.2 (DB CPU % of cores) closed forms.
+--                  whole day drops), and one PURE AWR GAP (a Sunday in 70..80
+--                  whose two snapshots carry no osstat/time-model rows, so the
+--                  next 06:00 interval spans 36 h). Exercises M10.1
+--                  (p95/max/peak-window), M10.2 (DB CPU % of cores) and M10.5
+--                  (gap_flag / max_interval_hours / day_gap) closed forms.
+--   PDB CPU      : a SECOND container (FIXPDB1, con_dbid 42424243) with
+--                  time-model rows ONLY -- a 7-day 34..46% DB CPU sawtooth
+--                  that steps +18 points for the last 7 days. The M10.3
+--                  level-shift fixture.
+--   SERIES (M11) : SESSIONS max_utilization = 200 + 2*i against a limit of 500
+--                  -> exactly 2/day growth, days_to_limit (90% of 500) = 5, a
+--                  SERIES_LIMIT CRIT. PROCESSES constant 150 of 300 -> FLAT,
+--                  no alert. 'redo size' cumulative counter +1 GiB per 12 h
+--                  interval, reset at the same restart as the CPU counters ->
+--                  REDO_GB_DAY = 2.0 GiB/day, no ceiling, no alert. A second
+--                  ('user commits') stat name is present purely so the
+--                  downstream 'redo size' filter is exercised.
 --   CONTAINER    : FIXCDB root row + one synthetic FIXPDB1 row (M7.2 labels).
 --
 -- Run this BEFORE @install.sql with seam_mode=fixture (the seam views need the
@@ -45,7 +64,8 @@ DECLARE
     TYPE nl IS TABLE OF VARCHAR2(30);
     v nl := nl('CAP_FIXTURE_SNAPSHOT','CAP_FIXTURE_TBSPC_USAGE','CAP_FIXTURE_TABLESPACE',
               'CAP_FIXTURE_DATAFILE','CAP_FIXTURE_OSSTAT','CAP_FIXTURE_TIME_MODEL',
-              'CAP_FIXTURE_CONTAINER','CAP_FIXTURE_META');
+              'CAP_FIXTURE_CONTAINER','CAP_FIXTURE_META',
+              'CAP_FIXTURE_RESOURCE_LIMIT','CAP_FIXTURE_SYSSTAT');
 BEGIN
     FOR i IN 1 .. v.COUNT LOOP
         BEGIN EXECUTE IMMEDIATE 'DROP TABLE ' || v(i) || ' PURGE';
@@ -75,6 +95,15 @@ CREATE TABLE cap_fixture_container (
     dbid NUMBER, con_dbid NUMBER, db_name VARCHAR2(128), con_name VARCHAR2(128));
 CREATE TABLE cap_fixture_meta (
     mkey VARCHAR2(30) PRIMARY KEY, dval DATE, nval NUMBER, sval VARCHAR2(100));
+-- M11 sources. limit_value is a NUMBER here (the local seam's
+-- 'UNLIMITED'-to-NULL conversion happens in the seam, not in the contract).
+CREATE TABLE cap_fixture_resource_limit (
+    dbid NUMBER, con_dbid NUMBER, instance_number NUMBER, snap_id NUMBER,
+    resource_name VARCHAR2(30), current_utilization NUMBER,
+    max_utilization NUMBER, limit_value NUMBER);
+CREATE TABLE cap_fixture_sysstat (
+    dbid NUMBER, con_dbid NUMBER, instance_number NUMBER, snap_id NUMBER,
+    stat_name VARCHAR2(64), value NUMBER);
 
 DECLARE
     c_dbid   CONSTANT NUMBER := 42424242;
@@ -84,6 +113,11 @@ DECLARE
     c_bs     CONSTANT NUMBER := 8192;
     c_restart CONSTANT PLS_INTEGER := 60;
     c_spike  CONSTANT PLS_INTEGER := 110;
+    -- M9.3: FIX_PURGE's cliff. Day 90 of 120 leaves 31 post-purge days --
+    -- comfortably above min_train_days (14), and 30 days back from the last
+    -- day, i.e. OUTSIDE the 14-day anomaly_report_days alert window.
+    c_purge  CONSTANT PLS_INTEGER := 90;
+    c_purgeb CONSTANT NUMBER      := 76800;       -- 600 MiB in 8 KiB blocks
     c_tot_cs CONSTANT NUMBER := 4 * 86400 * 100;  -- 34,560,000 cs/day (4 CPUs)
     -- 50 GiB as a literal NUMBER: 50*1024*1024*1024 as integer-literal
     -- arithmetic overflows PLS_INTEGER (>2^31) before the NUMBER assignment.
@@ -101,6 +135,26 @@ DECLARE
     v_bg     NUMBER := 0;
     v_inj    PLS_INTEGER;
     v_probe  PLS_INTEGER;
+    -- M10.5: the pure-AWR-gap day. Both of its snapshots keep existing but
+    -- carry NO osstat / time-model rows, so the next interval (06:00 of the
+    -- following day) differences against 18:00 of the PRECEDING day and spans
+    -- 36 h. Chosen at runtime as the latest SUNDAY in 70..80 so that
+    --   * neither it nor the day after is a Tuesday -- the injected Tuesday's
+    --     same-weekday baseline count is therefore untouched,
+    --   * the affected day (a Monday, normally 40% busy) reads 30%, i.e. 10
+    --     points off its baseline against a 9-point threshold: it WOULD flag
+    --     LOW if the gap guard were not there,
+    --   * it is far from the restart day (60), the probe day (>=115) and the
+    --     M10.3 shift windows (86..120).
+    v_cpugap PLS_INTEGER;
+    -- M10.3: the second container (FIXPDB1, con_dbid c_con + 1) and its
+    -- DB CPU level-shift series. See the block comment at the CPU counters.
+    c_pdb    CONSTANT NUMBER      := 42424243;    -- = c_con + 1
+    c_shift  CONSTANT PLS_INTEGER := 114;         -- first shifted day index
+    c_shpts  CONSTANT NUMBER      := 18;          -- shift size, percentage points
+    v_pcpu   NUMBER := 0;
+    v_ptime  NUMBER := 0;
+    v_pbg    NUMBER := 0;
 
     FUNCTION dow(p_i PLS_INTEGER) RETURN PLS_INTEGER IS       -- 0=Mon .. 6=Sun
     BEGIN RETURN MOD(TRUNC(v_base + p_i) - DATE '2020-01-06', 7); END;
@@ -121,6 +175,28 @@ DECLARE
         ELSE RETURN 0.60; END IF;
     END;
 
+    -- M10.3: the FIXPDB1 container's DB CPU level, in percent of the host's
+    -- 4 cores, for day index p_i. A 7-day sawtooth 34,36,38,40,42,44,46 keyed
+    -- off MOD(i,7): ANY 7 consecutive days contain each offset exactly once,
+    -- so a 7-day median is exactly 40 and a 28-day (4 x 7) median is too --
+    -- the medians are closed forms, not approximations. The sawtooth also
+    -- gives the baseline a real MAD (sigma = 4 * 1.4826 = 5.93), which is the
+    -- point of the fixture: the N-of-M confirmation then has to clear a real
+    -- base_med + sigma line (45.93) rather than a degenerate flat one.
+    -- The step itself is +18 points from day c_shift on, and it lands on
+    -- DB_CPU_PCT -- a metric the daily CAPA_CPU_ANOM does not cover at all
+    -- (that view scores host busy%, and this container has no OSSTAT). So the
+    -- level shift is invisible to every other layer: the REGR trend fit reads
+    -- it as noise (R^2 well under the gate), no day is ever flagged, and
+    -- CAPA_CPU_SHIFT is the only thing that says the container now runs 18
+    -- points hotter than it did a month ago.
+    FUNCTION pdb_pct(p_i PLS_INTEGER) RETURN NUMBER IS
+        v NUMBER := 40 + (MOD(p_i, 7) - 3) * 2;
+    BEGIN
+        IF p_i >= c_shift THEN v := v + c_shpts; END IF;
+        RETURN v;
+    END;
+
     PROCEDURE osstat(p_snap NUMBER, p_name VARCHAR2, p_val NUMBER) IS
     BEGIN
         INSERT INTO cap_fixture_osstat
@@ -130,6 +206,17 @@ DECLARE
     BEGIN
         INSERT INTO cap_fixture_time_model
         VALUES (c_dbid, c_con, c_inst, p_snap, p_name, p_val);
+    END;
+    -- Same, for the second container. NOTE: it gets time-model rows ONLY, no
+    -- OSSTAT -- which is what a real PDB looks like, since host OSSTAT records
+    -- under the CDB's con_dbid (see CLAUDE.md). That also keeps host_busy_sec
+    -- for the dbid unchanged, so the existing host_share_pct closed form still
+    -- holds, and it is why the M10.3 shift rides on DB_CPU_PCT (a per-PDB
+    -- metric) rather than on host busy%.
+    PROCEDURE ptmodel(p_snap NUMBER, p_name VARCHAR2, p_val NUMBER) IS
+    BEGIN
+        INSERT INTO cap_fixture_time_model
+        VALUES (c_dbid, c_pdb, c_inst, p_snap, p_name, p_val);
     END;
 BEGIN
     -- Injected Tuesday = the LATEST Tuesday (dow=1) in range, so no later
@@ -144,6 +231,12 @@ BEGIN
             v_probe := i; EXIT;
         END IF;
     END LOOP;
+    -- M10.5 gap day = the latest Sunday (dow 6) in 70..80. See the declaration
+    -- comment for why Sunday and why that range.
+    v_cpugap := NULL;
+    FOR i IN REVERSE 70 .. 80 LOOP
+        IF MOD(TRUNC(v_base + i) - DATE '2020-01-06', 7) = 6 THEN v_cpugap := i; EXIT; END IF;
+    END LOOP;
 
     -- ---- dimensions ----
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 10, 'FIX_LINEAR',   'PERMANENT', c_bs);
@@ -155,6 +248,7 @@ BEGIN
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 16, 'FIX_ZIGZAG',   'PERMANENT', c_bs);
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 17, 'FIX_OVERRIDE', 'PERMANENT', c_bs);
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 18, 'FIX_EXCLUDED', 'PERMANENT', c_bs);
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 19, 'FIX_PURGE',    'PERMANENT', c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 10, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 11, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 12, c_bs);
@@ -164,6 +258,7 @@ BEGIN
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 16, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 17, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 18, c_bs);
+    INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 19, c_bs);
 
     -- Container naming (M7.2): the row every fixture series resolves through
     -- (con_dbid = dbid -> label is the db_name alone), plus one synthetic PDB
@@ -256,6 +351,17 @@ BEGIN
         INSERT INTO cap_fixture_tbspc_usage
         VALUES (c_dbid, c_con, 2001 + 2 * i, 18, 128000, 128000, 126720);
 
+        -- FIX_PURGE (M9.3) : FIX_LINEAR's growth (10 MiB/day, 1280 blocks/day,
+        -- base 100 MiB, 50 GiB autoextend maxsize) with ONE cliff: at day 90 a
+        -- purge removes 600 MiB (76800 blocks) and growth resumes at the same
+        -- rate. Fitted ACROSS the cliff the slope reads ~5 MiB/day and the
+        -- headroom is a fiction; with reset_on_shrink=1 the window restarts AT
+        -- day 90 (the reset day carries the already-purged level) and the fit
+        -- sees 31 perfectly linear post-purge days -> exactly 10 MiB/day.
+        v_used := 1280 * i + 12800 - CASE WHEN i >= c_purge THEN c_purgeb ELSE 0 END;
+        INSERT INTO cap_fixture_tbspc_usage
+        VALUES (c_dbid, c_con, 2001 + 2 * i, 19, v_used, v_max50g, v_used);
+
         -- FIX_GAP : 60 MiB/day = 7680 blocks/day, but with a 3-day AWR gap
         -- (days 100-102 have NO usage sample). The post-gap day (103) sees a
         -- 4-day, 240 MiB jump; the per-day RATE (60 MiB) must NOT flag. Without
@@ -272,34 +378,70 @@ BEGIN
         -- DB time model (cumulative microseconds) resets with the restart:
         -- db_cpu_sec = f * 500 per interval (daily sum = avg busy * 1000),
         -- db_time = f * 600 per interval, background 25 s per interval.
+        --
+        -- M10.5 PURE AWR GAP. On day v_cpugap the counters keep ACCUMULATING
+        -- (the instance was up -- only the snapshots are missing), but no
+        -- osstat / time-model row is written for either of its two snaps. The
+        -- effect is exactly a real AWR gap: day v_cpugap disappears from
+        -- CAPD_CPU_DAILY, and the 06:00 interval of the NEXT day differences
+        -- against 18:00 of the PREVIOUS day, so it spans 36 h and carries
+        -- three half-days of CPU. That day therefore reads 30% busy against a
+        -- 40% Monday baseline -- past the 9-point threshold -- and must stay
+        -- unflagged purely because gap_flag = 'Y'. It is a different failure
+        -- from the restart at day 60, whose long interval is thrown away by
+        -- the startup_time guard instead.
+        --
+        -- M10.3 SECOND CONTAINER (FIXPDB1). Time-model rows only, split evenly
+        -- over the two 12 h intervals so the per-interval percentage equals
+        -- the daily one (p95 = avg, nothing to reason about). Daily
+        -- db_cpu_pct = 100 * db_cpu_sec / (4 cores * 86400 s), so a level of
+        -- L points needs L * 3456 CPU-seconds a day, i.e. L * 1728 per
+        -- interval. pdb_pct() supplies L.
         IF i = c_restart THEN
             v_busy := 0; v_idle := 0; v_dbcpu := 0; v_dbtime := 0; v_bg := 0;
+            v_pcpu := 0; v_ptime := 0; v_pbg := 0;
         ELSE
             v_busy   := v_busy   + fnight(i) * c_tot_cs / 2;
             v_idle   := v_idle   + (1 - fnight(i)) * c_tot_cs / 2;
             v_dbcpu  := v_dbcpu  + fnight(i) * 500 * 1000000;
             v_dbtime := v_dbtime + fnight(i) * 600 * 1000000;
             v_bg     := v_bg     + 25 * 1000000;
-            osstat(2000 + 2 * i, 'BUSY_TIME', v_busy);
-            osstat(2000 + 2 * i, 'IDLE_TIME', v_idle);
-            osstat(2000 + 2 * i, 'NUM_CPUS', 4);
-            osstat(2000 + 2 * i, 'NUM_CPU_CORES', 4);
-            tmodel(2000 + 2 * i, 'DB CPU', v_dbcpu);
-            tmodel(2000 + 2 * i, 'DB time', v_dbtime);
-            tmodel(2000 + 2 * i, 'background cpu time', v_bg);
+            v_pcpu   := v_pcpu   + pdb_pct(i) * 1728 * 1000000;
+            v_ptime  := v_ptime  + pdb_pct(i) * 1728 * 1.2 * 1000000;
+            v_pbg    := v_pbg    + 25 * 1000000;
+            IF i <> v_cpugap THEN
+                osstat(2000 + 2 * i, 'BUSY_TIME', v_busy);
+                osstat(2000 + 2 * i, 'IDLE_TIME', v_idle);
+                osstat(2000 + 2 * i, 'NUM_CPUS', 4);
+                osstat(2000 + 2 * i, 'NUM_CPU_CORES', 4);
+                tmodel(2000 + 2 * i, 'DB CPU', v_dbcpu);
+                tmodel(2000 + 2 * i, 'DB time', v_dbtime);
+                tmodel(2000 + 2 * i, 'background cpu time', v_bg);
+            END IF;
+            ptmodel(2000 + 2 * i, 'DB CPU', v_pcpu);
+            ptmodel(2000 + 2 * i, 'DB time', v_ptime);
+            ptmodel(2000 + 2 * i, 'background cpu time', v_pbg);
         END IF;
         v_busy   := v_busy   + fday(i) * c_tot_cs / 2;
         v_idle   := v_idle   + (1 - fday(i)) * c_tot_cs / 2;
         v_dbcpu  := v_dbcpu  + fday(i) * 500 * 1000000;
         v_dbtime := v_dbtime + fday(i) * 600 * 1000000;
         v_bg     := v_bg     + 25 * 1000000;
-        osstat(2001 + 2 * i, 'BUSY_TIME', v_busy);
-        osstat(2001 + 2 * i, 'IDLE_TIME', v_idle);
-        osstat(2001 + 2 * i, 'NUM_CPUS', 4);
-        osstat(2001 + 2 * i, 'NUM_CPU_CORES', 4);
-        tmodel(2001 + 2 * i, 'DB CPU', v_dbcpu);
-        tmodel(2001 + 2 * i, 'DB time', v_dbtime);
-        tmodel(2001 + 2 * i, 'background cpu time', v_bg);
+        v_pcpu   := v_pcpu   + pdb_pct(i) * 1728 * 1000000;
+        v_ptime  := v_ptime  + pdb_pct(i) * 1728 * 1.2 * 1000000;
+        v_pbg    := v_pbg    + 25 * 1000000;
+        IF i <> v_cpugap THEN
+            osstat(2001 + 2 * i, 'BUSY_TIME', v_busy);
+            osstat(2001 + 2 * i, 'IDLE_TIME', v_idle);
+            osstat(2001 + 2 * i, 'NUM_CPUS', 4);
+            osstat(2001 + 2 * i, 'NUM_CPU_CORES', 4);
+            tmodel(2001 + 2 * i, 'DB CPU', v_dbcpu);
+            tmodel(2001 + 2 * i, 'DB time', v_dbtime);
+            tmodel(2001 + 2 * i, 'background cpu time', v_bg);
+        END IF;
+        ptmodel(2001 + 2 * i, 'DB CPU', v_pcpu);
+        ptmodel(2001 + 2 * i, 'DB time', v_ptime);
+        ptmodel(2001 + 2 * i, 'background cpu time', v_pbg);
     END LOOP;
 
     -- ---- expected values / key dates for run_test.sql ----
@@ -321,6 +463,30 @@ BEGIN
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_PCT', 100 * 400 / (4 * 86400));           -- 0.1157
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_PEAK_PCT', 100 * 300 / (4 * 43200));      -- 0.1736
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_HOST_SHARE', 100 * 400 / (0.40 * 4 * 86400)); -- 0.2894
+    -- M10.5 gap closed forms. The gap day itself vanishes; the day AFTER it
+    -- carries one 36 h interval (Sunday night 0.10 + Sunday day 0.30 + Monday
+    -- night 0.20 = 0.60 of three half-days) plus the normal 12 h Monday
+    -- daytime interval (0.60 of one half-day):
+    --   busy_pct = 100 * (0.60 + 0.60) / 4 = 30  (vs a 40% Monday baseline,
+    --              i.e. 10 points off against a 9-point threshold -- it WOULD
+    --              flag LOW without the gap guard)
+    --   busy_p95 = 60, from the 12 h interval ALONE (the 36 h one averages
+    --              20% and is excluded from p95/max as too long to be a
+    --              "peak hour"; an unfiltered p95 of {20,60} would be 58)
+    INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('CPUGAP_DAY',  v_base + v_cpugap, v_cpugap);
+    INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('CPUGAP_NEXT', v_base + v_cpugap + 1, v_cpugap + 1);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPUGAP_HOURS',    36);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPUGAP_DAYGAP',    2);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPUGAP_BUSY_PCT', 30);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPUGAP_P95',      60);
+    -- M10.3 level-shift closed forms for the FIXPDB1 container. The 7-day
+    -- sawtooth means both medians are exact: 40 over any whole number of
+    -- weeks, 58 over the shifted last 7 days.
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_CON_DBID',      c_pdb);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SHIFT_EXPECTED_PTS', c_shpts);       -- 18
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SHIFT_BASE_MED',     40);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SHIFT_RECENT_MED',   40 + c_shpts);  -- 58
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SHIFT_BASE_SIGMA',   4 * 1.4826);    -- 5.9304
     -- FIX_LINEAR closed forms
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('LINEAR_SLOPE', 10485760);              -- bytes/day
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('LINEAR_CUR',   1280 * c_nd * 8192 + 104857600);
@@ -343,6 +509,21 @@ BEGIN
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('OVERRIDE_LIMIT', 2147483648);
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('OVERRIDE_DTF',
         FLOOR((2147483648 - (1280 * c_nd + 12800) * c_bs) / 10485760));                         -- 74
+
+    -- ---- M9.2 / M9.3 expectations ----------------------------------------
+    -- FIX_SPIKE's TRUE growth rate: 640 blocks/day = 5 MiB/day. Theil-Sen must
+    -- land on it (the +2 GiB step at day 110 makes only 869 of the 4005
+    -- pairwise slopes "crossing" pairs -- a 22% minority, well under the 29%
+    -- breakdown point), while OLS is dragged to ~4x it.
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SPIKE_RATE', 640 * c_bs);                 -- 5,242,880
+    -- FIX_PURGE (M9.3): the reset day, the post-purge window size and the
+    -- days-to-full computed off the post-purge line.
+    INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('PURGE_DAY', v_base + c_purge, c_purge);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PURGE_TRAIN_N', c_nd - c_purge + 1);       -- 31
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PURGE_CUR',
+        (1280 * c_nd + 12800 - c_purgeb) * c_bs);                                                -- 734,003,200
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PURGE_DTF',
+        FLOOR((c_50g - (1280 * c_nd + 12800 - c_purgeb) * c_bs) / 10485760));                    -- 5050
 
     -- ---- M9.1/M9.4 expectations for FIX_ZIGZAG, computed from first
     -- principles in exact NUMBER arithmetic over the SAME windows the views
@@ -415,13 +596,150 @@ BEGIN
         INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_BT_MAPE', mape / 28 * 100);
         INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_BT_BIAS', bias / 28 * 100);
     END;
+
+    -- ---- M9.2 Theil-Sen expectation for FIX_ZIGZAG -----------------------
+    -- The median of ALL 4005 pairwise slopes (y_j - y_i)/(j - i) over the same
+    -- forecast window the view fits (i = 31..120). Built explicitly here: the
+    -- pairs are enumerated in a loop, sorted by ROW_NUMBER, and the median is
+    -- taken as the average of the two middle values for an even count (exactly
+    -- Oracle's MEDIAN / PERCENTILE_CONT(0.5) semantics) -- spelled out rather
+    -- than delegated to MEDIAN so the expectation is independent of the
+    -- aggregate the view uses. SYS.ODCINUMBERLIST is a shipped VARRAY(32767)
+    -- OF NUMBER, so no fixture-owned type is needed. Fitting in i-space is
+    -- exact: day_n = i + constant, and a pairwise slope is shift-invariant.
+    DECLARE
+        v_ps   SYS.ODCINUMBERLIST := SYS.ODCINUMBERLIST();
+        v_med  NUMBER;
+        v_cnt  NUMBER;
+        FUNCTION zz(p_i PLS_INTEGER) RETURN NUMBER IS
+        BEGIN
+            RETURN (12800 + 1280 * p_i
+                    + CASE WHEN MOD(p_i, 2) = 0 THEN 2560 ELSE -2560 END) * c_bs;
+        END;
+    BEGIN
+        FOR i IN 31 .. 119 LOOP
+            FOR j IN i + 1 .. 120 LOOP
+                v_ps.EXTEND;
+                v_ps(v_ps.COUNT) := (zz(j) - zz(i)) / (j - i);
+            END LOOP;
+        END LOOP;
+        SELECT AVG(x) INTO v_med
+        FROM   (SELECT column_value AS x,
+                       ROW_NUMBER() OVER (ORDER BY column_value) AS rn,
+                       COUNT(*)     OVER ()                      AS c
+                FROM   TABLE(v_ps))
+        WHERE  rn IN (FLOOR((c + 1) / 2), CEIL((c + 1) / 2));
+        -- v_ps.COUNT is a collection METHOD: legal in PL/SQL, ORA-00984 inside
+        -- a SQL statement, so it goes through a local variable.
+        v_cnt := v_ps.COUNT;
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_TS_SLOPE', v_med);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_TS_PAIRS', v_cnt);
+    END;
     COMMIT;
 
     DBMS_OUTPUT.PUT_LINE('Fixtures loaded: base=' || TO_CHAR(v_base,'YYYY-MM-DD')
         || ' restart=' || TO_CHAR(v_base + c_restart,'YYYY-MM-DD')
         || ' spike=' || TO_CHAR(v_base + c_spike,'YYYY-MM-DD')
         || ' inj_tue=' || TO_CHAR(v_base + v_inj,'YYYY-MM-DD Dy')
-        || ' probe=' || TO_CHAR(v_base + v_probe,'YYYY-MM-DD Dy'));
+        || ' probe=' || TO_CHAR(v_base + v_probe,'YYYY-MM-DD Dy')
+        || ' cpu_gap=' || TO_CHAR(v_base + v_cpugap,'YYYY-MM-DD Dy'));
+END;
+/
+
+-- =====================================================================
+-- M11 -- fixed-ceiling series fixtures (resource limits + redo).
+-- =====================================================================
+-- Deliberately a SEPARATE block from the tablespace/CPU loader above: it only
+-- needs the snapshot spine that block already created, and keeping it apart
+-- means the two can be read (and changed) independently.
+--
+-- It reuses the EXISTING snapshot ids -- 2000+2i ends 06:00, 2001+2i ends
+-- 18:00 -- including the restart-day hole (i = 60 has no 06:00 snapshot, and
+-- the counters reset), so the redo counter meets exactly the same restart
+-- guard the CPU counters do and the restart day produces no REDO_GB_DAY row.
+--
+-- Closed forms (assume the shipped knobs train_days = 90, series_sat_pct = 90):
+--   SESSIONS   max_utilization = 200 + 2*i, limit 500 -> slope exactly 2/day,
+--              R2 = 1 (quality OK), cur = 440 on the last day (88% of limit,
+--              deliberately just UNDER nearfull_warn_pct so only the
+--              days-to-limit branch fires), and
+--              days_to_limit = FLOOR((500*0.90 - 440) / 2) = 5  -> CRIT.
+--   PROCESSES  constant 150 of 300 -> slope 0 -> FLAT, no days_to_limit,
+--              50% of limit -> no alert of either kind.
+--   REDO       +1 GiB per 12 h interval -> 2 GiB/day every full day, i.e. a
+--              PERFECTLY FLAT GiB/day series with NO ceiling: it must produce
+--              a REDO_GB_DAY value of exactly 2.0 and never an alert.
+DECLARE
+    c_dbid   CONSTANT NUMBER := 42424242;
+    c_con    CONSTANT NUMBER := 42424242;
+    c_inst   CONSTANT NUMBER := 1;
+    c_nd     CONSTANT PLS_INTEGER := 120;
+    c_restart CONSTANT PLS_INTEGER := 60;
+    c_gib    CONSTANT NUMBER := 1073741824;
+    c_sesslim CONSTANT NUMBER := 500;
+    c_proclim CONSTANT NUMBER := 300;
+    c_satpct CONSTANT NUMBER := 90;               -- shipped series_sat_pct
+    v_redo   NUMBER := 0;
+    v_probe  PLS_INTEGER;
+
+    PROCEDURE rlim(p_snap NUMBER, p_name VARCHAR2, p_cur NUMBER,
+                   p_max NUMBER, p_lim NUMBER) IS
+    BEGIN
+        INSERT INTO cap_fixture_resource_limit
+        VALUES (c_dbid, c_con, c_inst, p_snap, p_name, p_cur, p_max, p_lim);
+    END;
+    PROCEDURE sstat(p_snap NUMBER, p_name VARCHAR2, p_val NUMBER) IS
+    BEGIN
+        INSERT INTO cap_fixture_sysstat
+        VALUES (c_dbid, c_con, c_inst, p_snap, p_name, p_val);
+    END;
+    -- Both resource rows for one snapshot. max_utilization is the number the
+    -- daily view takes the MAX of, so it is what the forecast fits.
+    PROCEDURE res_day(p_snap NUMBER, p_i PLS_INTEGER) IS
+    BEGIN
+        rlim(p_snap, 'sessions',  180 + 2 * p_i, 200 + 2 * p_i, c_sesslim);
+        rlim(p_snap, 'processes', 120,           150,           c_proclim);
+    END;
+BEGIN
+    SELECT nval INTO v_probe FROM cap_fixture_meta WHERE mkey = 'PROBE_DAY';
+
+    FOR i IN 0 .. c_nd LOOP
+        -- Resource limits: sampled at every snapshot that exists.
+        IF i <> c_restart THEN
+            res_day(2000 + 2 * i, i);
+        END IF;
+        res_day(2001 + 2 * i, i);
+
+        -- Redo: cumulative BYTE counter, +1 GiB per interval, reset by the
+        -- restart exactly like the OSSTAT / time-model counters above.
+        IF i = c_restart THEN
+            v_redo := 0;
+        ELSE
+            v_redo := v_redo + c_gib;
+            sstat(2000 + 2 * i, 'redo size', v_redo);
+            -- Noise: a stat name the series must ignore. Its value is chosen
+            -- to be absurd on the redo scale, so a missing filter is loud.
+            sstat(2000 + 2 * i, 'user commits', 987654321 + i);
+        END IF;
+        v_redo := v_redo + c_gib;
+        sstat(2001 + 2 * i, 'redo size', v_redo);
+        sstat(2001 + 2 * i, 'user commits', 987654321 + i);
+    END LOOP;
+
+    -- ---- expected values for run_test.sql ----
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SESS_CUR',   200 + 2 * c_nd);   -- 440
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SESS_LIMIT', c_sesslim);        -- 500
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SESS_DTL',
+        FLOOR((c_sesslim * c_satpct / 100 - (200 + 2 * c_nd)) / 2));                   -- 5
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PROC_CUR',   150);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PROC_LIMIT', c_proclim);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('REDO_PROBE_GB', 2);
+    COMMIT;
+
+    DBMS_OUTPUT.PUT_LINE('M11 fixtures loaded: sessions 200..'
+        || TO_CHAR(200 + 2 * c_nd) || ' of ' || TO_CHAR(c_sesslim)
+        || ', processes 150 of ' || TO_CHAR(c_proclim)
+        || ', redo 2 GiB/day, probe day index ' || TO_CHAR(v_probe));
 END;
 /
 

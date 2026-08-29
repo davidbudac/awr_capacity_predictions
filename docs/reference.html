@@ -88,7 +88,7 @@
       </div>
       <div class="tablewrap">
         <table>
-          <caption>All 16 shipped knobs and their defaults</caption>
+          <caption>All shipped knobs and their defaults</caption>
           <thead><tr><th scope="col">Knob</th><th class="num" scope="col">Default</th><th scope="col">Controls</th></tr></thead>
           <tbody>
             <tr><td><span class="k">train_days</span></td><td class="num">90</td><td class="def">Length of the primary linear-fit training window (days).</td></tr>
@@ -100,10 +100,14 @@
             <tr><td><span class="k">anomaly_report_days</span></td><td class="num">14</td><td class="def">Trailing-days window of anomalies <code>CAPR_ALERTS</code> raises. Not the same window as the report's own <code>anomaly_days</code> presentation knob (sections&nbsp;3 and&nbsp;5, default 30) — this one bounds the pollable alert view.</td></tr>
             <tr><td><span class="k">report_min_gb</span></td><td class="num">1</td><td class="def">Report sections&nbsp;2 and&nbsp;6a print a tablespace only if it is growing, near-full, or at least this many GiB used (<code>is_reportable</code>), then cap at <code>top_n</code> by <code>rank_report</code>.</td></tr>
             <tr><td><span class="k">accel_slope_floor_bpd</span></td><td class="num">1,048,576</td><td class="def">Minimum <code>|slope|</code> (bytes/day, 1&nbsp;MiB) before <code>accel_ratio</code> is computed; below it a near-flat series would divide by ~0 and report an absurd acceleration, so the ratio is NULL.</td></tr>
+            <tr><td><span class="k">slope_method</span></td><td class="num">0</td><td class="def"><strong>M9.2</strong> slope estimator for the <code>CAPF_*</code> fits. <code>CAP_CONFIG</code> is numeric, so the encoding is <strong>0 = OLS</strong> (<code>REGR_SLOPE</code>, the default) and <strong>1 = THEILSEN</strong> (median of the pairwise slopes, robust to a one-off step). Both are always exposed as <code>ols_slope_bpd</code> / <code>ts_slope_bpd</code>; the <code>slope_method</code> column says which one the row used.</td></tr>
+            <tr><td><span class="k">reset_on_shrink</span></td><td class="num">1</td><td class="def"><strong>M9.3</strong>: 1 = restart a tablespace's training window at the most recent large negative <code>used_bytes</code> step, so a post-purge series is not fitted across the cliff (<code>train_start</code> / <code>reset_day</code>); 0 = fit straight through it.</td></tr>
+            <tr><td><span class="k">shrink_mad_k</span></td><td class="num">6</td><td class="def"><strong>M9.3</strong> threshold: a daily delta below <code>−GREATEST(k·MAD_σ of the window's deltas, abs_floor_bytes)</code> is a shrink change-point. Higher than <code>mad_k</code> (3) on purpose — this restarts a fit, so it should only fire on real cliffs.</td></tr>
             <tr><td><span class="k">cpu_sat_pct</span></td><td class="num">80</td><td class="def">CPU busy percent treated as saturated for days-to-saturation.</td></tr>
             <tr><td><span class="k">peak_hour_from</span></td><td class="num">8</td><td class="def">Peak window start (hour, exclusive): an interval is "peak" when its end hour is in (from, to].</td></tr>
             <tr><td><span class="k">peak_hour_to</span></td><td class="num">18</td><td class="def">Peak window end (hour, inclusive). Drives BUSY_PEAK / db_cpu_peak_pct.</td></tr>
             <tr><td><span class="k">cpu_sat_on_p95</span></td><td class="num">1</td><td class="def">1 = CPU_SAT alerts key off the BUSY_P95 busy-hour trend; 0 = the daily-average BUSY_PCT trend.</td></tr>
+            <tr><td><span class="k">series_sat_pct</span></td><td class="num">90</td><td class="def"><strong>M11</strong>: percent of a fixed-ceiling series' limit (<code>PROCESSES</code>, <code>SESSIONS</code>, <code>DB_SIZE_GB</code>) treated as saturated, since hitting <code>processes</code> exactly is an outage. Drives <code>CAPF_SERIES_FORECAST.days_to_limit</code> and the <code>SERIES_LIMIT</code> alert.</td></tr>
             <tr><td><span class="k">abs_floor_bytes</span></td><td class="num">104,857,600</td><td class="def">Absolute floor (100&nbsp;MiB) for the tablespace-delta anomaly threshold; guards flat baselines (MAD = 0).</td></tr>
             <tr><td><span class="k">dow_weeks</span></td><td class="num">8</td><td class="def">Number of prior same-weekday observations forming the CPU seasonal baseline.</td></tr>
             <tr><td><span class="k">dtf_warn</span></td><td class="num">90</td><td class="def"><code>days_to_full</code> at/below this = <span class="pill warn">WARN</span> in the report.</td></tr>
@@ -111,7 +115,13 @@
             <tr><td><span class="k">tbspc_min_hist</span></td><td class="num">7</td><td class="def">Minimum trailing observations before a tablespace anomaly can flag.</td></tr>
             <tr><td><span class="k">cpu_min_mad_pct</span></td><td class="num">3</td><td class="def">Floor (whole percent) on CPU <code>MAD_σ</code> so an exactly-flat seasonal baseline still flags a real jump.</td></tr>
             <tr><td><span class="k">cpu_min_dow_hist</span></td><td class="num">3</td><td class="def">Minimum prior same-weekday observations before a CPU anomaly can flag.</td></tr>
+            <tr><td><span class="k">cpu_gap_hours</span></td><td class="num">12</td><td class="def"><strong>M10.5</strong>: a snapshot interval <em>longer</em> than this many hours is an AWR gap / downtime. Its day gets <code>gap_flag = 'Y'</code>, is skipped by the CPU anomaly and level-shift baselines, and is left out of <code>busy_p95</code> / <code>busy_max</code> / the peak window. Half a day is deliberately loose: the flag <em>suppresses</em> scoring, so a tighter default would silence the CPU anomaly layer wherever snapshot intervals are wide.</td></tr>
+            <tr><td><span class="k">shift_days</span></td><td class="num">7</td><td class="def"><strong>M10.3</strong>: length of the recent window whose median <code>CAPA_CPU_SHIFT</code> compares against the baseline — and the <em>N</em> of the N-of-M confirmation.</td></tr>
+            <tr><td><span class="k">shift_baseline_days</span></td><td class="num">28</td><td class="def"><strong>M10.3</strong>: length of the baseline window immediately before the recent window.</td></tr>
+            <tr><td><span class="k">shift_min_pct</span></td><td class="num">15</td><td class="def"><strong>M10.3</strong>: minimum |recent median &minus; baseline median|, in percentage <em>points</em>, before a level shift is flagged.</td></tr>
             <tr><td><span class="k">esm_prediction_step</span></td><td class="num">30</td><td class="def">OML ESM forecast horizon in steps (days). Oracle 19c hard-caps this at 30.</td></tr>
+            <tr><td><span class="k">esm_tbspc_model</span></td><td class="num">2</td><td class="def">ESM model type for tablespaces: <span class="num">0</span> = <code>EXSM_HOLT</code>, <span class="num">1</span> = <code>EXSM_ADDWINTERS</code> with a 7-day season, <span class="num">2</span> = AUTO — train both as holdout twins and keep the lower-MAPE one (ties → Holt).</td></tr>
+            <tr><td><span class="k">esm_select_by_backtest</span></td><td class="num">1</td><td class="def">Enables the AUTO comparison (two extra models per tablespace, per retrain). <span class="num">0</span> makes AUTO fall back to <code>EXSM_HOLT</code> and trains no candidate twins.</td></tr>
           </tbody>
         </table>
       </div>
@@ -132,42 +142,51 @@
           <caption>Everything the suite creates</caption>
           <thead><tr><th scope="col">Prefix / object</th><th scope="col">Kind</th><th scope="col">Purpose</th></tr></thead>
           <tbody>
-            <tr><td colspan="3"><b><span class="k">CAPV_</span> — seam views (6)</b> · DBA_HIST-shaped, each carrying <code>(dbid, con_dbid)</code></td></tr>
+            <tr><td colspan="3"><b><span class="k">CAPV_</span> — seam views (9)</b> · DBA_HIST-shaped, each carrying <code>(dbid, con_dbid)</code></td></tr>
             <tr><th scope="row"><code>CAPV_SNAPSHOT</code></th><td class="def">view</td><td class="def">AWR snapshot headers and interval times; sets <code>con_dbid := dbid</code> (source has no CON_DBID)</td></tr>
             <tr><th scope="row"><code>CAPV_TBSPC_USAGE</code></th><td class="def">view</td><td class="def">Per-snapshot tablespace space usage, in DB blocks</td></tr>
             <tr><th scope="row"><code>CAPV_TABLESPACE</code></th><td class="def">view</td><td class="def">Tablespace dimension; primary source for <code>block_size</code> (populated for every tablespace)</td></tr>
             <tr><th scope="row"><code>CAPV_DATAFILE</code></th><td class="def">view</td><td class="def">Datafile dimension; block-size fallback only</td></tr>
             <tr><th scope="row"><code>CAPV_OSSTAT</code></th><td class="def">view</td><td class="def">Host OS stats — BUSY/IDLE (centiseconds) and core counts</td></tr>
             <tr><th scope="row"><code>CAPV_TIME_MODEL</code></th><td class="def">view</td><td class="def">Time-model DB CPU / DB time (microseconds), per container</td></tr>
+            <tr><th scope="row"><code>CAPV_CONTAINER</code></th><td class="def">view</td><td class="def">Naming dimension: one row per <code>(dbid, con_dbid)</code> with <code>db_name</code> + <code>con_name</code>, the source of every <code>db_pdb</code> label</td></tr>
+            <tr><th scope="row"><code>CAPV_RESOURCE_LIMIT</code></th><td class="def">view</td><td class="def"><strong>M11</strong>: <code>processes</code> / <code>sessions</code> utilisation vs the init parameter; <code>LIMIT_VALUE</code> converted from VARCHAR2 (<code>UNLIMITED</code> &rarr; NULL). Zero rows in warehouse mode — the collector has no resource-limit fact yet</td></tr>
+            <tr><th scope="row"><code>CAPV_SYSSTAT</code></th><td class="def">view</td><td class="def"><strong>M11</strong>: system statistics filtered to <code>redo size</code>, a cumulative byte counter</td></tr>
 
-            <tr><td colspan="3"><b><span class="k">CAPD_</span> — daily views (4)</b> · one clean row per day</td></tr>
+            <tr><td colspan="3"><b><span class="k">CAPD_</span> — daily views (5)</b> · one clean row per day</td></tr>
             <tr><th scope="row"><code>CAPD_TBSPC_DAILY</code></th><td class="def">view</td><td class="def">Last usage sample per day, blocks→bytes, with <code>limit_bytes</code> + <code>limit_source</code> (<code>CAP_TBSPC_OVERRIDE</code> applied here); UNDO/TEMP and excluded tablespaces dropped</td></tr>
             <tr><th scope="row"><code>CAPD_TBSPC_DELTA</code></th><td class="def">view</td><td class="def">Day-over-day change with <code>day_gap</code> and <code>used_rate_bpd</code></td></tr>
             <tr><th scope="row"><code>CAPD_CPU_DAILY</code></th><td class="def">view</td><td class="def">Per-day busy% from cumulative counters, restart/reset-guarded</td></tr>
             <tr><th scope="row"><code>CAPD_DBTIME_DAILY</code></th><td class="def">view</td><td class="def">Per-day <code>db_cpu_sec</code> / <code>db_time_sec</code> / <code>bg_cpu_sec</code>; <code>db_cpu_per_core</code></td></tr>
+            <tr><th scope="row"><code>CAPD_SERIES_DAILY</code></th><td class="def">view</td><td class="def"><strong>M11</strong>: the fixed-ceiling series, keyed by a <code>series</code> name — <code>PROCESSES</code> / <code>SESSIONS</code> (peak utilisation vs the init parameter, summed over RAC instances), <code>REDO_GB_DAY</code> (no ceiling) and <code>DB_SIZE_GB</code> (summed <code>CAPD_TBSPC_DAILY</code> used bytes vs summed ceilings)</td></tr>
 
             <tr><td colspan="3"><b><span class="k">CAPF_</span> — forecast views</b> · Tier 1 REGR fits (+ Tier 2 ESM)</td></tr>
-            <tr><th scope="row"><code>CAPF_TBSPC_FORECAST</code></th><td class="def">view</td><td class="def">Tier 1 fit per tablespace: slope, projections, <code>days_to_full</code>, quality</td></tr>
+            <tr><th scope="row"><code>CAPF_TBSPC_FORECAST</code></th><td class="def">view</td><td class="def">Tier 1 fit per tablespace: slope, projections, <code>days_to_full</code>, quality. M9.2 adds <code>ols_slope_bpd</code>, <code>ts_slope_bpd</code>, <code>ts_icept</code> and <code>slope_method</code> (the estimator actually used); M9.3 adds <code>train_start</code> and <code>reset_day</code> (NULL = the window was not restarted by a shrink)</td></tr>
             <tr><th scope="row"><code>CAPF_CPU_TREND</code></th><td class="def">view</td><td class="def">Tier 1 fit for busy% and db_cpu_sec, with days-to-saturation</td></tr>
+            <tr><th scope="row"><code>CAPF_SERIES_FORECAST</code></th><td class="def">view</td><td class="def"><strong>M11</strong>: the same REGR fit + M9.1 bands for <code>CAPD_SERIES_DAILY</code>, with <code>pct_of_limit</code>, <code>sat_value</code> and <code>days_to_limit</code> (+ <code>_lo</code>/<code>_hi</code>) against <code>series_sat_pct</code>% of the series' own ceiling</td></tr>
             <tr><th scope="row"><code>CAPF_ESM_FORECAST</code></th><td class="def">view</td><td class="def">Tier 2 ESM predictions and 95% bounds, via the package registry</td></tr>
             <tr><th scope="row"><code>CAPF_COMPARE</code></th><td class="def">view</td><td class="def">Tier 1 vs Tier 2 at the horizons (ESM +30 only)</td></tr>
             <tr><th scope="row"><code>CAPF_ESM_BACKTEST</code></th><td class="def">view</td><td class="def">Holdout (purpose=BACKTEST) ESM predictions, kept out of the live forecast</td></tr>
-            <tr><th scope="row"><code>CAPF_BACKTEST</code></th><td class="def">view</td><td class="def">Holdout accuracy per series per engine: MAPE% / bias% over the held-out window</td></tr>
+            <tr><th scope="row"><code>CAPF_ESM_CANDIDATE</code></th><td class="def">view</td><td class="def">Holdout MAPE% / bias% of every candidate twin, one row per <em>(series, model_type)</em> — the evidence behind the AUTO ESM model-type pick</td></tr>
+            <tr><th scope="row"><code>CAPF_BACKTEST</code></th><td class="def">view</td><td class="def">Holdout accuracy per series per engine: MAPE% / bias% over the held-out window (the ESM row is the selected candidate, named by <code>model_type</code>)</td></tr>
 
             <tr><td colspan="3"><b><span class="k">CAPA_</span> — anomaly views</b> · robust median + MAD</td></tr>
             <tr><th scope="row"><code>CAPA_TBSPC_ANOM</code></th><td class="def">view</td><td class="def">Median + MAD flags on the growth rate over a trailing window</td></tr>
-            <tr><th scope="row"><code>CAPA_CPU_ANOM</code></th><td class="def">view</td><td class="def">Median + MAD flags on a same-weekday seasonal baseline</td></tr>
+            <tr><th scope="row"><code>CAPA_CPU_ANOM</code></th><td class="def">view</td><td class="def">Median + MAD flags on a same-weekday seasonal baseline (M10.5: gap days are neither scored nor used as baseline)</td></tr>
+            <tr><th scope="row"><code>CAPA_CPU_SHIFT</code></th><td class="def">view</td><td class="def"><strong>M10.3</strong> level shifts: last <code>shift_days</code> median vs the prior <code>shift_baseline_days</code> median per (container, metric), confirmed by an N-of-M rule. One row per series — the current state, not a per-day series</td></tr>
 
-            <tr><td colspan="3"><b><span class="k">CAPR_</span> — integration &amp; report views (9)</b> · display labels, alerts, and one view per report section (M8.2)</td></tr>
+            <tr><td colspan="3"><b><span class="k">CAPR_</span> — integration &amp; report views (11)</b> · display labels, alerts, and one view per report section (M8.2)</td></tr>
             <tr><th scope="row"><code>CAPR_CONTAINER</code></th><td class="def">view</td><td class="def">(dbid, con_dbid) &rarr; <code>db_pdb</code>, the one display label every report prints</td></tr>
-            <tr><th scope="row"><code>CAPR_ALERTS</code></th><td class="def">view</td><td class="def">One row per current issue — severity, kind, value vs threshold, ready-to-page message</td></tr>
+            <tr><th scope="row"><code>CAPR_ALERTS</code></th><td class="def">view</td><td class="def">One row per current issue — severity, <code>kind</code> (<code>TBSPC_FULL</code>, <code>TBSPC_NEARFULL</code>, <code>TBSPC_ANOM</code>, <code>CPU_SAT</code>, <code>DBCPU_SAT</code>, <code>CPU_ANOM</code>, <code>CPU_SHIFT</code>, and the M11 <code>SERIES_LIMIT</code> / <code>SERIES_NEARLIMIT</code>), value vs threshold, ready-to-page message</td></tr>
             <tr><th scope="row"><code>CAPR_TBSPC_DAYS_TO_FULL</code></th><td class="def">view</td><td class="def">Report section 1: days-to-full and near-full-now rankings, with severity markers and <code>rank_dtf</code> / <code>rank_nearfull</code></td></tr>
             <tr><th scope="row"><code>CAPR_TBSPC_FORECAST</code></th><td class="def">view</td><td class="def">Report section 2: GiB projections, +180 band, ESM +30 point, <code>rank_chart</code>, and the M7.4 bound <code>is_reportable</code> / <code>rank_report</code></td></tr>
             <tr><th scope="row"><code>CAPR_TBSPC_ANOMALIES</code></th><td class="def">view</td><td class="def">Report section 3: flagged growth days in MiB, with <code>days_ago</code></td></tr>
             <tr><th scope="row"><code>CAPR_CPU_TREND</code></th><td class="def">view</td><td class="def">Report section 4: per-metric CPU trend with the days-to-saturation range</td></tr>
-            <tr><th scope="row"><code>CAPR_CPU_ANOMALIES</code></th><td class="def">view</td><td class="def">Report section 5: flagged busy% days, with <code>days_ago</code></td></tr>
+            <tr><th scope="row"><code>CAPR_CPU_ANOMALIES</code></th><td class="def">view</td><td class="def">Report section 5a: flagged busy% days, with <code>days_ago</code></td></tr>
+            <tr><th scope="row"><code>CAPR_CPU_SHIFTS</code></th><td class="def">view</td><td class="def">Report section 5b: flagged level shifts, both medians, both window lengths and the N-of-M counts, ranked by |shift| via <code>rank_shift</code></td></tr>
             <tr><th scope="row"><code>CAPR_ESM_COMPARE</code></th><td class="def">view</td><td class="def">Report sections 6a/6b: REGR vs ESM per (series, horizon), raw units and GiB; inherits <code>is_reportable</code> / <code>rank_report</code> so 6a shows exactly section 2's tablespaces</td></tr>
             <tr><th scope="row"><code>CAPR_BACKTEST</code></th><td class="def">view</td><td class="def">Report section 6c: holdout scorecard pivoted per series, with the BETTER verdict</td></tr>
+            <tr><th scope="row"><code>CAPR_SERIES</code></th><td class="def">view</td><td class="def">Report section 7: the fixed-ceiling series with <code>pct_of_limit</code>, the days-to-limit range, a single <code>sev</code> marker and <code>rank_series</code></td></tr>
 
             <tr><td colspan="3"><b>Tables &amp; package</b> · the only persisted state</td></tr>
             <tr><th scope="row"><span class="kt">CAP_CONFIG</span></th><td class="def">table</td><td class="def">Tuning knobs (name/value), MERGE-seeded</td></tr>

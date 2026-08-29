@@ -28,9 +28,15 @@ for making changes safely.
 ## Layout / load order
 
 `install.sql` includes, in order: `ddl/00_drop` → `05_config` → the seam
-(`10`/`11`/`12` by `seam_mode`) → `20_daily` → `30_forecast` → `40_anomaly` →
-`45_report_views` (CAPR_CONTAINER + CAPR_ALERTS) → `50_ml` (which pulls
-`ml/cap_forecast_ml.pks/.pkb` and builds the ESM views + CAPF_BACKTEST).
+(`10`/`11`/`12` by `seam_mode`) → `20_daily` → `25_series_daily`
+(CAPD_SERIES_DAILY, M11) → `30_forecast` → `35_series_forecast`
+(CAPF_SERIES_FORECAST) → `40_anomaly` →
+`45_report_views` (CAPR_CONTAINER + CAPR_ALERTS + CAPR_SERIES) → `50_ml` (which
+pulls `ml/cap_forecast_ml.pks/.pkb` and builds the ESM views + CAPF_BACKTEST)
+→ `55_report_views_ml` (the Tier-2-dependent CAPR_* section views).
+Opt-in extras outside install.sql: `doctor.sql` (preflight), `install_jobs.sql`
+/ `uninstall_jobs.sql` (DBMS_SCHEDULER, disabled by default),
+`report/drill_tbspc.sql` / `report/drill_cpu.sql` (single-series drill-down).
 Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomaly →
 `CAPR_` integration (display labels + pollable alerts).
 
@@ -76,6 +82,12 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
   PREDICTION, LOWER, UPPER`. `get_forecast` reads the last five.
 - Host CPU (OSSTAT) records under the CDB `con_dbid`; time-model DB CPU is
   per-container. `db_cpu_per_core` divides by summed OSSTAT core counts.
+- `DBA_HIST_RESOURCE_LIMIT` **does** carry `CON_DBID` on 19c (verified on
+  dbmint), so M11's `CAPV_RESOURCE_LIMIT` keys like every other seam view. Its
+  `LIMIT_VALUE` is a `VARCHAR2(10)` ('UNLIMITED' possible) — convert with the
+  `REGEXP_LIKE(TRIM(..),'^[0-9]+$')` guard, never a bare `TO_NUMBER`. And
+  `MAX_UTILIZATION` is a high-water mark **since instance startup**, so it
+  resets on a restart (a level shift, not a lie).
 - `DBA_HIST_PDB_INSTANCE` (19c) carries `CON_DBID` + `PDB_NAME` and includes a
   `CDB$ROOT` row whose `con_dbid` equals the CDB dbid — `CAPV_CONTAINER` leans
   on that; the `DBA_HIST_DATABASE_INSTANCE` branch only matters for non-CDBs.
@@ -88,10 +100,32 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
   exactly the snapshots ending 09:00..18:00. The fixture has TWO snapshots per
   day (ids `2000+2i` ending 06:00, `2001+2i` ending 18:00); tablespace usage
   hangs only off the 18:00 one, and the restart day has no 06:00 snapshot.
+- The CPU fixture has **two containers**: the root (`42424242`, OSSTAT +
+  time-model) and `FIXPDB1` (`42424243`, **time-model only** — OSSTAT records
+  under the CDB con_dbid in real AWR, and giving the PDB its own rows would
+  double `host_busy_sec` and break `host_share_pct`). The M10.3 level shift
+  therefore rides on `DB_CPU_PCT`. Any assertion counting CPU rows must scope
+  on `con_dbid`, not just `dbid`.
+- `cpu_gap_hours` defaults to **12**, not something tighter, because the
+  fixture's snapshots are 12 h apart (06:00 / 18:00) and, more importantly,
+  because `gap_flag` SUPPRESSES anomaly scoring — an over-sensitive default
+  silences the whole CPU anomaly layer on a site with wide AWR intervals.
 - Backtest ESM twins (`train_backtest`) share the 19c 30-step cap AND the
   `FLOOR(rows/4)` floor, so they may cover fewer than holdout_days forecast
   days (fixture: 93 rows -> 23 of 28). `CAPF_BACKTEST.n_days` reports actual
   coverage; don't assert full-holdout coverage for ESM.
+- M9.2/M9.3 contracts in `ddl/30`: the chosen estimator (`slope_method` 0=OLS,
+  1=THEILSEN) drives slope/intercept/projections/days-to-full/accel_ratio/FLAT,
+  but `r2` and every M9.1 band stay **OLS** residual quantities drawn around
+  the chosen line — there is no closed-form Theil-Sen interval in SQL. The
+  M9.3 reset day is **inside** the new window (`train_start = reset_day`; its
+  used_bytes is already post-purge). Both are asserted by the fixture; change
+  the view and the assertions together.
+- `SYS.ODCINUMBERLIST` is a shipped `VARRAY(32767) OF NUMBER` and works in
+  `TABLE(v)` from PL/SQL — handy for building an expectation list without a
+  fixture-owned type. But a collection METHOD (`v.COUNT`) inside a SQL
+  statement is ORA-00984 ("column not allowed here"); assign it to a local
+  variable first.
 
 ## Testing on a 19c test database
 

@@ -1,7 +1,7 @@
 --
 -- ddl/10_seam_local.sql -- CAPV_* portable seam over DBA_HIST_* (LOCAL mode).
 -- =====================================================================
--- These seven views are the ONLY place the analytics touch Oracle's AWR
+-- These nine views are the ONLY place the analytics touch Oracle's AWR
 -- dictionary. Everything downstream (CAPD_/CAPF_/CAPA_/report) is written
 -- once against CAPV_* and runs byte-identically in local, warehouse, or
 -- fixture mode. Swapping this file for ddl/11_seam_warehouse.sql or
@@ -154,3 +154,49 @@ LEFT  JOIN (SELECT dbid, con_dbid, MAX(pdb_name) AS con_name
             FROM   dba_hist_pdb_instance
             GROUP  BY dbid, con_dbid) p
   ON  p.dbid = k.dbid AND p.con_dbid = k.con_dbid;
+
+-- --------------------------------------------------------------------
+-- CAPV_RESOURCE_LIMIT (M11.1) -- per-instance resource high-water marks vs
+-- their configured ceilings, filtered to the two that actually cause outages:
+-- `processes` and `sessions`.
+--   * CURRENT_UTILIZATION = in use at snapshot time.
+--   * MAX_UTILIZATION     = HIGH-WATER MARK since instance startup (so it is
+--                           monotone within a startup epoch and resets on
+--                           restart -- CAPD_SERIES_DAILY documents that).
+--   * LIMIT_VALUE is a VARCHAR2(10) in the source and can read 'UNLIMITED',
+--     so it is converted here: numeric strings become NUMBER, anything else
+--     becomes NULL (= "no ceiling"), which the daily/forecast layers treat as
+--     "no days-to-limit". Verified on 19c: DBA_HIST_RESOURCE_LIMIT DOES carry
+--     CON_DBID, so PDBs stay separable exactly like every other CAPV_ view.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capv_resource_limit AS
+SELECT dbid                     AS dbid,
+       con_dbid                 AS con_dbid,
+       instance_number          AS instance_number,
+       snap_id                  AS snap_id,
+       resource_name            AS resource_name,
+       current_utilization      AS current_utilization,
+       max_utilization          AS max_utilization,
+       CASE WHEN REGEXP_LIKE(TRIM(limit_value), '^[0-9]+$')
+            THEN TO_NUMBER(TRIM(limit_value))
+       END                      AS limit_value
+FROM   dba_hist_resource_limit
+WHERE  resource_name IN ('processes','sessions');
+
+-- --------------------------------------------------------------------
+-- CAPV_SYSSTAT (M11.2) -- system statistics, filtered to the one counter the
+-- redo series needs. 'redo size' is a CUMULATIVE BYTE counter since instance
+-- startup (like the OSSTAT/time-model counters), so the daily layer
+-- differences consecutive snaps and drops restart-spanning intervals.
+-- Redo is one stream per DATABASE and AWR records it under the CDB's
+-- con_dbid, the same way OSSTAT does.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capv_sysstat AS
+SELECT dbid                     AS dbid,
+       con_dbid                 AS con_dbid,
+       instance_number          AS instance_number,
+       snap_id                  AS snap_id,
+       stat_name                AS stat_name,
+       value                    AS value
+FROM   dba_hist_sysstat
+WHERE  stat_name = 'redo size';

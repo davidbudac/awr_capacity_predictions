@@ -21,6 +21,7 @@ DECLARE
 
     v_dbid  NUMBER;
     d_spike DATE; d_restart DATE; d_inj DATE; d_probe DATE;
+    d_purge DATE; d_reset DATE; d_tstart DATE;
     n_slope NUMBER; n_dtf NUMBER;
 
     v_n     PLS_INTEGER;
@@ -244,8 +245,11 @@ BEGIN
     SELECT COUNT(*) INTO v_n FROM capr_tbspc_anomalies WHERE anomaly_flag IS NULL;
     chk_int('CAPR_TBSPC_ANOMALIES holds flagged rows only', v_n, 0);
 
-    -- Section 4: the six CPU metrics (M10.1/M10.2) for the fixture database.
-    SELECT COUNT(*) INTO v_n FROM capr_cpu_trend WHERE dbid = v_dbid;
+    -- Section 4: the six CPU metrics (M10.1/M10.2) for the fixture ROOT
+    -- container. Scoped by con_dbid because the M10.3 fixture adds a second
+    -- container (FIXPDB1) carrying the three time-model metrics of its own.
+    SELECT COUNT(*) INTO v_n FROM capr_cpu_trend
+      WHERE dbid = v_dbid AND con_dbid = v_dbid;
     chk_int('CAPR_CPU_TREND metric count', v_n, 6);
 
     -- Section 5: the injected Tuesday, same days_ago contract.
@@ -282,7 +286,8 @@ BEGIN
     chk_int('CPU probe n_intervals', v_num2, 2);
     chk_close('CPU probe host_busy_sec', v_num3, meta_n('CPU_PROBE_HOST_BUSY_SEC'), 0.000001);
     SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
-      WHERE dbid = v_dbid AND metric IN ('BUSY_P95','BUSY_PEAK','DB_CPU_PCT','DB_CPU_P95');
+      WHERE dbid = v_dbid AND con_dbid = v_dbid
+        AND metric IN ('BUSY_P95','BUSY_PEAK','DB_CPU_PCT','DB_CPU_P95');
     chk_int('CAPF_CPU_TREND carries the four new metrics', v_n, 4);
     SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
       WHERE dbid = v_dbid AND metric = 'DB_CPU_SEC' AND days_to_sat IS NOT NULL;
@@ -291,7 +296,8 @@ BEGIN
     DBMS_OUTPUT.PUT_LINE('=== M10.2 DB CPU as % of core capacity ===');
     SELECT db_cpu_sec, db_cpu_pct, db_cpu_peak_pct, host_share_pct
       INTO v_num, v_num2, v_num3, v_r2
-      FROM capd_dbtime_daily WHERE dbid = v_dbid AND day_dt = d_probe;
+      FROM capd_dbtime_daily
+      WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_probe;
     chk_close('DB CPU probe db_cpu_sec',      v_num,  meta_n('DBCPU_PROBE_SEC'),        0.000001);
     chk_close('DB CPU probe db_cpu_pct',      v_num2, meta_n('DBCPU_PROBE_PCT'),        0.000001);
     chk_close('DB CPU probe db_cpu_peak_pct', v_num3, meta_n('DBCPU_PROBE_PEAK_PCT'),   0.000001);
@@ -377,6 +383,349 @@ BEGIN
     SELECT COUNT(*) INTO v_n FROM capr_esm_compare
       WHERE series_kind = 'CPU' AND (is_reportable <> 'Y' OR rank_report <> 0);
     chk_int('CAPR_ESM_COMPARE never bounds CPU rows', v_n, 0);
+
+    DBMS_OUTPUT.PUT_LINE('=== M9.2 Theil-Sen robust slope (knob slope_method) ===');
+    SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'slope_method';
+    chk_int('knob slope_method default (0 = OLS, 1 = THEILSEN)', v_num, 0);
+    SELECT slope_method, slope_bpd, ols_slope_bpd, ts_slope_bpd
+      INTO v_str, v_num, v_num2, v_num3
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
+    chk_str  ('LINEAR slope_method label', v_str, 'OLS');
+    chk_close('LINEAR slope_bpd = ols_slope_bpd under the default', v_num, v_num2, 0.000001);
+    chk_close('LINEAR ts_slope_bpd (exactly 10 MiB/day)', v_num3, n_slope, 0.000001);
+    SELECT ts_slope_bpd INTO v_num
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_ZIGZAG';
+    chk_close('ZIGZAG ts_slope_bpd = median of the ' || meta_n('ZZ_TS_PAIRS')
+              || ' pairwise slopes', v_num, meta_n('ZZ_TS_SLOPE'), 0.000001);
+    -- The whole point of M9.2: ONE +2 GiB step drags the OLS slope ~4x off the
+    -- true 5 MiB/day rate, while the pairwise median does not move at all.
+    SELECT ts_slope_bpd, ols_slope_bpd INTO v_num, v_num2
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_SPIKE';
+    chk_close('SPIKE ts_slope_bpd within 1% of the true 5 MiB/day',
+              v_num, meta_n('SPIKE_RATE'), 0.01);
+    chk_true ('SPIKE ols_slope_bpd > 3x the true rate ('
+              || ROUND(v_num2 / meta_n('SPIKE_RATE'), 2) || 'x)',
+              v_num2 > 3 * meta_n('SPIKE_RATE'));
+
+    -- Flip the knob for real (uncommitted, this session only) and check the
+    -- views switch estimator on the spot -- then put it back and COMMIT.
+    SELECT days_to_full INTO v_num3
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_SPIKE';
+    UPDATE cap_config SET cfg_value = 1 WHERE cfg_name = 'slope_method';
+    BEGIN
+        SELECT slope_method, slope_bpd INTO v_str, v_num
+          FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_SPIKE';
+        chk_str  ('SPIKE slope_method with knob=1', v_str, 'THEILSEN');
+        chk_close('SPIKE slope_bpd with knob=1 (robust 5 MiB/day)',
+                  v_num, meta_n('SPIKE_RATE'), 0.01);
+        SELECT days_to_full INTO v_num2
+          FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_SPIKE';
+        chk_true('SPIKE days_to_full with knob=1 > 3x the OLS answer ('
+                 || v_num2 || ' vs ' || v_num3 || ')',
+                 v_num2 > 3 * v_num3);
+        -- M9.2 covers CAPF_CPU_TREND too: every metric row must switch.
+        SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
+          WHERE dbid = v_dbid AND slope_method <> 'THEILSEN';
+        chk_int('CAPF_CPU_TREND rows all switch to THEILSEN', v_n, 0);
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE cap_config SET cfg_value = 0 WHERE cfg_name = 'slope_method';
+            COMMIT;
+            RAISE;
+    END;
+    UPDATE cap_config SET cfg_value = 0 WHERE cfg_name = 'slope_method';
+    COMMIT;
+    SELECT slope_method INTO v_str
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_SPIKE';
+    chk_str('slope_method knob restored to OLS', v_str, 'OLS');
+
+    DBMS_OUTPUT.PUT_LINE('=== M9.3 change-point reset (FIX_PURGE) ===');
+    SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'reset_on_shrink';
+    chk_int('knob reset_on_shrink default', v_num, 1);
+    SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'shrink_mad_k';
+    chk_int('knob shrink_mad_k default', v_num, 6);
+    d_purge := meta_d('PURGE_DAY');
+    SELECT reset_day, train_start, train_n, slope_bpd, days_to_full, quality
+      INTO d_reset, d_tstart, v_n, v_num, v_num2, v_str
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_PURGE';
+    chk_int  ('PURGE reset_day - purge day (0 = the cliff day itself)',
+              d_reset - d_purge, 0);
+    -- Contract: the reset day IS the first fitted day -- its used_bytes is
+    -- already the post-purge level, so including it costs nothing and gives
+    -- the new window one extra point.
+    chk_int  ('PURGE train_start - reset_day (0 = cliff day is in the window)',
+              d_tstart - d_reset, 0);
+    chk_int  ('PURGE train_n (post-purge rows)', v_n, meta_n('PURGE_TRAIN_N'));
+    chk_close('PURGE slope_bpd = 10 MiB/day (not the across-the-cliff slope)',
+              v_num, n_slope, 0.000001);
+    chk_int  ('PURGE days_to_full off the post-purge line', v_num2, meta_n('PURGE_DTF'));
+    chk_str  ('PURGE quality', v_str, 'OK');
+    -- Contrast: a POSITIVE step is not a cliff, a clean line has none, and
+    -- FIX_ZIGZAG's -30 MiB dips sit well inside 6*MAD_sigma.
+    SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+      WHERE tablespace_name = 'FIX_SPIKE' AND reset_day IS NULL;
+    chk_int('SPIKE reset_day IS NULL (a +2 GiB step is not a shrink)', v_n, 1);
+    SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+      WHERE tablespace_name = 'FIX_LINEAR' AND reset_day IS NULL;
+    chk_int('LINEAR reset_day IS NULL', v_n, 1);
+    SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+      WHERE tablespace_name = 'FIX_ZIGZAG' AND reset_day IS NULL;
+    chk_int('ZIGZAG reset_day IS NULL (dips inside 6*MAD)', v_n, 1);
+    SELECT train_n INTO v_n FROM capf_tbspc_forecast
+      WHERE tablespace_name = 'FIX_LINEAR';
+    chk_int('LINEAR train_n still the full train_days window', v_n, 90);
+    -- The purge day is a genuine LOW anomaly, but it sits 30 days back --
+    -- outside anomaly_report_days (14) -- so it raises no alert, and it stays
+    -- confined to its own tablespace (the FIX_SPIKE LOW check above holds).
+    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
+      WHERE tablespace_name = 'FIX_PURGE' AND anomaly_flag = 'LOW' AND day_dt = d_purge;
+    chk_int('PURGE day flags a LOW anomaly', v_n, 1);
+    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
+      WHERE tablespace_name = 'FIX_PURGE' AND anomaly_flag IS NOT NULL;
+    chk_int('PURGE has exactly one anomaly', v_n, 1);
+    SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE series_key = 'FIX_PURGE';
+    chk_int('PURGE raises no CAPR_ALERTS (cliff predates the alert window)', v_n, 0);
+
+    -- M11 uses a local DATE for the last collected day: meta_d() is a nested
+    -- PL/SQL function and cannot be called from inside a SQL statement
+    -- (PLS-00231), so the value is resolved once here.
+    DECLARE
+        d_last DATE := meta_d('LAST_DAY');
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('=== M11 seam (CAPV_RESOURCE_LIMIT / CAPV_SYSSTAT) ===');
+        -- 241 snapshots exist (two a day for 121 days, minus the missing 06:00 of
+        -- the restart day) x 2 resource names.
+        SELECT COUNT(*) INTO v_n FROM capv_resource_limit;
+        chk_int('CAPV_RESOURCE_LIMIT rows (241 snaps x 2 resources)', v_n, 482);
+        SELECT COUNT(*) INTO v_n FROM capv_resource_limit
+          WHERE resource_name NOT IN ('sessions','processes');
+        chk_int('CAPV_RESOURCE_LIMIT carries only sessions/processes', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capv_sysstat WHERE stat_name = 'redo size';
+        chk_int('CAPV_SYSSTAT redo-size rows', v_n, 241);
+
+        DBMS_OUTPUT.PUT_LINE('=== M11.1 processes / sessions vs their limits ===');
+        SELECT value, limit_value, unit INTO v_num, v_num2, v_str
+          FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'SESSIONS' AND day_dt = d_last;
+        chk_int('SESSIONS last-day value (max_utilization)', v_num,  meta_n('SESS_CUR'));
+        chk_int('SESSIONS last-day limit_value',            v_num2, meta_n('SESS_LIMIT'));
+        chk_str('SESSIONS unit', v_str, 'COUNT');
+        SELECT slope_per_day, days_to_limit, quality INTO v_num, v_n, v_str
+          FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'SESSIONS';
+        chk_close('SESSIONS slope/day', v_num, 2, 0.000001);
+        chk_int  ('SESSIONS days_to_limit (90% of 500)', v_n, meta_n('SESS_DTL'));
+        chk_str  ('SESSIONS quality', v_str, 'OK');
+        SELECT pct_of_limit, r2 INTO v_num, v_r2
+          FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'SESSIONS';
+        chk_close('SESSIONS pct_of_limit (440/500)', v_num, 88, 0.000001);
+        chk_true ('SESSIONS r2 > 0.999', v_r2 > 0.999);
+        SELECT cur_val, cur_limit, quality INTO v_num, v_num2, v_str
+          FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'PROCESSES';
+        chk_int('PROCESSES cur_val',   v_num,  meta_n('PROC_CUR'));
+        chk_int('PROCESSES cur_limit', v_num2, meta_n('PROC_LIMIT'));
+        chk_str('PROCESSES quality (constant -> FLAT)', v_str, 'FLAT');
+        SELECT COUNT(*) INTO v_n FROM capf_series_forecast
+          WHERE dbid = v_dbid AND series = 'PROCESSES' AND days_to_limit IS NULL;
+        chk_int('PROCESSES has no days_to_limit (not growing)', v_n, 1);
+
+        DBMS_OUTPUT.PUT_LINE('=== M11.2 redo GiB/day ===');
+        SELECT value, unit INTO v_num, v_str FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'REDO_GB_DAY' AND day_dt = d_probe;
+        chk_close('REDO probe-day GiB (2 x 1 GiB intervals)', v_num, meta_n('REDO_PROBE_GB'), 0.000001);
+        chk_str  ('REDO unit', v_str, 'GIB_PER_DAY');
+        -- Same restart guard as the CPU counters: that day's only interval spans
+        -- the restart, so the day drops out entirely rather than reading -240 GiB.
+        SELECT COUNT(*) INTO v_n FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'REDO_GB_DAY' AND day_dt = d_restart;
+        chk_int('REDO restart day excluded', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'REDO_GB_DAY' AND limit_value IS NOT NULL;
+        chk_int('REDO has no ceiling', v_n, 0);
+        SELECT quality, days_to_limit INTO v_str, v_num
+          FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'REDO_GB_DAY';
+        chk_str ('REDO quality (2 GiB/day flat)', v_str, 'FLAT');
+        chk_true('REDO days_to_limit IS NULL (no ceiling)', v_num IS NULL);
+
+        DBMS_OUTPUT.PUT_LINE('=== M11.3 total DB size ===');
+        -- The identity, re-derived here rather than pre-computed: DB_SIZE_GB is
+        -- exactly the sum of what CAPD_TBSPC_DAILY reports that day (so excluded
+        -- and UNDO/TEMP tablespaces are out of it by construction).
+        SELECT value, limit_value INTO v_num, v_num2 FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'DB_SIZE_GB' AND day_dt = d_last;
+        SELECT SUM(used_bytes) / 1073741824, SUM(limit_bytes) / 1073741824
+          INTO v_num3, v_r2
+          FROM capd_tbspc_daily WHERE dbid = v_dbid AND day_dt = d_last;
+        chk_close('DB_SIZE_GB = SUM(used_bytes)/2^30',        v_num,  v_num3, 0.000001);
+        chk_close('DB_SIZE_GB limit = SUM(limit_bytes)/2^30', v_num2, v_r2,   0.000001);
+        SELECT COUNT(*) INTO v_n FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'DB_SIZE_GB' AND day_dt = d_last;
+        chk_int('DB_SIZE_GB one row per container-day', v_n, 1);
+        SELECT slope_per_day, quality INTO v_num, v_str
+          FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'DB_SIZE_GB';
+        chk_true('DB_SIZE_GB slope > 0 (got ' || ROUND(v_num, 4) || ' GiB/day)', v_num > 0);
+        -- The fixture total is the sum of several linear series plus FIX_SPIKE's
+        -- step, FIX_GAP's missing days and FIX_PURGE's cliff, so it is growing but
+        -- not perfectly straight: assert the grade is fittable, not that it is OK.
+        chk_true('DB_SIZE_GB quality fittable (got ' || v_str || ')',
+                 v_str IN ('OK','LOW_CONFIDENCE'));
+
+        DBMS_OUTPUT.PUT_LINE('=== M11 alerts + CAPR_SERIES ===');
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+          WHERE kind = 'SERIES_LIMIT' AND series_key = 'SESSIONS'
+            AND severity = 'CRIT' AND db_pdb = 'FIXCDB';
+        chk_int('SESSIONS raises SERIES_LIMIT CRIT (db_pdb FIXCDB)', v_n, 1);
+        SELECT value INTO v_num FROM capr_alerts
+          WHERE kind = 'SERIES_LIMIT' AND series_key = 'SESSIONS';
+        chk_int('SERIES_LIMIT value = days_to_limit', v_num, meta_n('SESS_DTL'));
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+          WHERE kind = 'SERIES_LIMIT' AND series_key <> 'SESSIONS';
+        chk_int('no SERIES_LIMIT for PROCESSES / REDO_GB_DAY / DB_SIZE_GB', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'SERIES_NEARLIMIT';
+        chk_int('no SERIES_NEARLIMIT (sessions at 88%, under 90)', v_n, 0);
+        SELECT COUNT(*) INTO v_n   FROM capr_series;
+        SELECT COUNT(*) INTO v_num FROM capf_series_forecast;
+        chk_int('CAPR_SERIES row count = CAPF_SERIES_FORECAST', v_n, v_num);
+        SELECT sev, rank_series INTO v_str, v_num
+          FROM capr_series WHERE dbid = v_dbid AND series = 'SESSIONS';
+        chk_str('CAPR_SERIES SESSIONS sev', v_str, 'CRIT');
+        chk_int('CAPR_SERIES SESSIONS ranks first', v_num, 1);
+        SELECT COUNT(*) INTO v_n FROM capr_series WHERE db_pdb <> 'FIXCDB';
+        chk_int('CAPR_SERIES resolves db_pdb', v_n, 0);
+    END;
+
+    DECLARE
+        d_gap   DATE := meta_d('CPUGAP_DAY');
+        d_gnext DATE := meta_d('CPUGAP_NEXT');
+        n_pdb   NUMBER := meta_n('PDB_CON_DBID');
+        v_gflag VARCHAR2(1);
+        v_lbl   VARCHAR2(100);
+        v_key   VARCHAR2(60);
+        v_dev   NUMBER;
+        v_thr   NUMBER;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('=== M10.5 CPU gap handling ===');
+        -- The gap day's two snapshots exist but carry no OSSTAT rows, so the
+        -- day itself has no CPU row at all -- exactly like a real AWR outage.
+        SELECT COUNT(*) INTO v_n FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_gap;
+        chk_int('CPU gap day absent from CAPD_CPU_DAILY', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND gap_flag = 'Y';
+        chk_int('exactly one gap-flagged CPU day', v_n, 1);
+
+        -- The day AFTER it absorbs the whole outage in ONE 36 h interval.
+        SELECT gap_flag, max_interval_hours, day_gap, busy_pct, busy_p95
+          INTO v_gflag, v_num, v_num2, v_num3, v_r2
+          FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_gnext;
+        chk_str  ('CPU post-gap day gap_flag', v_gflag, 'Y');
+        chk_close('CPU post-gap day max_interval_hours', v_num,  meta_n('CPUGAP_HOURS'),    0.000001);
+        chk_int  ('CPU post-gap day day_gap',            v_num2, meta_n('CPUGAP_DAYGAP'));
+        chk_close('CPU post-gap day busy_pct',           v_num3, meta_n('CPUGAP_BUSY_PCT'), 0.000001);
+        -- busy_p95 = 60 means the 36 h interval (a 20% three-half-day average)
+        -- was left out; including it would give PERCENTILE_CONT(.95) = 58.
+        chk_close('CPU post-gap day busy_p95 (long interval excluded)',
+                  v_r2, meta_n('CPUGAP_P95'), 0.000001);
+
+        -- A normal day is untouched: 12 h intervals, no flag, consecutive.
+        SELECT gap_flag, max_interval_hours, day_gap INTO v_gflag, v_num, v_num2
+          FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_probe;
+        chk_str  ('CPU probe day gap_flag', v_gflag, 'N');
+        chk_close('CPU probe day max_interval_hours', v_num, 12, 0.000001);
+        chk_int  ('CPU probe day day_gap', v_num2, 1);
+
+        -- The post-gap day deviates by 10 points against a 9-point threshold,
+        -- so ONLY the gap guard keeps it unflagged. Assert both halves.
+        SELECT anomaly_flag, gap_flag, ABS(dev_pct), threshold_pct
+          INTO v_str, v_gflag, v_dev, v_thr
+          FROM capa_cpu_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_gnext;
+        chk_str ('CPU post-gap day exposes gap_flag', v_gflag, 'Y');
+        chk_true('CPU post-gap day WOULD have flagged (|dev| ' || ROUND(v_dev,2)
+                 || ' > thr ' || ROUND(v_thr,2) || ')', v_dev > v_thr);
+        chk_true('CPU post-gap day anomaly_flag IS NULL (gap guard)', v_str IS NULL);
+
+        -- ...and it is not allowed to poison the next week's baseline either.
+        SELECT n_hist INTO v_n FROM capa_cpu_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_gnext + 7;
+        chk_true('gap day excluded from next-week same-weekday baseline (n_hist '
+                 || v_n || ' < 8)', v_n < 8);
+        -- ...but the injected Tuesday's own baseline must be untouched. Both
+        -- gap days are a different weekday by construction, so neither can be
+        -- one of its dow_weeks priors. (n_hist can still be 7 rather than 8
+        -- without the gap having anything to do with it: depending on where
+        -- SYSDATE falls, the day-60 restart is sometimes a same-weekday prior
+        -- of the injected Tuesday, and that day has no CPU row either.)
+        chk_true('gap days are not same-weekday priors of the injected Tuesday',
+                 MOD(d_inj - d_gap, 7) <> 0 AND MOD(d_inj - d_gnext, 7) <> 0);
+        SELECT n_hist INTO v_n FROM capa_cpu_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_inj;
+        chk_true('injected Tuesday n_hist unaffected by the gap (got ' || v_n
+                 || ', >= 7)', v_n >= 7);
+
+        DBMS_OUTPUT.PUT_LINE('=== M10.3 level-shift detection (CAPA_CPU_SHIFT) ===');
+        SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'shift_days';
+        chk_int('knob shift_days', v_num, 7);
+        SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'shift_baseline_days';
+        chk_int('knob shift_baseline_days', v_num, 28);
+        SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'shift_min_pct';
+        chk_int('knob shift_min_pct', v_num, 15);
+        SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'cpu_gap_hours';
+        chk_int('knob cpu_gap_hours', v_num, 12);
+
+        -- One row per (container, metric): root has BUSY_PCT / BUSY_P95 /
+        -- DB_CPU_PCT, FIXPDB1 (time-model only) has DB_CPU_PCT alone.
+        SELECT COUNT(*) INTO v_n FROM capa_cpu_shift WHERE dbid = v_dbid;
+        chk_int('CAPA_CPU_SHIFT row count (3 root + 1 PDB)', v_n, 4);
+
+        -- The FIXPDB1 step: +18 points sustained over the last 7 days.
+        SELECT shift_flag, shift_pct, recent_med, base_med
+          INTO v_str, v_num, v_num2, v_num3
+          FROM capa_cpu_shift
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND metric = 'DB_CPU_PCT';
+        chk_str  ('PDB DB_CPU_PCT shift_flag', v_str, 'UP');
+        chk_close('PDB DB_CPU_PCT shift_pct',  v_num,  meta_n('SHIFT_EXPECTED_PTS'), 0.01);
+        chk_close('PDB DB_CPU_PCT recent_med', v_num2, meta_n('SHIFT_RECENT_MED'),   0.01);
+        chk_close('PDB DB_CPU_PCT base_med',   v_num3, meta_n('SHIFT_BASE_MED'),     0.01);
+        SELECT n_recent, n_base, n_above, base_mad_sigma
+          INTO v_n, v_num, v_num2, v_num3
+          FROM capa_cpu_shift
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND metric = 'DB_CPU_PCT';
+        chk_int  ('PDB shift n_recent (full window)', v_n, 7);
+        chk_int  ('PDB shift n_base', v_num, 28);
+        chk_int  ('PDB shift n_above (N-of-M: all 7)', v_num2, 7);
+        chk_close('PDB shift base_mad_sigma', v_num3, meta_n('SHIFT_BASE_SIGMA'), 0.0001);
+
+        -- ...and the step is invisible to the DAILY layers: the PDB has no
+        -- host busy% at all, so no CAPA_CPU_ANOM row, let alone a HIGH.
+        SELECT COUNT(*) INTO v_n FROM capa_cpu_anom
+          WHERE dbid = v_dbid AND con_dbid = n_pdb;
+        chk_int('PDB raises no daily CPU anomalies', v_n, 0);
+        -- The flat root container must NOT shift (no false positives).
+        SELECT COUNT(*) INTO v_n FROM capa_cpu_shift
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND shift_flag IS NOT NULL;
+        chk_int('root container raises no level shift', v_n, 0);
+
+        -- Alert + report view.
+        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SHIFT';
+        chk_int('exactly one CPU_SHIFT alert', v_n, 1);
+        SELECT severity, db_pdb, series_key INTO v_str, v_lbl, v_key
+          FROM capr_alerts WHERE kind = 'CPU_SHIFT';
+        chk_str('CPU_SHIFT alert severity (UP -> WARN)', v_str, 'WARN');
+        chk_str('CPU_SHIFT alert db_pdb', v_lbl, 'FIXCDB/FIXPDB1');
+        chk_str('CPU_SHIFT alert series_key', v_key, 'DB_CPU_PCT');
+        SELECT COUNT(*) INTO v_n FROM capr_cpu_shifts;
+        chk_int('CAPR_CPU_SHIFTS holds the one flagged row', v_n, 1);
+        SELECT sev, rank_shift, db_pdb INTO v_str, v_num, v_lbl
+          FROM capr_cpu_shifts;
+        chk_str('CAPR_CPU_SHIFTS sev', v_str, 'WARN');
+        chk_int('CAPR_CPU_SHIFTS rank_shift', v_num, 1);
+        chk_str('CAPR_CPU_SHIFTS resolves db_pdb', v_lbl, 'FIXCDB/FIXPDB1');
+    EXCEPTION
+        WHEN OTHERS THEN
+            fail('M10.3/M10.5 block raised ' || SQLERRM);
+    END;
 
     DBMS_OUTPUT.PUT_LINE('----------------------------------------');
     DBMS_OUTPUT.PUT_LINE('RESULT: ' || g_pass || ' passed, ' || g_fail || ' failed');

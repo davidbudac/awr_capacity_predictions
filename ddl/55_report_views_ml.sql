@@ -24,7 +24,8 @@
 --   WHERE is_reportable = 'Y' AND rank_report <= &top_n
 -- while the views themselves still expose every row to other consumers.
 --   CAPR_BACKTEST       -- section 6c: the M9.4 holdout scorecard pivoted to
---                          one row per series, incl. the BETTER verdict.
+--                          one row per series, incl. the BETTER verdict and
+--                          (M10.4) the ESM model-type pick + its rationale.
 --
 -- Read-only, like everything else in the suite.
 --
@@ -112,6 +113,8 @@ LEFT   JOIN (SELECT dbid, con_dbid, series_key, value, lower_bound, upper_bound
 -- 6b (series_kind='CPU', raw columns). ESM columns are populated only where
 -- a fresh model exists and the horizon is inside Oracle's ESM cap (+30 on
 -- 19c); +90/180/365 are REGR-only by design.
+-- M10.4 adds esm_model_type / esm_model: which candidate (EXSM_HOLT or
+-- EXSM_ADDWINTERS/7) the production model for that series was trained with.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_esm_compare AS
 SELECT f.dbid,
@@ -128,6 +131,13 @@ SELECT f.dbid,
        MAX(CASE WHEN f.engine = 'ESM'  THEN f.value END)       / 1073741824 AS esm_gb,
        MAX(CASE WHEN f.engine = 'ESM'  THEN f.lower_bound END) / 1073741824 AS esm_lo_gb,
        MAX(CASE WHEN f.engine = 'ESM'  THEN f.upper_bound END) / 1073741824 AS esm_hi_gb,
+       -- M10.4: which ESM candidate produced this row, full name and a 4-char
+       -- form the narrow text report can afford. NULL where no ESM point.
+       MAX(CASE WHEN f.engine = 'ESM'  THEN f.model_type END)  AS esm_model_type,
+       CASE MAX(CASE WHEN f.engine = 'ESM' THEN f.model_type END)
+            WHEN 'EXSM_ADDWINTERS' THEN 'ADDW'
+            WHEN 'EXSM_HOLT'       THEN 'HOLT'
+       END                                                     AS esm_model,
        -- M7.4: section 6a applies the SAME bound as section 2, INHERITED from
        -- CAPR_TBSPC_FORECAST rather than recomputed, so the two sections can
        -- never disagree about which tablespaces are worth printing. CPU rows
@@ -160,6 +170,24 @@ SELECT f.dbid,
        f.series_kind,
        f.series_key,
        TO_CHAR(MIN(f.cutoff_day), 'YYYY-MM-DD')            AS cutoff_day,
+       -- M10.4 selection: the production model's type, how it was decided, and
+       -- the two candidate MAPEs that decided it.
+       NVL(MAX(p.model_type), MAX(f.model_type))           AS esm_model_type,
+       MAX(p.chosen_by)                                    AS chosen_by,
+       MAX(p.mape_holt)                                    AS mape_holt,
+       MAX(p.mape_addw)                                    AS mape_addw,
+       -- esm_pick: one narrow column that says WHICH and WHY, e.g.
+       --   ADDW H=2.90 W=1.20     (AUTO: Holt 2.90% vs AddWinters 1.20% MAPE)
+       --   HOLT (config)          (pinned by esm_tbspc_model)
+       CASE
+            WHEN MAX(p.model_type) IS NULL THEN NULL
+            WHEN MAX(p.chosen_by) = 'AUTO_BACKTEST'
+              THEN CASE MAX(p.model_type) WHEN 'EXSM_ADDWINTERS' THEN 'ADDW' ELSE 'HOLT' END
+                   || ' H=' || NVL(TO_CHAR(ROUND(MAX(p.mape_holt), 2), 'FM99990.00'), '-')
+                   || ' W=' || NVL(TO_CHAR(ROUND(MAX(p.mape_addw), 2), 'FM99990.00'), '-')
+            ELSE CASE MAX(p.model_type) WHEN 'EXSM_ADDWINTERS' THEN 'ADDW' ELSE 'HOLT' END
+                 || ' (' || LOWER(NVL(MAX(p.chosen_by), 'default')) || ')'
+       END                                                 AS esm_pick,
        MAX(CASE WHEN f.engine = 'REGR' THEN f.mape_pct END) AS regr_mape,
        MAX(CASE WHEN f.engine = 'REGR' THEN f.bias_pct END) AS regr_bias,
        MAX(CASE WHEN f.engine = 'ESM'  THEN f.mape_pct END) AS esm_mape,
@@ -175,4 +203,11 @@ SELECT f.dbid,
 FROM   capf_backtest f
 LEFT   JOIN capr_container cn
   ON   cn.dbid = f.dbid AND cn.con_dbid = f.con_dbid
+-- M10.4: the production model's registry row carries the recorded decision.
+-- series_key is unique per container across kinds (tablespace names vs the two
+-- fixed CPU metric strings), so dbid/con_dbid/series_key identifies it.
+LEFT   JOIN cap_ml_model p
+  ON   p.purpose = 'FORECAST'
+ AND   p.dbid = f.dbid AND p.con_dbid = f.con_dbid
+ AND   p.series_key = f.series_key
 GROUP  BY f.dbid, f.con_dbid, f.series_kind, f.series_key;

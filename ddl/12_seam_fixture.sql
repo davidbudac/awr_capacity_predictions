@@ -48,3 +48,17 @@ FROM   cap_fixture_time_model;
 CREATE OR REPLACE VIEW capv_container AS
 SELECT dbid, con_dbid, db_name, con_name
 FROM   cap_fixture_container;
+
+-- M11 sources. CAP_FIXTURE_RESOURCE_LIMIT stores limit_value ALREADY as a
+-- NUMBER (the local seam's 'UNLIMITED'-to-NULL conversion is part of the
+-- mapping, not of the contract), and CAP_FIXTURE_SYSSTAT deliberately holds a
+-- second, irrelevant stat name so the downstream 'redo size' filter is
+-- exercised rather than assumed.
+CREATE OR REPLACE VIEW capv_resource_limit AS
+SELECT dbid, con_dbid, instance_number, snap_id, resource_name,
+       current_utilization, max_utilization, limit_value
+FROM   cap_fixture_resource_limit;
+
+CREATE OR REPLACE VIEW capv_sysstat AS
+SELECT dbid, con_dbid, instance_number, snap_id, stat_name, value
+FROM   cap_fixture_sysstat;
