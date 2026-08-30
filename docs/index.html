@@ -49,7 +49,7 @@
         <span class="eyebrow">In-database · Oracle 19c floor · read-only</span>
         <h1>Capacity forecasting that lives inside the database.</h1>
         <p class="lead">SQL-level growth forecasting, pollable alerts and deterministic anomaly
-          detection driven entirely by AWR history — <strong>no external ML stack, no agent, no data
+          detection driven entirely by AWR history, with <strong>no external ML stack, no agent, no data
           export</strong>. Just views, three small tables of its own, an OML package, and read-only
           SQL*Plus reports in text and HTML.</p>
         <div class="chips">
@@ -64,11 +64,11 @@
 
       <p>This suite turns the performance history Oracle already collects (AWR) into forward-looking
         capacity answers, without moving a single row out of the database. Everything runs as SQL and
-        PL/SQL you can read, and every number it prints can be reconstructed by hand. The pipeline is
-        five view layers deep — <span class="inline">CAPV_</span> (seam) →
+        PL/SQL you can read, and you can reconstruct every number it prints by hand. The pipeline is
+        five view layers deep. <span class="inline">CAPV_</span> (seam) →
         <span class="inline">CAPD_</span> (daily) → <span class="inline">CAPF_</span> (forecast) →
         <span class="inline">CAPA_</span> (anomaly) → <span class="inline">CAPR_</span>
-        (integration) — and the top layer is what both reports and any monitoring system read. Start
+        (integration), and the top layer is what both reports and any monitoring system read. Start
         here for the big picture, then follow the guides to install it, run it, and prove it against
         known answers.</p>
 
@@ -76,8 +76,8 @@
       <div class="section-head" id="what">
         <span class="eyebrow">The point</span>
         <h2>Five questions it answers</h2>
-        <p>Per series, per tablespace and per container — the operational questions that actually
-          page you.</p>
+        <p>Per series, per tablespace and per container. These are the operational questions that
+          actually page you.</p>
       </div>
       <div class="tablewrap">
         <table>
@@ -85,8 +85,8 @@
           <thead><tr><th scope="col">Question</th><th scope="col">What it produces</th><th scope="col">Source</th></tr></thead>
           <tbody>
             <tr><td><b>Tablespace growth</b></td><td>Projected size at +30 / +90 / +180 / +365 days with 95% prediction bands, and <code>days_to_full</code> with a worst/best-case range</td><td class="def">DBA_HIST_TBSPC_SPACE_USAGE</td></tr>
-            <tr><td><b>CPU headroom</b></td><td>Host busy% — daily average, p95 "busy hour" and peak-window — plus DB CPU as a percent of core capacity, days-to-saturation, and level shifts</td><td class="def">DBA_HIST_OSSTAT · SYS_TIME_MODEL</td></tr>
-            <tr><td><b>Fixed-ceiling series</b></td><td>Peak <code>processes</code> / <code>sessions</code> against the init parameters, redo GiB/day, and total DB size against the summed tablespace ceilings — each with days-to-limit</td><td class="def">DBA_HIST_RESOURCE_LIMIT · SYSSTAT · tablespace usage</td></tr>
+            <tr><td><b>CPU headroom</b></td><td>Host busy% (daily average, p95 "busy hour" and peak-window) plus DB CPU as a percent of core capacity, days-to-saturation, and level shifts</td><td class="def">DBA_HIST_OSSTAT · SYS_TIME_MODEL</td></tr>
+            <tr><td><b>Fixed-ceiling series</b></td><td>Peak <code>processes</code> / <code>sessions</code> against the init parameters, redo GiB/day, and total DB size against the summed tablespace ceilings, each with days-to-limit</td><td class="def">DBA_HIST_RESOURCE_LIMIT · SYSSTAT · tablespace usage</td></tr>
             <tr><td><b>Anomalies</b></td><td>Median + MAD flags, each reproducible by hand (value, median, k·σ, robust z)</td><td class="def">daily deltas</td></tr>
             <tr><td><b>Which engine to trust</b></td><td>A holdout backtest that replays the recent past and scores each engine's MAPE and bias against what actually happened</td><td class="def">CAPF_BACKTEST</td></tr>
           </tbody>
@@ -102,14 +102,14 @@
       <p>Every calculation reads from a thin layer of nine views prefixed
         <span class="inline">CAPV_</span>, shaped to look just like Oracle's AWR data dictionary.
         Nothing above them ever touches the real <span class="inline">DBA_HIST_*</span> tables directly.
-        That single layer is the <b>seam</b>: to change where the data comes from, you swap
-        <em>one</em> install file — and the identical SQL then runs against this database's live AWR, a
+        That single layer is the <b>seam</b>. To change where the data comes from, you swap
+        <em>one</em> install file, and the identical SQL then runs against this database's live AWR, a
         central fleet warehouse, or synthetic test fixtures, producing the same math and the same report
-        either way. It's the database equivalent of pointing a hostname at a different server.</p>
+        either way.</p>
       <div class="callout tip">
         <span class="ico">▸</span>
         <p><strong>The one idea to hold onto.</strong> Point the seam at real AWR to report on
-        production; point it at fixtures — fake data whose exact answers are worked out in advance — to
+        production; point it at fixtures, fake data whose exact answers are worked out in advance, to
         prove the tool is correct. Same code either way. The
         <a href="concepts.html">How it works</a> page walks the full pipeline built on top of it.</p>
       </div>
@@ -127,9 +127,9 @@
           <thead><tr><th scope="col">Feature</th><th scope="col">What it changes</th></tr></thead>
           <tbody>
             <tr><td><b>Prediction intervals</b></td><td class="def">Every projection carries a 95% band, and <code>days_to_full</code> / days-to-saturation come as a worst-case / best-case range ("120 days, worst case 80") derived from the confidence interval on the slope.</td></tr>
-            <tr><td><b>Robust slope</b></td><td class="def">Theil–Sen — the median of the pairwise slopes — is computed alongside ordinary least squares and can be selected with the <span class="k">slope_method</span> knob, so one bulk-load day can't drag the whole trend.</td></tr>
+            <tr><td><b>Robust slope</b></td><td class="def">Theil–Sen, the median of the pairwise slopes, is computed alongside ordinary least squares and can be selected with the <span class="k">slope_method</span> knob, so one bulk-load day can't drag the whole trend.</td></tr>
             <tr><td><b>Change-point reset</b></td><td class="def">After a purge or partition drop, the training window restarts at the cliff instead of fitting a line straight across it. The reset day is reported, so you can see it happened.</td></tr>
-            <tr><td><b>Backtest</b></td><td class="def">The last few weeks are held out, both engines forecast them, and the report scores MAPE and bias per engine — which also picks the ESM model type automatically.</td></tr>
+            <tr><td><b>Backtest</b></td><td class="def">The last few weeks are held out, both engines forecast them, and the report scores MAPE and bias per engine. That also picks the ESM model type automatically.</td></tr>
           </tbody>
         </table>
       </div>
@@ -143,22 +143,22 @@
       <div class="split" style="gap:16px">
         <div class="track-card a" style="border-top-color:var(--accent)">
           <div class="tk">Tier 1 · always on</div>
-          <h4>Pure SQL — a straight trend line</h4>
+          <h4>Pure SQL, a straight trend line</h4>
           <p>Standard linear regression (<code>REGR_*</code>), or Theil–Sen if you prefer robustness.
             Every forecast is just slope × days plus a starting point, and every anomaly is explained
-            by its median and MAD — so you can check any number by hand. Nothing to train, nothing
+            by its median and MAD, so you can check any number by hand. Nothing to train, nothing
             hidden.</p>
           <div class="meta"><span><b>Reaches:</b> +30 / +90 / +180 / +365 days, with bands</span>
             <span><b>Needs:</b> nothing beyond the views</span></div>
         </div>
         <div class="track-card b">
           <div class="tk">Tier 2 · optional</div>
-          <h4>OML ESM — exponential smoothing</h4>
+          <h4>OML ESM, exponential smoothing</h4>
           <p>One Oracle Machine Learning model per series via <code>DBMS_DATA_MINING</code>. CPU uses
             additive Winters (weekly seasonality); tablespaces default to AUTO, which trains both Holt
             and additive Winters as holdout twins and keeps whichever forecast the held-out days more
             accurately. Shown against Tier 1 in the report.</p>
-          <div class="meta"><span><b>Reaches:</b> +30 only — 19c hard-caps the horizon at 30 steps</span>
+          <div class="meta"><span><b>Reaches:</b> +30 only; 19c hard-caps the horizon at 30 steps</span>
             <span><b>Needs:</b> <span class="inline">CREATE MINING MODEL</span></span></div>
         </div>
       </div>
@@ -167,10 +167,10 @@
       <div class="section-head" id="integration">
         <span class="eyebrow">Beyond the report</span>
         <h2>It doesn't only print a report</h2>
-        <p>The top view layer is a machine-readable surface, and a handful of standalone scripts
-          cover the rest of the operational day.</p>
+        <p>The top view layer is machine-readable, and a handful of standalone scripts cover the
+          rest of the operational day.</p>
       </div>
-      <p><span class="inline">CAPR_ALERTS</span> is one row per current issue — a severity, a
+      <p><span class="inline">CAPR_ALERTS</span> is one row per current issue, with a severity, a
         <code>kind</code>, the <span class="inline">(dbid, con_dbid)</span> keys plus a resolved
         <code>DB/PDB</code> label, the metric value against its threshold, and a ready-to-page
         message. Poll it from an OEM metric extension, Zabbix, Nagios, or a scheduler job:</p>
@@ -187,11 +187,11 @@
           <thead><tr><th scope="col">Piece</th><th scope="col">What it's for</th></tr></thead>
           <tbody>
             <tr><td><span class="kt">CAPR_ALERTS</span></td><td class="def">Pollable alerts: <code>TBSPC_FULL</code>, <code>TBSPC_NEARFULL</code>, <code>TBSPC_ANOM</code>, <code>CPU_SAT</code>, <code>DBCPU_SAT</code>, <code>CPU_ANOM</code>, <code>CPU_SHIFT</code>, <code>SERIES_LIMIT</code>, <code>SERIES_NEARLIMIT</code>.</td></tr>
-            <tr><td><span class="k">CAPR_</span> section views</td><td class="def">One view per report section. The text and HTML drivers only <em>format</em> — every conversion, severity marker and label is computed once in the view, so the two outputs cannot drift.</td></tr>
+            <tr><td><span class="k">CAPR_</span> section views</td><td class="def">One view per report section. The text and HTML drivers only <em>format</em>; every conversion, severity marker and label is computed once in the view, so the two outputs cannot drift.</td></tr>
             <tr><td><span class="kt">CAP_TBSPC_OVERRIDE</span></td><td class="def">State the real ceiling when an autoextend <code>maxsize</code> is bigger than the filesystem, or exclude a staging tablespace that is <em>supposed</em> to fill up. Wildcards let one row cover a whole fleet.</td></tr>
-            <tr><td><span class="inline">doctor.sql</span></td><td class="def">Read-only preflight: pack access, direct <code>DBA_HIST_*</code> grants, privileges, AWR retention and how many days of history each source really holds — with a plain-English reason why forecasts would read <span class="pill crit">INSUFFICIENT_HISTORY</span>.</td></tr>
-            <tr><td><span class="inline">install_jobs.sql</span></td><td class="def">Opt-in <code>DBMS_SCHEDULER</code> automation — a weekly ESM retrain and a daily alert-snapshot file — both created <b>disabled</b>, and never part of <span class="inline">@install.sql</span>.</td></tr>
-            <tr><td>Drill-down scripts</td><td class="def"><span class="inline">report/drill_tbspc.sql</span> and <span class="inline">report/drill_cpu.sql</span> print one series end to end — fit header, the daily values with fit and residual, and one spelled-out arithmetic line per flagged day — so a suspicious row can be re-derived with a calculator.</td></tr>
+            <tr><td><span class="inline">doctor.sql</span></td><td class="def">Read-only preflight: pack access, direct <code>DBA_HIST_*</code> grants, privileges, AWR retention and how many days of history each source really holds, with a plain-English reason why forecasts would read <span class="pill crit">INSUFFICIENT_HISTORY</span>.</td></tr>
+            <tr><td><span class="inline">install_jobs.sql</span></td><td class="def">Opt-in <code>DBMS_SCHEDULER</code> automation, a weekly ESM retrain and a daily alert-snapshot file, both created <b>disabled</b>, and never part of <span class="inline">@install.sql</span>.</td></tr>
+            <tr><td>Drill-down scripts</td><td class="def"><span class="inline">report/drill_tbspc.sql</span> and <span class="inline">report/drill_cpu.sql</span> print one series end to end: fit header, the daily values with fit and residual, and one spelled-out arithmetic line per flagged day, so you can re-derive a suspicious row with a calculator.</td></tr>
             <tr><td>Positional arguments</td><td class="def">Both report drivers take <span class="inline">[top_n] [anomaly_days] [show_esm]</span> positionally and never prompt; anything you leave off falls back to <span class="inline">report/defaults.sql</span>.</td></tr>
           </tbody>
         </table>
@@ -207,15 +207,15 @@
         <span class="ico">i</span>
         <p><strong>Read-only against your data.</strong> The reports and all
         <span class="inline">CAPV / CAPD / CAPF / CAPA / CAPR</span> views only ever <code>SELECT</code>.
-        The suite writes exactly three tables of its own — <span class="inline">CAP_CONFIG</span>
+        The suite writes exactly three tables of its own, <span class="inline">CAP_CONFIG</span>
         (tuning knobs), <span class="inline">CAP_TBSPC_OVERRIDE</span> (operator-set ceilings and
-        exclusions) and <span class="inline">CAP_ML_MODEL</span> (the Tier 2 registry) — and nothing
+        exclusions) and <span class="inline">CAP_ML_MODEL</span> (the Tier 2 registry), and nothing
         else.</p>
       </div>
       <div class="callout tip">
         <span class="ico">▸</span>
-        <p><strong>Safe to re-run.</strong> Re-running the installer is idempotent and non-destructive:
-        your config knobs, limit overrides and trained models all survive
+        <p><strong>Safe to re-run.</strong> Re-running the installer is idempotent and non-destructive.
+        Your config knobs, limit overrides and trained models all survive
         <span class="inline">@install.sql</span>. A full teardown is a single
         <span class="inline">@uninstall.sql</span>.</p>
       </div>
@@ -232,8 +232,8 @@
           <caption>Deferred to v2</caption>
           <thead><tr><th scope="col">Not yet built</th><th scope="col">Why it's not trivial</th></tr></thead>
           <tbody>
-            <tr><td><b>Memory forecasting</b></td><td class="def">SGA / PGA trends from <span class="inline">DBA_HIST_MEM_DYNAMIC_COMPONENTS</span> and <span class="inline">DBA_HIST_PGASTAT</span> — a new seam source and a new daily series.</td></tr>
-            <tr><td><b>Cross-DBID stitching</b></td><td class="def">A non-CDB plugged in as a PDB changes <code>dbid</code>, which splits its history into two series. Joining them needs a stable identity that outlives the DBID — a warehouse <code>target_id</code>.</td></tr>
+            <tr><td><b>Memory forecasting</b></td><td class="def">SGA / PGA trends from <span class="inline">DBA_HIST_MEM_DYNAMIC_COMPONENTS</span> and <span class="inline">DBA_HIST_PGASTAT</span>: a new seam source and a new daily series.</td></tr>
+            <tr><td><b>Cross-DBID stitching</b></td><td class="def">A non-CDB plugged in as a PDB changes <code>dbid</code>, which splits its history into two series. Joining them needs a stable identity that outlives the DBID, a warehouse <code>target_id</code>.</td></tr>
           </tbody>
         </table>
       </div>

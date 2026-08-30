@@ -57,8 +57,7 @@
         <span class="eyebrow">Start here</span>
         <h2>Plain-English terms</h2>
         <p>A few words here come from software testing and data science, not infrastructure.
-          Here's what each one means in terms you already use day to day. Skim this once and the rest
-          reads easily.</p>
+          Here's what each one means in terms you already use day to day.</p>
       </div>
       <div class="tablewrap">
         <table>
@@ -86,24 +85,22 @@
         <span class="ico">▸</span>
         <p><strong>The one idea to hold onto.</strong> Everything downstream reads from the
         <b>seam</b> (those <span class="inline">CAPV_</span> views). Point the seam at real AWR to
-        report on production; point it at fixtures to prove the tool is correct. Same code either way —
-        that's the whole design.</p>
+        report on production; point it at fixtures to prove the tool is correct. Same code either way.</p>
       </div>
 
       <!-- ===================== SEAM ===================== -->
       <div class="section-head" id="seam">
         <span class="eyebrow">Architecture</span>
         <h2>The swappable data source (the "seam")</h2>
-        <p>One idea makes the whole thing portable — write the reporting once, swap where the data
-          comes from underneath it.</p>
+        <p>Write the reporting once, swap where the data comes from underneath it.</p>
       </div>
 
       <p>Every calculation in this tool reads from a thin layer of nine views prefixed
         <span class="inline">CAPV_</span>, shaped to look just like Oracle's AWR data dictionary.
         Nothing above them ever touches the real <span class="inline">DBA_HIST_*</span> tables directly.
         That single layer is the <b>seam</b>: to change where the data comes from, you swap
-        <em>one</em> install file, and everything above it behaves identically — same math, same report,
-        same numbers. It's the database equivalent of pointing a hostname at a different server.</p>
+        <em>one</em> install file, and everything above it behaves identically: same math, same numbers.
+        It's the database equivalent of pointing a hostname at a different server.</p>
 
       <div class="tablewrap">
         <table>
@@ -122,7 +119,7 @@
         real AWR tables, so there'd normally be no way to check the forecasts are correct. The seam
         solves that: point it at <b>fixture</b> mode — synthetic data whose exact answers are worked
         out on paper in advance — and confirm the tool reproduces them. Then point the very same code
-        at real AWR (<b>local</b> mode) with confidence.</p>
+        at real AWR (<b>local</b> mode).</p>
       </div>
 
       <!-- ===================== PIPELINE ===================== -->
@@ -340,7 +337,7 @@
         <span class="inline">resid_se = √(SSE/(n−2))</span>, and the half-width at a horizon
         <span class="inline">x₀</span> is
         <span class="inline">t · resid_se · √(1 + 1/n + (x₀−x̄)²/SXX)</span>. The band widens the
-        further out you look, which is exactly right.</p>
+        further out you look.</p>
       <p>The same machinery turns <span class="inline">days_to_full</span> into a range. The slope
         gets its own confidence interval
         (<span class="inline">slope_ci = t · resid_se / √SXX</span>); dividing the remaining headroom
@@ -671,7 +668,7 @@
       <div class="section-head" id="state">
         <span class="eyebrow">Architecture</span>
         <h2>Persisted state</h2>
-        <p>The suite writes exactly three tables of its own — and nothing else, ever.</p>
+        <p>The suite writes exactly three tables of its own, and nothing else.</p>
       </div>
       <div class="tablewrap">
         <table>
@@ -684,7 +681,7 @@
         </table>
       </div>
       <p>Re-running <span class="inline">@install.sql</span> preserves your tuning, your overrides and
-        your trained models; it's idempotent and non-destructive. The OML models themselves are schema
+        your trained models. The OML models themselves are schema
         objects (<span class="inline">DM$*</span>). For a full teardown, see
         <a href="reference.html#teardown">Teardown</a> in the reference (a single
         <span class="inline">@uninstall.sql</span>). The reports and all

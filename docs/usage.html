@@ -53,10 +53,9 @@
           than SQL.</p>
       </section>
 
-      <p>The workflow is: run one script from the repo root, read its eight sections top to bottom,
-        drill into any row you don't believe, wire <span class="inline">CAPR_ALERTS</span> into
-        whatever already pages you, and turn every threshold through
-        <span class="inline">CAP_CONFIG</span>. Nothing here writes to your AWR data.</p>
+      <p>The report has eight sections. Read them top to bottom, drill into any row you don't
+        believe, and wire <span class="inline">CAPR_ALERTS</span> into whatever already pages you.
+        Nothing here writes to your AWR data.</p>
 
       <!-- ===================== RUN ===================== -->
       <div class="section-head" id="run">
@@ -126,7 +125,7 @@
         knobs, and the same <b>read-only</b> guarantee as the text report — the HTML is assembled in one
         PL/SQL block via <span class="inline">DBMS_OUTPUT</span> and captured by <span class="inline">SPOOL</span>.
         It opens with a plain-English <em>“At a glance”</em> banner that says up front whether any
-        tablespace, the whole database, or CPU is heading for trouble, then adds severity badges, quality
+        tablespace, the whole database, or CPU is heading for trouble. Then come severity badges, quality
         pills, inline fill bars, and inline-SVG growth/trend charts (per-tablespace history + REGR projection
         + ESM&nbsp;+30 point and CI + limit line + anomaly markers; per-<span class="inline">con_dbid</span>
         host&nbsp;busy% and DB&nbsp;CPU charts with a saturation line). Every jargon column header carries a
@@ -241,8 +240,8 @@
       <div class="section-head" id="alerts">
         <span class="eyebrow">Integrate</span>
         <h2>Polling CAPR_ALERTS</h2>
-        <p>The machine-readable surface: one row per current issue, shaped for an OEM metric extension,
-          Zabbix, Nagios, or a scheduler job.</p>
+        <p>One row per current issue, shaped for an OEM metric extension, Zabbix, Nagios, or a
+          scheduler job.</p>
       </div>
 
       <div class="term in">
@@ -305,7 +304,7 @@
           <caption>The integration layer</caption>
           <thead><tr><th scope="col">View</th><th scope="col">One row per</th><th scope="col">Useful because</th></tr></thead>
           <tbody>
-            <tr><td><span class="inline">CAPR_ALERTS</span></td><td class="def">current issue</td><td class="def">Severity, kind, value vs threshold, message. The polling surface.</td></tr>
+            <tr><td><span class="inline">CAPR_ALERTS</span></td><td class="def">current issue</td><td class="def">Severity, kind, value vs threshold, message. This is what a poller reads.</td></tr>
             <tr><td><span class="inline">CAPR_CONTAINER</span></td><td class="def">(dbid, con_dbid)</td><td class="def">Resolves the <span class="inline">db_pdb</span> display label once — root/non-CDB → database name, PDB → <code>DB/PDB</code>, unknown → the raw <span class="inline">con_dbid</span>.</td></tr>
             <tr><td><span class="inline">CAPR_TBSPC_DAYS_TO_FULL</span></td><td class="def">tablespace</td><td class="def">Both rankings pre-computed as <span class="inline">rank_dtf</span> / <span class="inline">rank_nearfull</span>, with <span class="inline">sev_dtf</span> / <span class="inline">sev_nearfull</span> already resolved from config.</td></tr>
             <tr><td><span class="inline">CAPR_TBSPC_FORECAST</span></td><td class="def">tablespace</td><td class="def">GiB conversions, bands, quality, <span class="inline">limit_source</span>, the ESM +30 join, and the <span class="inline">is_reportable</span> / <span class="inline">rank_report</span> bound.</td></tr>

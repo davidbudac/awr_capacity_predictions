@@ -64,8 +64,7 @@
       <div class="section-head" id="before">
         <span class="eyebrow">Walkthrough · test box</span>
         <h2>Before you start</h2>
-        <p>Two ways to try it, both on your 19c test box. Run Track A first — it proves every part of
-          the tool against known answers; Track B then runs the exact same code against your real AWR.</p>
+        <p>What each track needs on the box: a connection, a schema, and the privileges below.</p>
       </div>
 
       <div class="track-pick">
@@ -400,7 +399,7 @@
         <p>Run the tool against fake data with known answers and confirm the forecasts, prediction
           intervals, robust slopes, change-point resets, limit overrides, anomaly detection, the CPU
           restart/gap/shift guards, the fixed-ceiling series, the alert surface and the optional
-          Tier&nbsp;2 model all produce exactly the right numbers — end to end, on your test box.</p>
+          Tier&nbsp;2 model all produce the right numbers.</p>
       </div>
 
       <div class="steps">
@@ -671,7 +670,7 @@ All ML assertions passed.</pre>
           <div class="step__rail"><div class="step__n">7</div><div class="step__line"></div></div>
           <div class="step__body">
             <h4>Generate a report against the fixtures</h4>
-            <p>Optional but satisfying — see the real report render with known numbers. Both drivers
+            <p>Optional. It renders the real report over known numbers. Both drivers
               auto-load <span class="inline">report/defaults.sql</span>, so a bare run never prompts;
               the optional positional arguments are
               <span class="inline">[top_n] [anomaly_days] [show_esm]</span>.</p>

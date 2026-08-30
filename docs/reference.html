@@ -48,15 +48,13 @@
       <section class="hero" id="reference">
         <span class="eyebrow">Reference</span>
         <h1>Reference</h1>
-        <p class="lead">The non-obvious facts, the full knob list, every object the suite creates,
-          and clean teardown — the details you reach for once you know what the tool does.</p>
+        <p class="lead">The 19c caveats, the full knob list, every object the suite creates, and how to
+          remove them again.</p>
       </section>
 
-      <p>Everything here traces to a single source of truth. Thresholds live in
-        <span class="inline">CAP_CONFIG</span>, the object names are exactly what
-        <span class="inline">@install.sql</span> creates, and each caveat was verified on a real
-        19c box. Skim the caveats first — they explain most of what surprises people — then use the
-        knob table and object index as a lookup.</p>
+      <p>Thresholds live in <span class="inline">CAP_CONFIG</span>, and the object names are exactly
+        what <span class="inline">@install.sql</span> creates. Skim the caveats first; they explain
+        most of what surprises people. The knob table and object index below are lookups.</p>
 
       <!-- ===================== CAVEATS ===================== -->
       <div class="section-head" id="caveats">
@@ -201,7 +199,7 @@
       <div class="section-head" id="teardown">
         <span class="eyebrow">Clean removal</span>
         <h2>Teardown</h2>
-        <p>Clean removal of everything the suite created.</p>
+        <p>Two scripts, plus a package call if you trained the Tier 2 models.</p>
       </div>
       <div class="term in">
         <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
