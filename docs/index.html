@@ -7,6 +7,7 @@
 <title>Introduction — AWR Capacity Predictions</title>
 <meta name="description" content="In-database capacity forecasting, alerting and deterministic anomaly detection for Oracle 19c, driven entirely by AWR history — no external ML stack, no agent, no data export.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23b06a0d'/><path d='M16 8L24 23L8 23Z' fill='%23fff'/></svg>">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="assets/style.css">
 <script>
   // No-FOUC: apply the persisted theme before first paint.
@@ -37,8 +38,10 @@
       <div class="nav__group">Reference</div>
       <a class="nav-page" href="reference.html"><span class="n">06</span> Reference</a>
     </nav>
-    <nav class="toc" id="toc" aria-label="On this page"></nav>
-    <button class="theme-toggle" id="themeBtn" type="button">◐ System</button>
+    <div class="sidebar__foot">
+      <button class="theme-toggle" id="themeBtn" type="button">◐ System</button>
+      <a class="sidebar__link" href="https://github.com/davidbudac/awr_capacity_predictions">Source on GitHub ↗</a>
+    </div>
   </aside>
 
   <main class="main" id="content" tabindex="-1">
@@ -195,6 +198,7 @@
 
     </div><!-- /wrap -->
   </main>
+  <aside class="rail"><nav class="toc" id="toc" aria-label="On this page"></nav></aside>
 </div>
 <script src="assets/site.js"></script>
 </body>
