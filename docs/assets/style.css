@@ -271,3 +271,48 @@ hr.soft{border:none;border-top:1px solid var(--border);margin:40px 0}
   .pager{flex-direction:column}
   p,.lead{max-width:none}
 }
+
+/* ---- Architecture flow diagram (index) ---- */
+.archflow{display:block;width:100%;margin:22px 0 4px}
+.archflow .af-src{fill:none;stroke:var(--border-strong);stroke-dasharray:4 3}
+.archflow .af-box{fill:var(--surface);stroke:var(--border)}
+.archflow .af-seam{fill:var(--accent-soft);stroke:none}
+.archflow .af-out{fill:var(--accent);stroke:none}
+.archflow .af-edge{fill:none;stroke:var(--faint)}
+.archflow .af-head{fill:var(--faint)}
+.archflow .af-name{font-family:var(--mono);font-size:13px;fill:var(--text)}
+.archflow .af-cap{font-family:var(--sans);font-size:10.5px;fill:var(--muted)}
+.archflow .af-seam-name{font-family:var(--mono);font-size:13px;fill:var(--accent-text)}
+.archflow .af-seam-cap{font-family:var(--sans);font-size:10.5px;fill:var(--accent-text)}
+.archflow .af-out-name{font-family:var(--mono);font-size:13px;fill:#ffffff}
+.archflow .af-out-cap{font-family:var(--sans);font-size:10.5px;fill:#dfe7ff}
+:root[data-theme="dark"] .archflow .af-out-name,
+:root[data-theme="dark"] .archflow .af-out-cap{fill:#0c1017}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]) .archflow .af-out-name,
+  :root:not([data-theme="light"]) .archflow .af-out-cap{fill:#0c1017}
+}
+
+/* ---- Benefits comparison (index) ---- */
+.compare{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:22px 0 4px}
+.compare .col{border:1px solid var(--border);border-radius:var(--r);padding:18px}
+.compare .col h3{font-size:13.5px;font-weight:600;margin:0 0 12px}
+.compare .col.yes{border-color:var(--accent)}
+.compare .pic{border-radius:8px;padding:10px;margin:0 0 14px;text-align:center}
+.compare .col.no .pic{background:var(--surface)}
+.compare .col.yes .pic{background:var(--accent-soft)}
+.compare .pic .cp-box{fill:none;stroke:var(--faint)}
+.compare .pic .cp-edge{stroke:var(--faint);fill:none}
+.compare .pic .cp-lbl{font-family:var(--sans);font-size:9px;fill:var(--muted)}
+.compare .col.yes .pic .cp-box{stroke:var(--accent)}
+.compare .col.yes .pic .cp-lbl{fill:var(--accent-text)}
+.compare .pic .cp-mono{font-family:var(--mono)}
+.compare ul{list-style:none;margin:0;padding:0;max-width:none}
+.compare li{font-size:13.5px;color:var(--muted);padding:7px 0 7px 26px;position:relative;border-top:1px solid var(--border)}
+.compare li:first-child{border-top:none}
+.compare li::before{position:absolute;left:2px;font-weight:700}
+.compare .col.no li::before{content:"\2715";color:var(--crit)}
+.compare .col.yes li::before{content:"\2713";color:var(--ok)}
+@media (max-width:620px){
+  .compare{grid-template-columns:1fr}
+}
