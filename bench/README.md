@@ -27,6 +27,7 @@ everywhere. This harness fixes that by running a repeatable daily load profile:
 | --- | --- |
 | `env.sh.example` | copy to `env.sh` (gitignored) and fill in — the only place credentials live |
 | `lib/common.sh` | shared helpers: SQL\*Plus-over-SSH, forced AWR snapshots, logging |
+| `setup/00_redo_logs.sql` | opt-in (`--redo`): 3 × 512 MB online + 4 × 512 MB standby redo — stock 50 MB groups pin OLTP phases on `log file switch (checkpoint incomplete)` |
 | `setup/01_awr_settings.sql` | 15-minute snapshots, 35-day retention (CDB$ROOT) |
 | `setup/02_bench_objects.sql` | `SOETBS` + `SHTBS` (capped autoextend) and a PDB-local wizard DBA |
 | `setup/setup.sh` | runs both of the above, then `oewizard` / `shwizard` |
@@ -59,6 +60,7 @@ count.
 cp bench/env.sh.example bench/env.sh && $EDITOR bench/env.sh   # once
 
 ./bench/setup/setup.sh                # AWR settings + tablespaces + both schemas
+./bench/setup/setup.sh --redo         # optional, primary only: bigger redo (DG change, never implied)
 ./bench/run_day.sh --short            # ~50 min smoke run
 ./bench/run_phase.sh peak             # a single phase
 crontab bench/cron/bench.crontab      # daily shape from here on

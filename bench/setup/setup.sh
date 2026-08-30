@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # bench/setup/setup.sh -- one-off build of the workload environment.
 #
-#   ./bench/setup/setup.sh [--awr] [--tablespaces] [--soe] [--sh]
+#   ./bench/setup/setup.sh [--redo] [--awr] [--tablespaces] [--soe] [--sh]
+#
+# --redo is never implied by the no-flag form: it swaps the online/standby redo
+# groups (see 00_redo_logs.sql), which is a Data Guard change.
 #
 # With no flags it runs everything. Each step is idempotent-ish: the SQL steps
 # swallow "already exists", the wizards refuse to overwrite an existing schema
@@ -9,12 +12,13 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/common.sh"
 require_swingbench
 
-do_awr=0; do_tbs=0; do_soe=0; do_sh=0
+do_redo=0; do_awr=0; do_tbs=0; do_soe=0; do_sh=0
 if [[ $# -eq 0 ]]; then
     do_awr=1; do_tbs=1; do_soe=1; do_sh=1
 else
     for a in "$@"; do
         case "$a" in
+            --redo)        do_redo=1 ;;
             --awr)         do_awr=1 ;;
             --tablespaces) do_tbs=1 ;;
             --soe)         do_soe=1 ;;
@@ -22,6 +26,11 @@ else
             *) echo "unknown flag: $a" >&2; exit 2 ;;
         esac
     done
+fi
+
+if [[ $do_redo -eq 1 ]]; then
+    log "REDO: 3 x ${REDO_MB:-512} MB online + 4 x standby (CDB\$ROOT, primary)"
+    run_sql_root "$BENCH_DIR/setup/00_redo_logs.sql" "redo_mb=${REDO_MB:-512}"
 fi
 
 if [[ $do_awr -eq 1 ]]; then
