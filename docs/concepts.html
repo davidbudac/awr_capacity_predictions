@@ -53,6 +53,47 @@
         <h1>How it works</h1>
         <p class="lead">Five view layers turn irregular AWR snapshots into forecasts, anomalies,
           alerts and a report, all built on one swappable data source.</p>
+
+        <div class="trackflow-scroll">
+        <svg class="trackflow" viewBox="0 0 860 190" role="img"
+             aria-label="One track with four stops. Irregular AWR snapshots are rolled up into a daily series, modelled by two engines, and turned into forecasts and alerts, with the signal changing shape at every stop.">
+          <text class="trk-lbl" x="40" y="30">read-only · in-database · nothing leaves the instance</text>
+          <line class="trk-spine" x1="40" y1="118" x2="820" y2="118"/>
+
+          <g class="trk-tick">
+            <line x1="60"  y1="112" x2="60"  y2="82"/>
+            <line x1="74"  y1="112" x2="74"  y2="90"/>
+            <line x1="88"  y1="112" x2="88"  y2="76"/>
+            <line x1="102" y1="112" x2="102" y2="88"/>
+            <line x1="116" y1="112" x2="116" y2="72"/>
+            <line x1="130" y1="112" x2="130" y2="84"/>
+            <line x1="144" y1="112" x2="144" y2="68"/>
+            <line x1="158" y1="112" x2="158" y2="80"/>
+          </g>
+          <circle class="trk-dot" cx="110" cy="118" r="5"/>
+          <text class="trk-name" x="110" y="146" text-anchor="middle">AWR snapshots</text>
+          <text class="trk-cap"  x="110" y="162" text-anchor="middle">hourly, already collected</text>
+
+          <polyline class="trk-hist" points="250,102 268,96 286,99 304,90 322,86 340,88 358,79 376,74"/>
+          <circle class="trk-dot" cx="313" cy="118" r="5"/>
+          <text class="trk-name" x="313" y="146" text-anchor="middle">daily series</text>
+          <text class="trk-cap"  x="313" y="162" text-anchor="middle">one row per day, per series</text>
+
+          <path class="trk-band" d="M470 92 L568 58 L568 96 Z"/>
+          <polyline class="trk-hist" points="452,100 470,92"/>
+          <path class="trk-fc" d="M470 92 L568 77"/>
+          <circle class="trk-dot" cx="516" cy="118" r="5"/>
+          <text class="trk-name" x="516" y="146" text-anchor="middle">regression + OML</text>
+          <text class="trk-cap"  x="516" y="162" text-anchor="middle">two engines, scored by backtest</text>
+
+          <line class="trk-ceil" x1="660" y1="60" x2="782" y2="60"/>
+          <polyline class="trk-hist" points="664,106 682,102 700,99 712,82 726,80 744,77 762,74 778,71"/>
+          <circle class="trk-mark" cx="712" cy="82" r="6"/>
+          <circle class="trk-dot" cx="719" cy="118" r="5"/>
+          <text class="trk-name" x="719" y="146" text-anchor="middle">forecasts &amp; alerts</text>
+          <text class="trk-cap"  x="719" y="162" text-anchor="middle">days to full, anomalies, CAPR_</text>
+        </svg>
+        </div>
       </section>
 
       <!-- ===================== TERMS ===================== -->

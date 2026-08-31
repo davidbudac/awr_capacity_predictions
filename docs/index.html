@@ -55,13 +55,50 @@
           detection driven entirely by AWR history, with <strong>no external ML stack, no agent, no data
           export</strong>. Just views, three small tables of its own, an OML package, and read-only
           SQL*Plus reports in text and HTML.</p>
-        <div class="chips">
-          <span class="chip amber"><b>5</b>&nbsp;view layers</span>
-          <span class="chip"><b>9</b>&nbsp;seam views</span>
-          <span class="chip amber"><b>3</b>&nbsp;persisted tables</span>
-          <span class="chip"><b>2</b>&nbsp;forecast engines</span>
-          <span class="chip amber">read-only against AWR</span>
-          <span class="chip">safe to re-run</span>
+        <div class="herochart-scroll">
+        <svg class="herochart" viewBox="0 0 860 252" role="img"
+             aria-label="One tablespace over time. AWR history runs from 90 days ago to today, with one day flagged for growing 5.8 sigma more than a typical day. From today a dashed forecast line and a 95% band project forward, crossing the tablespace ceiling between 57 and 77 days out.">
+          <text class="hc-lbl" x="60" y="22">AWR history</text>
+          <text class="hc-lbl" x="438" y="22">forecast · 95% band</text>
+
+          <line class="hc-grid" x1="60" y1="160" x2="820" y2="160"/>
+          <line class="hc-grid" x1="60" y1="115" x2="820" y2="115"/>
+          <line class="hc-grid" x1="60" y1="70"  x2="820" y2="70"/>
+
+          <line class="hc-ceil" x1="60" y1="52" x2="820" y2="52"/>
+          <text class="hc-crit" x="64" y="45">tablespace ceiling</text>
+
+          <path class="hc-band" d="M430 112 L800 18 L800 66 Z"/>
+          <path class="hc-hist" d="M60 182 L80 179 L100 177 L120 174 L140 172 L160 169 L180 167
+            L200 164 L220 162 L240 159 L250 131 L260 129 L280 127 L300 125 L320 122 L340 120
+            L360 118 L380 116 L400 114 L420 113 L430 112"/>
+
+          <circle class="hc-mark" cx="250" cy="131" r="6.5"/>
+          <text class="hc-crit" x="250" y="112" text-anchor="middle">that day grew 5.8σ over the median day</text>
+
+          <path class="hc-fc" d="M430 112 L800 42"/>
+          <line class="hc-div" x1="430" y1="30" x2="430" y2="200"/>
+
+          <circle class="hc-dot" cx="666" cy="52" r="3.5"/>
+          <circle class="hc-dot" cx="747" cy="52" r="3.5"/>
+          <line class="hc-span" x1="666" y1="52" x2="747" y2="52"/>
+          <text class="hc-acc" x="706" y="42" text-anchor="middle">days to full · 57–77</text>
+
+          <line class="hc-axis" x1="60" y1="200" x2="820" y2="200"/>
+          <g class="hc-axis">
+            <line x1="60" y1="200" x2="60" y2="205"/>
+            <line x1="245" y1="200" x2="245" y2="205"/>
+            <line x1="430" y1="200" x2="430" y2="207"/>
+            <line x1="615" y1="200" x2="615" y2="205"/>
+            <line x1="800" y1="200" x2="800" y2="205"/>
+          </g>
+          <text class="hc-cap" x="60"  y="221" text-anchor="middle">&#8722;90 d</text>
+          <text class="hc-cap" x="245" y="221" text-anchor="middle">&#8722;45 d</text>
+          <text class="hc-acc" x="430" y="221" text-anchor="middle">today</text>
+          <text class="hc-cap" x="615" y="221" text-anchor="middle">+45 d</text>
+          <text class="hc-cap" x="800" y="221" text-anchor="middle">+90 d</text>
+          <text class="hc-src" x="60" y="244">DBA_HIST_TBSPC_SPACE_USAGE &#8594; CAPD_ &#8594; CAPF_ / CAPA_</text>
+        </svg>
         </div>
       </section>
 
