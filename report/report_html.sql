@@ -321,6 +321,33 @@ DECLARE
   v_anom_count PLS_INTEGER;        -- flagged tbspc+cpu days in the anomaly window
   v_banner_cls VARCHAR2(20);
 
+  -- "Forecast coverage" line (section 0): a NEUTRAL rollup of the tablespace
+  -- QUALITY distribution, independent of the "Capacity" verdict above it, plus
+  -- one plain-English clause per host-CPU (BUSY_PCT) series. v_n_flat/v_n_low/
+  -- v_n_insuf are computed once (below) and reused by the later "Not shown as
+  -- predictions" sentence, so the counts can never drift apart.
+  v_cov_total  PLS_INTEGER;
+  v_cov_ok     PLS_INTEGER;
+  v_cpu_txt    VARCHAR2(2000);
+
+  ----------------------------------------------------------------------
+  -- Section 1's days-to-full table split: rows are captured once into this
+  -- collection while rendering the primary table, then the collapsed
+  -- diagnostics table (fill low/high, accel) walks the SAME collection -- one
+  -- query, two renderings, so the two tables can never show a different row
+  -- set or order.
+  ----------------------------------------------------------------------
+  TYPE dtf_diag_rec IS RECORD (
+    db_pdb          VARCHAR2(300),
+    tablespace_name VARCHAR2(128),
+    dtf_lo          NUMBER,
+    dtf_hi          NUMBER,
+    accel           NUMBER
+  );
+  TYPE dtf_diag_tab IS TABLE OF dtf_diag_rec INDEX BY PLS_INTEGER;
+  v_dtf_diag   dtf_diag_tab;
+  v_dtf_diag_n PLS_INTEGER;
+
   ----------------------------------------------------------------------
   -- cur_hero: the whole-database regression, one row per (dbid, con_dbid).
   -- Declared once and iterated TWICE -- first to gather the attention banner's
@@ -492,6 +519,88 @@ DECLARE
     ELSE RETURN '<span class="sev-ok">ok</span>';
     END IF;
   END sev_pill;
+
+  ----------------------------------------------------------------------
+  -- used_limit_cell: the combined "Used / limit" table cell -- CUR_GIB /
+  -- LIMIT_GIB as one text line, the existing bar+pct widget below it -- so
+  -- three separate columns collapse into one. Reuses nz()/bar() verbatim, so
+  -- a NULL cur/limit or pct still renders exactly as those functions already
+  -- handle it.
+  ----------------------------------------------------------------------
+  FUNCTION used_limit_cell(cur_gb IN NUMBER, limit_gb IN NUMBER, pctval IN NUMBER,
+                           cls IN VARCHAR2 DEFAULT NULL) RETURN VARCHAR2 IS
+  BEGIN
+    RETURN '<div class="used-limit"><div class="ul-text">' || nz(cur_gb) || ' / '
+           || nz(limit_gb) || ' GiB</div>' || bar(pctval, cls) || '</div>';
+  END used_limit_cell;
+
+  ----------------------------------------------------------------------
+  -- dtf_cell: a days-to-X style measure that came back NULL gets a short
+  -- muted reason instead of a bare dash, derived only from the QUALITY
+  -- column already on the same row -- never a new number. FLAT and a NULL
+  -- result under OK/LOW_CONFIDENCE both mean "not heading toward the
+  -- ceiling" (slope <= 0), so both read as "no crossing".
+  ----------------------------------------------------------------------
+  FUNCTION dtf_cell(d IN NUMBER, q IN VARCHAR2, fmt IN VARCHAR2 DEFAULT 'FM99999990') RETURN VARCHAR2 IS
+  BEGIN
+    IF d IS NOT NULL THEN RETURN TO_CHAR(d, fmt); END IF;
+    IF q = 'INSUFFICIENT_HISTORY' THEN RETURN '<span class="na">insufficient history</span>'; END IF;
+    IF q IN ('FLAT','OK','LOW_CONFIDENCE') THEN RETURN '<span class="na">no crossing</span>'; END IF;
+    RETURN '<span class="na">n/a</span>';
+  END dtf_cell;
+
+  ----------------------------------------------------------------------
+  -- dtf_row_id: a stable per-tablespace anchor for the section 1 days-to-full
+  -- table row, so the "View evidence" links in the attention banner can jump
+  -- straight to it. con_dbid-prefixed so two containers with the same
+  -- tablespace name never collide.
+  ----------------------------------------------------------------------
+  FUNCTION dtf_row_id(p_con_dbid IN NUMBER, p_tbspc IN VARCHAR2) RETURN VARCHAR2 IS
+  BEGIN
+    RETURN 'dtf-' || TO_CHAR(p_con_dbid) || '_' || REGEXP_REPLACE(p_tbspc, '[^A-Za-z0-9_-]', '_');
+  END dtf_row_id;
+
+  ----------------------------------------------------------------------
+  -- nf_row_id: sibling of dtf_row_id for the section 1 "Near-full now" table,
+  -- which is deliberately quality-INDEPENDENT (M7.1) and so can carry a
+  -- tablespace that never appears in the days-to-full table above it (e.g.
+  -- FLAT or INSUFFICIENT_HISTORY quality). TBSPC_NEARFULL alerts must
+  -- therefore anchor here, not at dtf_row_id. Same sanitising as dtf_row_id.
+  ----------------------------------------------------------------------
+  FUNCTION nf_row_id(p_con_dbid IN NUMBER, p_tbspc IN VARCHAR2) RETURN VARCHAR2 IS
+  BEGIN
+    RETURN 'nf-' || TO_CHAR(p_con_dbid) || '_' || REGEXP_REPLACE(p_tbspc, '[^A-Za-z0-9_-]', '_');
+  END nf_row_id;
+
+  ----------------------------------------------------------------------
+  -- evidence_link: the trailing "View evidence" anchor on each
+  -- attention-banner <li>. Per-tablespace kinds prefer the row anchor above
+  -- (dtf_row_id / nf_row_id); the whole-database hero has its own per-con_dbid
+  -- id (dbhero-<con_dbid>, set on the hero card below); everything else
+  -- points at the section that holds the proof. p_kind values here are the
+  -- ones this report's own attention banner raises -- 'TBSPC_FULL' and
+  -- 'TBSPC_NEARFULL' match CAPR_ALERTS.kind literally; 'DB_FULL' and
+  -- 'CPU_SAT' are this file's own labels for items it computes inline
+  -- (cur_hero / CAPR_CPU_TREND) rather than reading from CAPR_ALERTS.
+  ----------------------------------------------------------------------
+  FUNCTION evidence_link(p_kind IN VARCHAR2, p_con_dbid IN NUMBER, p_series IN VARCHAR2) RETURN VARCHAR2 IS
+    v_href VARCHAR2(200);
+  BEGIN
+    v_href := CASE p_kind
+                WHEN 'TBSPC_FULL'     THEN '#' || dtf_row_id(p_con_dbid, p_series)
+                WHEN 'TBSPC_NEARFULL' THEN '#' || nf_row_id(p_con_dbid, p_series)
+                WHEN 'DB_FULL'        THEN '#dbhero-' || TO_CHAR(p_con_dbid)
+                WHEN 'CPU_SAT'        THEN '#s4'
+                WHEN 'DBCPU_SAT'      THEN '#s4'
+                WHEN 'CPU_SHIFT'      THEN '#s5'
+                WHEN 'CPU_ANOM'       THEN '#s5'
+                WHEN 'TBSPC_ANOM'     THEN '#s3'
+                WHEN 'SERIES_LIMIT'      THEN '#s7'
+                WHEN 'SERIES_NEARLIMIT'  THEN '#s7'
+                ELSE '#s0'
+              END;
+    RETURN ' <a class="evidence" href="' || v_href || '">View evidence &rarr;</a>';
+  END evidence_link;
 
   ----------------------------------------------------------------------
   -- Inline-SVG chart helpers. No JS, no external assets: every chart is a
@@ -762,6 +871,7 @@ BEGIN
   p('<!doctype html>');
   p('<html lang="en"><head>');
   p('<meta charset="UTF-8">');
+  p('<meta name="viewport" content="width=device-width,initial-scale=1">');
   p('<title>AWR Capacity Report - ' || esc(cap_db) || '</title>');
   p('<style>');
   p(':root{');
@@ -796,21 +906,27 @@ BEGIN
   p('nav.topnav a:hover{background:var(--flat-bg); color:var(--text)}');
   p('nav.topnav .brand{font-weight:700;color:var(--text);margin-right:12px;font-size:13px}');
   p('.card{background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:18px 20px; margin:20px 0;}');
-  p('.header-card h1{margin:0 0 4px;font-size:19px}');
+  p('.header-card h1{margin:0 0 4px;font-size:22px}');
   p('.header-card .sub{color:var(--muted);font-size:12.5px;margin-bottom:14px}');
   p('.kv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px 24px}');
   p('.kv-grid .kv dt{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}');
   p('.kv-grid .kv dd{margin:2px 0 0;font-size:13.5px;font-variant-numeric:tabular-nums}');
   p('.note{margin-top:14px;padding:10px 12px;border-radius:8px;background:var(--flat-bg);color:var(--muted); font-size:12.5px;border-left:3px solid var(--warn);}');
   p('section{scroll-margin-top:56px;margin:26px 0}');
-  p('section h2{font-size:15.5px;margin:0 0 4px;display:flex;align-items:center;gap:8px}');
+  p('section h2{font-size:17px;margin:0 0 4px;display:flex;align-items:center;gap:8px}');
   p('section .desc{color:var(--muted);font-size:12.5px;margin:0 0 12px}');
   p('table{width:100%;border-collapse:collapse;font-size:13px;background:var(--panel)}');
   -- overflow:visible (not hidden) so an inline info-tooltip bubble can escape
   -- the table/cell box instead of being clipped; the rounded outer corners are
   -- restored on the corner cells below.
   p('table.tbl{border:1px solid var(--border);border-radius:8px;overflow:visible}');
-  p('thead th{text-align:left;background:var(--flat-bg);color:var(--muted);font-weight:600; font-size:11px;text-transform:uppercase;letter-spacing:.03em;padding:8px 10px;border-bottom:1px solid var(--border);overflow:visible}');
+  p('.tscroll{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}');
+  p('.tscroll>table{min-width:100%}');
+  -- No text-transform:uppercase (column-name contract): headers may be
+  -- sentence case now (e.g. section 1's primary table), and the raw
+  -- ALL_CAPS labels elsewhere already carry their own case in the string
+  -- literal, so dropping this is a no-op for them.
+  p('thead th{text-align:left;background:var(--flat-bg);color:var(--muted);font-weight:600; font-size:12px;letter-spacing:.03em;padding:8px 10px;border-bottom:1px solid var(--border);overflow:visible}');
   p('table.tbl thead tr:first-child th:first-child{border-top-left-radius:8px}');
   p('table.tbl thead tr:first-child th:last-child{border-top-right-radius:8px}');
   p('table.tbl tbody tr:last-child td:first-child{border-bottom-left-radius:8px}');
@@ -832,9 +948,28 @@ BEGIN
   p('.bar-fill{height:100%;border-radius:4px;background:var(--bar-fill)}');
   p('.bar-fill.warn{background:var(--bar-warn)}');
   p('.bar-fill.crit{background:var(--bar-crit)}');
-  p('.bar-pct{font-size:11px;color:var(--muted);width:38px;text-align:right;font-variant-numeric:tabular-nums}');
+  p('.bar-pct{font-size:12px;color:var(--muted);width:38px;text-align:right;font-variant-numeric:tabular-nums}');
   p('.z-hi{color:var(--crit);font-weight:700}');
+  -- Explicit-blank cells: a NULL measure prints a short reason instead of a
+  -- bare dash, muted so it reads as "nothing to see" rather than a real value.
+  p('.na{color:var(--muted);font-style:italic}');
   p('.empty-note{color:var(--muted);font-style:italic;padding:12px;background:var(--flat-bg);border-radius:8px;font-size:12.5px}');
+  -- A linked-to table row (the glance-banner "View evidence" anchors) gets a
+  -- visible highlight so the reader can find it after the jump.
+  p('tr:target{outline:2px solid var(--warn)}');
+  -- Combined "Used / limit" cell: the CUR/LIMIT text sits above the existing
+  -- bar-cell widget, in one narrower column instead of three.
+  p('.used-limit{display:flex;flex-direction:column;gap:3px;min-width:150px}');
+  p('.used-limit .ul-text{font-size:12px;color:var(--text);font-variant-numeric:tabular-nums}');
+  -- Diagnostics detail table (section 1): same collapsed-by-default look as
+  -- .glossary.
+  p('.diag{margin:10px 0 6px;border:1px solid var(--border);border-radius:10px;background:var(--panel);font-size:12.5px}');
+  p('.diag>summary{cursor:pointer;padding:10px 14px;font-weight:600;color:var(--text);list-style:none}');
+  p('.diag>summary::-webkit-details-marker{display:none}');
+  p('.diag>summary::before{content:"+ ";color:var(--muted);font-weight:700}');
+  p('.diag[open]>summary::before{content:"- "}');
+  p('.diag .diag-body{padding:0 14px 12px}');
+  p('.diag table.tbl{margin:0}');
   p('footer{margin-top:40px;padding:16px 0;border-top:1px solid var(--border);color:var(--muted);font-size:12px;text-align:center}');
   p('@media print{ nav.topnav{position:static} .card,table.tbl{break-inside:avoid} body{background:#fff;color:#000} .info .tip{display:none} }');
   ------------------------------------------------------------------------
@@ -846,8 +981,11 @@ BEGIN
   ------------------------------------------------------------------------
   p('.info{position:relative;display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;margin-left:4px;border:1px solid var(--muted);border-radius:50%;color:var(--muted);font:italic 700 9px/1 Georgia,"Times New Roman",serif;text-transform:none;letter-spacing:0;cursor:help;vertical-align:middle;user-select:none}');
   p('.info:focus-visible{outline:2px solid var(--accent);outline-offset:1px}');
-  p('.info .tip{position:absolute;left:50%;top:calc(100% + 7px);transform:translateX(-50%);width:max-content;max-width:260px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.20);padding:7px 10px;font:400 12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;text-transform:none;letter-spacing:normal;text-align:left;white-space:normal;opacity:0;visibility:hidden;pointer-events:none;z-index:60}');
-  p('.info:hover .tip,.info:focus .tip,.info:focus-visible .tip{opacity:1;visibility:visible}');
+  -- display:none (not opacity/visibility) so the hidden bubble takes no layout
+  -- space -- opacity:0;visibility:hidden still occupies its box past the right
+  -- edge, which can produce a horizontal scrollbar at narrow viewports.
+  p('.info .tip{position:absolute;left:50%;top:calc(100% + 7px);transform:translateX(-50%);width:max-content;max-width:260px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.20);padding:7px 10px;font:400 12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;text-transform:none;letter-spacing:normal;text-align:left;white-space:normal;display:none;pointer-events:none;z-index:60}');
+  p('.info:hover .tip,.info:focus .tip,.info:focus-visible .tip{display:block}');
   -- Collapsible plain-English glossary at the end of section 0 (details/summary,
   -- no JS; prints collapsed by default). ASCII-only +/- markers.
   p('.glossary{margin:18px 0 6px;border:1px solid var(--border);border-radius:10px;background:var(--panel);font-size:12.5px}');
@@ -860,6 +998,14 @@ BEGIN
   p('.glossary dt{font-weight:700;color:var(--text);white-space:nowrap}');
   p('.glossary dd{margin:0;color:var(--muted)}');
   p('@media(max-width:640px){.glossary dl{grid-template-columns:1fr;gap:2px 0} .glossary dt{margin-top:6px}}');
+  -- Report details & methodology: same collapsed-by-default look as
+  -- .glossary, holding everything that isn't Database/Host/Generated.
+  p('.report-details{margin:14px 0 0;border:1px solid var(--border);border-radius:10px;background:var(--panel);font-size:12.5px}');
+  p('.report-details>summary{cursor:pointer;padding:12px 16px;font-weight:600;color:var(--text);list-style:none}');
+  p('.report-details>summary::-webkit-details-marker{display:none}');
+  p('.report-details>summary::before{content:"+ ";color:var(--muted);font-weight:700}');
+  p('.report-details[open]>summary::before{content:"- "}');
+  p('.report-details .rd-body{padding:4px 16px 14px}');
   ------------------------------------------------------------------------
   -- Chart CSS. All stroke/fill colors reference the same page-level CSS
   -- variables used elsewhere (--accent/--ok/--crit/--warn/--muted/--border),
@@ -867,15 +1013,15 @@ BEGIN
   ------------------------------------------------------------------------
   p('.chart-legend{display:flex;flex-wrap:wrap;gap:16px;font-size:11.5px;color:var(--muted);margin:10px 0 6px;align-items:center}');
   p('.chart-legend .lg-item{display:inline-flex;align-items:center;gap:5px}');
-  p('.chart-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:16px;margin:6px 0 20px}');
+  p('.chart-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(420px,100%),1fr));gap:16px;margin:6px 0 20px}');
   p('.chart-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 14px 8px}');
   p('.chart-card h4{margin:0 0 2px;font-size:13px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}');
-  p('.chart-sub{color:var(--muted);font-size:11px;margin:0 0 6px}');
+  p('.chart-sub{color:var(--muted);font-size:12px;margin:0 0 6px}');
   p('.chart-svg{width:100%;height:auto;display:block}');
   p('.axis-line{stroke:var(--border);stroke-width:1}');
   p('.grid-line{stroke:var(--border);stroke-width:1;stroke-dasharray:2 3;opacity:.6}');
-  p('.axis-label{fill:var(--muted);font-size:9px}');
-  p('.thresh-label{fill:var(--warn);font-size:9px}');
+  p('.axis-label{fill:var(--muted);font-size:11px}');
+  p('.thresh-label{fill:var(--warn);font-size:11px}');
   p('.hist-line{fill:none;stroke:var(--accent);stroke-width:1.8;stroke-linejoin:round}');
   p('.hist-line-pt{fill:var(--accent)}');
   p('.proj-line{fill:none;stroke:var(--accent);stroke-width:1.6;stroke-dasharray:5 4;opacity:.85}');
@@ -908,16 +1054,27 @@ BEGIN
   p('.attn-list{margin:8px 0 0;padding-left:22px;font-weight:400;line-height:1.55}');
   p('.attn-list li{margin:2px 0}');
   p('.attn-note{margin-top:8px;font-weight:400;font-size:12.5px;opacity:.85}');
+  -- The "Capacity" status line and the "Forecast coverage" line are visually
+  -- independent -- a green all-clear must never be read as a statement about
+  -- forecast reliability. .glance-cov is deliberately neutral (muted border,
+  -- no ok/warn/crit tint).
+  p('.glance-banner{margin:10px 0 8px}');
+  p('.glance-line-label{font-size:11px;font-weight:700;letter-spacing:.04em;color:var(--muted);margin:12px 0 4px}');
+  p('.glance-banner .glance-line-label:first-child{margin-top:0}');
+  p('.glance-cov{background:var(--flat-bg);color:var(--muted);border:1px solid var(--border);border-radius:10px;padding:12px 16px;font-size:13px}');
+  -- "View evidence" jump link appended to each attention-banner item.
+  p('.evidence{margin-left:6px;font-size:12px;font-weight:600;color:var(--accent);text-decoration:none;white-space:nowrap}');
+  p('.evidence:hover,.evidence:focus{text-decoration:underline}');
   p('.timeline-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px 10px;margin:6px 0 8px}');
   p('.timeline-svg{width:100%;height:auto;display:block}');
   p('.tl-baseline{stroke:var(--border);stroke-width:1}');
   p('.tl-grid{stroke:var(--border);stroke-width:1;stroke-dasharray:2 3;opacity:.5}');
   p('.tl-lane-label{fill:var(--muted);font-size:11px}');
-  p('.tl-axis-label{fill:var(--muted);font-size:9px}');
+  p('.tl-axis-label{fill:var(--muted);font-size:11px}');
   -- Hero duo: the whole-database hero and the host-CPU hero side by side on
   -- desktop, stacking when narrow. Each is a .gcard g-hero (reuses .gcard +
   -- .g-* accents and pills) holding a headline and a 560x250 chart.
-  p('.hero-duo{display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:14px;margin:10px 0 8px}');
+  p('.hero-duo{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(430px,100%),1fr));gap:14px;margin:10px 0 8px}');
   p('.g-hero{gap:6px}');
   p('.g-hero .g-head{font-size:16px}');
   p('.g-hero .hero-svg{width:100%;height:auto;display:block;margin-top:8px}');
@@ -946,11 +1103,19 @@ BEGIN
   p('<div class="card header-card">');
   p('<h1>AWR Capacity Predictions</h1>');
   p('<div class="sub">capacity + anomaly report -- read-only</div>');
+  -- Only Database / Host / Generated stay in the always-visible kv-grid;
+  -- everything else (Schema, Thresholds, Tier 2 models, the amber NOTE) moves
+  -- into a collapsed details block below, styled like the section 0 .glossary.
   p('<dl class="kv-grid">');
   p('<div class="kv"><dt>Database</dt><dd>' || esc(cap_db) || '</dd></div>');
   p('<div class="kv"><dt>Host</dt><dd>' || esc(cap_host) || '</dd></div>');
-  p('<div class="kv"><dt>Schema</dt><dd>' || esc(cap_user) || '</dd></div>');
   p('<div class="kv"><dt>Generated</dt><dd>' || esc(cap_gen) || '</dd></div>');
+  p('</dl>');
+  p('<details class="report-details">');
+  p('<summary>Report details &amp; methodology</summary>');
+  p('<div class="rd-body">');
+  p('<dl class="kv-grid">');
+  p('<div class="kv"><dt>Schema</dt><dd>' || esc(cap_user) || '</dd></div>');
   p('<div class="kv"><dt>Thresholds</dt><dd>days-to-full WARN&lt;=' || dtf_warn
       || ' CRIT&lt;=' || dtf_crit || '; CPU saturation ' || cpu_sat || '%</dd></div>');
   p('<div class="kv"><dt>Tier 2 models</dt><dd>' || esm_ok || ' OML ESM model(s) trained (OK)</dd></div>');
@@ -958,6 +1123,8 @@ BEGIN
   p('<div class="note">NOTE: forecasts degrade loudly on short AWR retention -- watch TRAIN_N and '
       || 'QUALITY. INSUFFICIENT_HISTORY means fewer than the configured minimum training days; raise '
       || 'DBMS_WORKLOAD_REPOSITORY retention for real trends.</div>');
+  p('</div>');  -- .rd-body
+  p('</details>');
   p('</div>');
 
   ----------------------------------------------------------------------
@@ -983,7 +1150,7 @@ BEGIN
 
   -- (a) tablespaces forecast to fill within the warning window.
   FOR ta IN (
-    SELECT tablespace_name, days_to_full,
+    SELECT con_dbid, tablespace_name, days_to_full,
            CASE WHEN sev_dtf = 'CRIT' THEN 2 ELSE 1 END AS sev
     FROM   capr_tbspc_days_to_full
     WHERE  quality = 'OK' AND days_to_full IS NOT NULL AND days_to_full <= dtf_warn
@@ -991,14 +1158,15 @@ BEGIN
   ) LOOP
     v_nitems := v_nitems + 1;
     v_items(v_nitems) := '<li>' || esc(ta.tablespace_name)
-                         || ' could be full in ' || time_phrase(ta.days_to_full) || '</li>';
+                         || ' could be full in ' || time_phrase(ta.days_to_full)
+                         || evidence_link('TBSPC_FULL', ta.con_dbid, ta.tablespace_name) || '</li>';
     v_max_sev := GREATEST(v_max_sev, ta.sev);
   END LOOP;
 
   -- (a2) tablespaces nearly full RIGHT NOW regardless of fit quality (M7.1),
   -- from CAPR_ALERTS so this banner and the text report's section 0 agree.
   FOR nf IN (
-    SELECT series_key, db_pdb, value AS pct_used,
+    SELECT con_dbid, series_key, db_pdb, value AS pct_used,
            CASE WHEN severity = 'CRIT' THEN 2 ELSE 1 END AS sev
     FROM   capr_alerts
     WHERE  kind = 'TBSPC_NEARFULL'
@@ -1008,7 +1176,8 @@ BEGIN
     v_items(v_nitems) := '<li>' || esc(nf.series_key)
                          || CASE WHEN v_con_count > 1 THEN ' (' || esc(nf.db_pdb) || ')' END
                          || ' is ' || TO_CHAR(nf.pct_used, 'FM990.0')
-                         || '% full right now</li>';
+                         || '% full right now'
+                         || evidence_link('TBSPC_NEARFULL', nf.con_dbid, nf.series_key) || '</li>';
     v_max_sev := GREATEST(v_max_sev, nf.sev);
   END LOOP;
 
@@ -1031,7 +1200,8 @@ BEGIN
       v_nitems := v_nitems + 1;
       v_items(v_nitems) := '<li>' || esc(v_hlabel)
                            || ' could reach its total allocated limit in '
-                           || time_phrase(v_days_to_lim) || '</li>';
+                           || time_phrase(v_days_to_lim)
+                           || evidence_link('DB_FULL', hf.con_dbid, NULL) || '</li>';
       v_max_sev := GREATEST(v_max_sev, CASE WHEN v_days_to_lim <= dtf_crit THEN 2 ELSE 1 END);
     END IF;
   END LOOP;
@@ -1049,7 +1219,8 @@ BEGIN
     v_items(v_nitems) := '<li>Host CPU'
                          || CASE WHEN v_con_count > 1 THEN ' (' || esc(cc.db_pdb) || ')' END
                          || ' could reach ' || TO_CHAR(cpu_sat, 'FM990') || '% busy in '
-                         || time_phrase(cc.days_to_sat) || '</li>';
+                         || time_phrase(cc.days_to_sat)
+                         || evidence_link('CPU_SAT', cc.con_dbid, NULL) || '</li>';
     v_max_sev := GREATEST(v_max_sev, cc.sev);
   END LOOP;
 
@@ -1058,6 +1229,11 @@ BEGIN
        + (SELECT COUNT(*) FROM capr_cpu_anomalies   WHERE days_ago < anomaly_days)
     INTO v_anom_count FROM dual;
 
+  -- "Capacity" and "Forecast coverage" are two independent lines in one
+  -- container -- a clean "Capacity" line must never be read as a statement
+  -- that the forecasts behind it are trustworthy.
+  p('<div class="glance-banner">');
+  p('<div class="glance-line-label">Capacity</div>');
   IF v_nitems = 0 THEN
     v_msg := 'All clear -- nothing needs attention: nothing is near-full now, no tablespace or '
              || 'whole-database limit within '
@@ -1083,6 +1259,50 @@ BEGIN
     END IF;
     p('</div>');
   END IF;
+
+  ----------------------------------------------------------------------
+  -- "Forecast coverage" -- a NEUTRAL line, independent of the Capacity
+  -- verdict above, so a green "all clear" can never be mistaken for a claim
+  -- that the underlying forecasts are reliable. Counts reuse the SAME
+  -- CAPR_TBSPC_DAYS_TO_FULL.quality rollup the "Not shown as predictions"
+  -- sentence further down this section builds from -- computed once here,
+  -- v_n_flat/v_n_low/v_n_insuf are reused there rather than re-queried.
+  ----------------------------------------------------------------------
+  SELECT COUNT(*),
+         SUM(CASE WHEN quality = 'OK'                   THEN 1 ELSE 0 END),
+         SUM(CASE WHEN quality = 'FLAT'                 THEN 1 ELSE 0 END),
+         SUM(CASE WHEN quality = 'LOW_CONFIDENCE'       THEN 1 ELSE 0 END),
+         SUM(CASE WHEN quality = 'INSUFFICIENT_HISTORY' THEN 1 ELSE 0 END)
+    INTO v_cov_total, v_cov_ok, v_n_flat, v_n_low, v_n_insuf
+  FROM   capr_tbspc_days_to_full;
+
+  v_msg := 'Forecast coverage: ' || TO_CHAR(NVL(v_cov_ok, 0), 'FM999990') || ' of '
+           || TO_CHAR(NVL(v_cov_total, 0), 'FM999990') || ' tablespace series rated OK; '
+           || TO_CHAR(NVL(v_n_flat, 0), 'FM999990') || ' FLAT, '
+           || TO_CHAR(NVL(v_n_low, 0), 'FM999990') || ' LOW_CONFIDENCE, '
+           || TO_CHAR(NVL(v_n_insuf, 0), 'FM999990') || ' INSUFFICIENT_HISTORY.';
+
+  -- One clause per host-CPU (BUSY_PCT) series, plain English per quality --
+  -- the same values CAPR_CPU_TREND.quality already carries, no new statistic.
+  v_cpu_txt := NULL;
+  FOR c IN (SELECT db_pdb, quality FROM capr_cpu_trend
+            WHERE metric = 'BUSY_PCT' ORDER BY con_dbid) LOOP
+    v_cpu_txt := v_cpu_txt || ' Host CPU'
+                 || CASE WHEN v_con_count > 1 THEN ' (' || esc(c.db_pdb) || ')' END
+                 || ': ' || CASE c.quality
+                              WHEN 'OK'                   THEN 'a reliable estimate is available.'
+                              WHEN 'LOW_CONFIDENCE'       THEN 'too erratic for a reliable estimate.'
+                              WHEN 'FLAT'                 THEN 'not trending, nothing to project.'
+                              WHEN 'INSUFFICIENT_HISTORY' THEN 'not enough history yet.'
+                              ELSE 'no estimate available.' END;
+  END LOOP;
+  IF v_cpu_txt IS NULL THEN
+    v_cpu_txt := ' Host CPU: no daily history collected yet.';
+  END IF;
+
+  p('<div class="glance-line-label">Forecast coverage</div>');
+  p('<div class="glance-cov">' || v_msg || v_cpu_txt || '</div>');
+  p('</div>');  -- .glance-banner
 
   ----------------------------------------------------------------------
   -- Hero duo: whole-database total-size hero, then host-CPU hero, side by side.
@@ -1153,7 +1373,9 @@ BEGIN
       v_head := esc(v_hlabel) || ' &mdash; size is changing too unevenly for a reliable estimate';
     END IF;
 
-    p('<div class="gcard g-hero ' || v_accent || '">');
+    -- id: the "View evidence" link on the section 0 attention banner's
+    -- whole-database item (DB_FULL) jumps straight here.
+    p('<div class="gcard g-hero ' || v_accent || '" id="dbhero-' || hf.con_dbid || '">');
     p('<h4 class="g-head">' || v_head || v_hpill
       || CASE WHEN v_hpill IS NOT NULL
               THEN info_icon('based on how closely past growth follows a straight line') END
@@ -1644,12 +1866,9 @@ BEGIN
   END IF;
   p('</div>');  -- .glance-grid
 
-  -- Roll-up line: what is NOT shown as a card, in friendly words.
-  SELECT SUM(CASE WHEN quality = 'FLAT'                 THEN 1 ELSE 0 END),
-         SUM(CASE WHEN quality = 'LOW_CONFIDENCE'       THEN 1 ELSE 0 END),
-         SUM(CASE WHEN quality = 'INSUFFICIENT_HISTORY' THEN 1 ELSE 0 END)
-    INTO v_n_flat, v_n_low, v_n_insuf
-  FROM   capr_tbspc_days_to_full;
+  -- Roll-up line: what is NOT shown as a card, in friendly words. v_n_flat /
+  -- v_n_low / v_n_insuf were already computed once for the "Forecast
+  -- coverage" line above -- reused here rather than re-queried.
   v_roll := NULL;
   IF v_n_flat > 0 THEN
     v_roll := CASE WHEN v_n_flat = 1
@@ -1705,12 +1924,19 @@ BEGIN
   p('<h2>1. Tablespaces by days-to-full <span class="pill pill-crit">CRIT&le;' || dtf_crit
       || '</span> <span class="pill pill-warn">WARN&le;' || dtf_warn || '</span></h2>');
   p('<p class="desc">The tablespaces most likely to run out of space soonest, any fit quality '
-      || '(trust the estimate per QUALITY; only OK is reliable); top ' || top_n
-      || '. ACCEL&gt;1.5 = growth accelerating.</p>');
+      || '(trust the estimate per Quality; only OK is reliable); top ' || top_n
+      || '. The prediction-band bounds and ACCEL move to the Diagnostics table right below this one.</p>');
 
+  -- Primary table keeps DB/PDB / Tablespace / a combined Used-limit cell /
+  -- Growth / Days to full / Severity / Quality; the 95% band bounds
+  -- (dtf_worst/dtf_best) and ACCEL are captured into v_dtf_diag as each row
+  -- renders, then walked a second time -- same rows, same order -- for the
+  -- collapsed Diagnostics table beneath it (one query, two renderings).
   any_rows := FALSE;
+  v_dtf_diag_n := 0;
   FOR r IN (
-    SELECT db_pdb,
+    SELECT con_dbid,
+           db_pdb,
            tablespace_name,
            cur_gb,
            limit_gb,
@@ -1728,35 +1954,65 @@ BEGIN
     ORDER  BY rank_dtf
   ) LOOP
     IF NOT any_rows THEN
+      p('<div class="tscroll">');
       p('<table class="tbl"><thead><tr>'
-        || '<th>DB/PDB' || info_icon('which database or container this row belongs to, relevant when one report covers a fleet')
-        || '</th><th>TABLESPACE</th><th class="num">CUR_GIB</th><th class="num">LIMIT_GIB</th>'
-        || '<th>FILL</th>'
-        || '<th class="num">MIB/DAY' || info_icon('the average mebibytes (MiB) this tablespace grows per day')
-        || '</th><th class="num">DAYS_FULL' || info_icon('estimated days until it reaches its allocated limit at the current rate')
-        || '</th><th class="num">RANGE' || info_icon('worst-to-best case days-to-full from the statistical uncertainty of the growth rate; never = it may not fill at the slow end')
-        || '</th><th>SEV' || info_icon('how urgent this is: CRIT is within the critical window, WARN within the warning window')
-        || '</th><th>QUALITY' || info_icon('reliability of the estimate -- only OK is a dependable forecast')
-        || '</th><th class="num">ACCEL' || info_icon('above 1.5 means growth is speeding up') || '</th>'
-        || '</tr></thead><tbody>');
+        || '<th>DB/PDB' || info_icon('which database or container this row belongs to, relevant when one report covers a fleet (CAPR column: DB_PDB)')
+        || '</th><th>Tablespace' || info_icon('CAPR column: TABLESPACE_NAME')
+        || '</th><th>Used / limit' || info_icon('how much is used against its allocated limit today (CAPR columns: CUR_GB, LIMIT_GB, PCT_USED)')
+        || '</th><th class="num">Growth (MiB/day)' || info_icon('the average mebibytes (MiB) this tablespace grows per day (CAPR column: SLOPE_MB)')
+        || '</th><th class="num">Days to full' || info_icon('estimated days until it reaches its allocated limit at the current rate (CAPR column: DAYS_TO_FULL)')
+        || '</th><th>Severity' || info_icon('how urgent this is: CRIT is within the critical window, WARN within the warning window (CAPR column: SEV_DTF)')
+        || '</th><th>Quality' || info_icon('reliability of the estimate -- only OK is a dependable forecast (CAPR column: QUALITY)')
+        || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
-    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.tablespace_name) || '</td>'
-      || '<td class="num">' || nz(r.cur_gb) || '</td><td class="num">' || nz(r.limit_gb) || '</td>'
-      || '<td>' || bar(r.pct_used,
+    -- Row id: the attention banner's "View evidence" links for a specific
+    -- tablespace jump straight here.
+    p('<tr id="' || dtf_row_id(r.con_dbid, r.tablespace_name) || '"><td>' || esc(r.db_pdb)
+      || '</td><td>' || esc(r.tablespace_name) || '</td>'
+      || '<td>' || used_limit_cell(r.cur_gb, r.limit_gb, r.pct_used,
                         CASE r.sev WHEN 'CRIT' THEN 'crit' WHEN 'WARN' THEN 'warn' ELSE '' END) || '</td>'
       || '<td class="num">' || nz(r.slope_mb, 'FM9999990.000') || '</td>'
-      || '<td class="num">' || nz(r.days_to_full, 'FM99999990') || '</td>'
-      || '<td class="num">'
-      || CASE WHEN r.days_to_full_lo IS NULL THEN '&ndash;'
-              ELSE TO_CHAR(r.days_to_full_lo, 'FM99999990') || '&ndash;'
-                   || NVL(TO_CHAR(r.days_to_full_hi, 'FM99999990'), 'never') END || '</td>'
+      || '<td class="num">' || dtf_cell(r.days_to_full, r.quality, 'FM99999990') || '</td>'
       || '<td>' || sev_pill(r.sev) || '</td>'
-      || '<td>' || quality_pill(r.quality) || '</td>'
-      || '<td class="num">' || nz(r.accel, 'FM990.00') || '</td></tr>');
+      || '<td>' || quality_pill(r.quality) || '</td></tr>');
+
+    v_dtf_diag_n := v_dtf_diag_n + 1;
+    v_dtf_diag(v_dtf_diag_n).db_pdb          := r.db_pdb;
+    v_dtf_diag(v_dtf_diag_n).tablespace_name := r.tablespace_name;
+    v_dtf_diag(v_dtf_diag_n).dtf_lo          := r.days_to_full_lo;
+    v_dtf_diag(v_dtf_diag_n).dtf_hi          := r.days_to_full_hi;
+    v_dtf_diag(v_dtf_diag_n).accel           := r.accel;
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
+    p('</div>');  -- .tscroll
+
+    p('<details class="diag">');
+    p('<summary>Diagnostics (3 more columns)</summary>');
+    p('<div class="diag-body">');
+    p('<p class="desc">ACCEL&gt;1.5 = growth accelerating. Fill low / Fill high bracket '
+        || 'Days to full with its statistical uncertainty range: earliest and latest credible fill '
+        || 'day. A blank Fill high means the range includes "not growing", so it may never '
+        || 'fill.</p>');
+    p('<div class="tscroll">');
+    p('<table class="tbl"><thead><tr>'
+      || '<th>DB/PDB</th><th>Tablespace' || info_icon('CAPR column: TABLESPACE_NAME') || '</th>'
+      || '<th class="num">Fill low' || info_icon('earliest credible fill day, the low end of the growth-rate uncertainty range (CAPR column: DTF_WORST)')
+      || '</th><th class="num">Fill high' || info_icon('latest credible fill day; blank means the range includes not growing at all, i.e. it may never fill (CAPR column: DTF_BEST)')
+      || '</th><th class="num">Accel.' || info_icon('above 1.5 means growth is speeding up (CAPR column: ACCEL)') || '</th>'
+      || '</tr></thead><tbody>');
+    FOR i IN 1 .. v_dtf_diag_n LOOP
+      p('<tr><td>' || esc(v_dtf_diag(i).db_pdb) || '</td>'
+        || '<td>' || esc(v_dtf_diag(i).tablespace_name) || '</td>'
+        || '<td class="num">' || nz(v_dtf_diag(i).dtf_lo, 'FM99999990') || '</td>'
+        || '<td class="num">' || nz(v_dtf_diag(i).dtf_hi, 'FM99999990') || '</td>'
+        || '<td class="num">' || nz(v_dtf_diag(i).accel, 'FM990.00') || '</td></tr>');
+    END LOOP;
+    p('</tbody></table>');
+    p('</div>');  -- .tscroll
+    p('</div>');  -- .diag-body
+    p('</details>');
   ELSE
     p('<div class="empty-note">No rows: no tablespace currently has a computable days_to_full.</div>');
   END IF;
@@ -1773,7 +2029,8 @@ BEGIN
     || '</h3>');
   any_rows := FALSE;
   FOR r IN (
-    SELECT db_pdb,
+    SELECT con_dbid,
+           db_pdb,
            tablespace_name,
            cur_gb,
            limit_gb,
@@ -1787,23 +2044,30 @@ BEGIN
     ORDER  BY rank_nearfull
   ) LOOP
     IF NOT any_rows THEN
+      p('<div class="tscroll">');
       p('<table class="tbl"><thead><tr>'
-        || '<th>DB/PDB</th><th>TABLESPACE</th><th class="num">CUR_GIB</th><th class="num">LIMIT_GIB</th>'
-        || '<th>FILL</th>'
-        || '<th class="num">DAYS_FULL</th><th>SEV</th><th>QUALITY</th>'
-        || '</tr></thead><tbody>');
+        || '<th>DB/PDB</th><th>Tablespace' || info_icon('CAPR column: TABLESPACE_NAME') || '</th>'
+        || '<th>Used / limit' || info_icon('how much is used against its allocated limit today (CAPR columns: CUR_GB, LIMIT_GB, PCT_USED)')
+        || '</th><th class="num">Days to full' || info_icon('shown when a usable trend exists; a blank cell explains why there is none (CAPR column: DAYS_TO_FULL)')
+        || '</th><th>Severity' || info_icon('graded on percent used, not on the forecast (CAPR column: SEV_NEARFULL)')
+        || '</th><th>Quality' || info_icon('the reliability of the trend, for context only -- it does not gate this table (CAPR column: QUALITY)')
+        || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
-    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.tablespace_name) || '</td>'
-      || '<td class="num">' || nz(r.cur_gb) || '</td><td class="num">' || nz(r.limit_gb) || '</td>'
-      || '<td>' || bar(r.pct_used,
+    -- Row id: TBSPC_NEARFULL alerts can name a tablespace that never appears
+    -- in the days-to-full table above (that one requires a computable
+    -- days_to_full; this one does not), so this table needs its own anchor.
+    p('<tr id="' || nf_row_id(r.con_dbid, r.tablespace_name) || '"><td>' || esc(r.db_pdb)
+      || '</td><td>' || esc(r.tablespace_name) || '</td>'
+      || '<td>' || used_limit_cell(r.cur_gb, r.limit_gb, r.pct_used,
                         CASE r.sev WHEN 'CRIT' THEN 'crit' WHEN 'WARN' THEN 'warn' ELSE '' END) || '</td>'
-      || '<td class="num">' || nz(r.days_to_full, 'FM99999990') || '</td>'
+      || '<td class="num">' || dtf_cell(r.days_to_full, r.quality, 'FM99999990') || '</td>'
       || '<td>' || sev_pill(r.sev) || '</td>'
       || '<td>' || quality_pill(r.quality) || '</td></tr>');
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
+    p('</div>');  -- .tscroll
   ELSE
     p('<div class="empty-note">No tablespaces with a known allocation limit to rank.</div>');
   END IF;
@@ -1986,16 +2250,20 @@ BEGIN
     ORDER  BY rank_report
   ) LOOP
     IF NOT any_rows THEN
+      p('<div class="tscroll">');
       p('<table class="tbl"><thead><tr>'
-        || '<th>DB/PDB</th><th>TABLESPACE</th>'
-        || '<th class="num">TRAIN_N' || info_icon('how many days of history the estimate is based on -- more is better')
-        || '</th><th class="num">CUR_GIB</th>'
-        || '<th class="num">+30_GIB</th><th class="num">+90_GIB</th><th class="num">+180_GIB</th>'
-        || '<th class="num">180_LO</th><th class="num">180_HI'
-        || info_icon('95% prediction band on the +180-day projection; the actual value should land between LO and HI 95 times out of 100 if growth stays like the recent past')
+        || '<th>DB/PDB</th><th>Tablespace' || info_icon('CAPR column: TABLESPACE_NAME') || '</th>'
+        || '<th class="num">Train days' || info_icon('how many days of history the estimate is based on -- more is better (CAPR column: TRAIN_N)')
+        || '</th><th class="num">Current (GiB)' || info_icon('CAPR column: CUR_GB') || '</th>'
+        || '<th class="num">+30d (GiB)' || info_icon('CAPR column: P30')
+        || '</th><th class="num">+90d (GiB)' || info_icon('CAPR column: P90')
+        || '</th><th class="num">+180d (GiB)' || info_icon('CAPR column: P180')
+        || '</th><th class="num">180d low' || info_icon('CAPR column: P180_LO')
+        || '</th><th class="num">180d high'
+        || info_icon('95% prediction band on the +180-day projection; the actual value should land between low and high 95 times out of 100 if growth stays like the recent past (CAPR column: P180_HI)')
         || '</th><th class="num">R2' || info_icon('how closely growth follows a straight line: 1.00 = perfectly steady, near 0 = erratic')
-        || '</th><th>QUALITY' || info_icon('our own reliability grade for this estimate -- hover the colored labels below')
-        || '</th><th class="num">ESM+30' || info_icon('a second, machine-learning estimate of the size 30 days from now -- usually the most accurate short-term number when present')
+        || '</th><th>Quality' || info_icon('our own reliability grade for this estimate -- hover the colored labels below (CAPR column: QUALITY)')
+        || '</th><th class="num">ESM +30 (GiB)' || info_icon('a second, machine-learning estimate of the size 30 days from now -- usually the most accurate short-term number when present (CAPR column: ESM30)')
         || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
@@ -2009,10 +2277,13 @@ BEGIN
       || '<td class="num">' || nz(r.p180_hi) || '</td>'
       || '<td class="num">' || nz(r.r2, 'FM90.000') || '</td>'
       || '<td>' || quality_pill(r.quality) || '</td>'
-      || '<td class="num">' || nz(r.esm30) || '</td></tr>');
+      || '<td class="num">' || CASE WHEN r.esm30 IS NULL
+                                    THEN '<span class="na">no model</span>'
+                                    ELSE nz(r.esm30) END || '</td></tr>');
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
+    p('</div>');  -- .tscroll
   ELSE
     p('<div class="empty-note">No tablespace forecast rows found.</div>');
   END IF;
@@ -2045,15 +2316,17 @@ BEGIN
     ORDER  BY days_ago, con_dbid, tablespace_name
   ) LOOP
     IF NOT any_rows THEN
+      p('<div class="tscroll">');
       p('<table class="tbl"><thead><tr>'
-        || '<th>DB/PDB</th><th>TABLESPACE</th><th>DAY</th>'
-        || '<th class="num">GAP' || info_icon('days since the previous sample -- a big gap can inflate a one-day change')
-        || '</th><th class="num">DELTA_MIB</th>'
-        || '<th class="num">RATE_MIB/D' || info_icon('how fast it grew that day, in mebibytes (MiB) per day')
-        || '</th><th class="num">MED_MIB/D' || info_icon('its usual daily growth rate over the recent baseline window')
-        || '</th><th class="num">THR_MIB/D' || info_icon('how far from usual a day must be before it is flagged')
-        || '</th><th class="num">ROBUST_Z' || info_icon('how far outside its normal range this day was -- 3 or more is clearly unusual')
-        || '</th><th>FLAG' || info_icon('the direction of the flagged change for this day') || '</th></tr></thead><tbody>');
+        || '<th>DB/PDB</th><th>Tablespace' || info_icon('CAPR column: TABLESPACE_NAME')
+        || '</th><th>Day' || info_icon('CAPR column: DAY_DT')
+        || '</th><th class="num">Gap' || info_icon('days since the previous sample -- a big gap can inflate a one-day change (CAPR column: GAP)')
+        || '</th><th class="num">Delta (MiB)' || info_icon('CAPR column: DELTA_MB')
+        || '</th><th class="num">Rate (MiB/day)' || info_icon('how fast it grew that day, in mebibytes (MiB) per day (CAPR column: RATE_MB)')
+        || '</th><th class="num">Median (MiB/day)' || info_icon('its usual daily growth rate over the recent baseline window (CAPR column: MED_MB)')
+        || '</th><th class="num">Threshold (MiB/day)' || info_icon('how far from usual a day must be before it is flagged (CAPR column: THR_MB)')
+        || '</th><th class="num">Robust z' || info_icon('how far outside its normal range this day was -- 3 or more is clearly unusual (CAPR column: Z)')
+        || '</th><th>Flag' || info_icon('the direction of the flagged change for this day (CAPR column: ANOMALY_FLAG)') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
     p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.tablespace_name) || '</td><td>' || r.day_dt || '</td>'
@@ -2068,6 +2341,7 @@ BEGIN
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
+    p('</div>');  -- .tscroll
   ELSE
     p('<div class="empty-note">No tablespace growth anomalies flagged in the selected window.</div>');
   END IF;
@@ -2239,13 +2513,17 @@ BEGIN
     ORDER  BY con_dbid, metric
   ) LOOP
     IF NOT any_rows THEN
+      p('<div class="tscroll">');
       p('<table class="tbl"><thead><tr>'
-        || '<th>DB/PDB</th><th>METRIC</th><th class="num">TRAIN_N</th><th>FILL</th><th class="num">CURRENT</th>'
-        || '<th class="num">SLOPE/DAY' || info_icon('how much this metric moves per day on average')
+        || '<th>DB/PDB</th><th>Metric' || info_icon('CAPR column: METRIC')
+        || '</th><th class="num">Train days' || info_icon('CAPR column: TRAIN_N')
+        || '</th><th>Fill' || info_icon('CAPR column: CUR_VAL')
+        || '</th><th class="num">Current' || info_icon('CAPR column: CUR_VAL')
+        || '</th><th class="num">Slope/day' || info_icon('how much this metric moves per day on average (CAPR column: SLOPE_DAY)')
         || '</th><th class="num">R2</th>'
-        || '<th class="num">DAYS_SAT' || info_icon('estimated days until this metric reaches the saturation threshold (none for DB_CPU_SEC, which has no ceiling)')
-        || '</th><th class="num">RANGE' || info_icon('worst-to-best case days-to-saturation from the statistical uncertainty of the trend; never = it may not saturate at the slow end')
-        || '</th><th>QUALITY</th></tr></thead><tbody>');
+        || '<th class="num">Days to saturation' || info_icon('estimated days until this metric reaches the saturation threshold (none for DB_CPU_SEC, which has no ceiling) (CAPR column: DAYS_SAT)')
+        || '</th><th class="num">Range' || info_icon('worst-to-best case days-to-saturation from the statistical uncertainty of the trend; never = it may not saturate at the slow end (CAPR columns: SAT_WORST, SAT_BEST)')
+        || '</th><th>Quality' || info_icon('CAPR column: QUALITY') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
     p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.metric) || '</td>'
@@ -2258,7 +2536,7 @@ BEGIN
       || '<td class="num">' || nz(r.slope_day, 'FM9999990.0000') || '</td>'
       || '<td class="num">' || nz(r.r2, 'FM90.000') || '</td>'
       || '<td class="num' || (CASE WHEN r.days_sat IS NOT NULL AND r.days_sat <= dtf_warn THEN ' sev-warn' END)
-         || '">' || nz(r.days_sat, 'FM99999990') || '</td>'
+         || '">' || dtf_cell(r.days_sat, r.quality, 'FM99999990') || '</td>'
       || '<td class="num">'
       || CASE WHEN r.sat_worst IS NULL THEN '&ndash;'
               ELSE TO_CHAR(r.sat_worst, 'FM99999990') || '&ndash;'
@@ -2267,6 +2545,7 @@ BEGIN
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
+    p('</div>');  -- .tscroll
   ELSE
     p('<div class="empty-note">No CPU trend rows found.</div>');
   END IF;
@@ -2295,12 +2574,14 @@ BEGIN
     ORDER  BY days_ago, con_dbid
   ) LOOP
     IF NOT any_rows THEN
+      p('<div class="tscroll">');
       p('<table class="tbl"><thead><tr>'
-        || '<th>DB/PDB</th><th>DAY</th><th class="num">BUSY%</th>'
-        || '<th class="num">MEDIAN%' || info_icon('the usual busy percent for that same weekday')
-        || '</th><th class="num">THRESH%' || info_icon('how far from usual a day must be before it is flagged')
-        || '</th><th class="num">ROBUST_Z' || info_icon('how far outside its normal range this day was -- 3 or more is clearly unusual')
-        || '</th><th>FLAG</th></tr></thead><tbody>');
+        || '<th>DB/PDB</th><th>Day' || info_icon('CAPR column: DAY_DT')
+        || '</th><th class="num">Busy %' || info_icon('CAPR column: BUSY_PCT')
+        || '</th><th class="num">Median %' || info_icon('the usual busy percent for that same weekday (CAPR column: MEDIAN_PCT)')
+        || '</th><th class="num">Threshold %' || info_icon('how far from usual a day must be before it is flagged (CAPR column: THRESHOLD_PCT)')
+        || '</th><th class="num">Robust z' || info_icon('how far outside its normal range this day was -- 3 or more is clearly unusual (CAPR column: Z)')
+        || '</th><th>Flag' || info_icon('CAPR column: ANOMALY_FLAG') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
     p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || r.day_dt || '</td>'
@@ -2313,6 +2594,7 @@ BEGIN
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
+    p('</div>');  -- .tscroll
   ELSE
     p('<div class="empty-note">No anomalies flagged in the selected window.</div>');
   END IF;
@@ -2336,14 +2618,16 @@ BEGIN
     ORDER  BY rank_shift
   ) LOOP
     IF NOT any_rows THEN
+      p('<div class="tscroll">');
       p('<table class="tbl"><thead><tr>'
-        || '<th>DB/PDB</th><th>METRIC</th><th>WINDOWS</th>'
-        || '<th class="num">RECENT%' || info_icon('median over the recent window')
-        || '</th><th class="num">BASE%' || info_icon('median over the baseline window just before it')
-        || '</th><th class="num">SHIFT_PTS' || info_icon('recent median minus baseline median, in percentage points')
-        || '</th><th class="num">THRESH</th>'
-        || '<th class="num">N_OF_M' || info_icon('how many days of the recent window are past the baseline median plus its MAD sigma -- all of them, for a flag')
-        || '</th><th>FLAG</th></tr></thead><tbody>');
+        || '<th>DB/PDB</th><th>Metric' || info_icon('CAPR column: METRIC')
+        || '</th><th>Windows' || info_icon('recent window vs the baseline window before it (CAPR columns: RECENT_DAYS, BASE_DAYS)')
+        || '</th><th class="num">Recent %' || info_icon('median over the recent window (CAPR column: RECENT_MED)')
+        || '</th><th class="num">Base %' || info_icon('median over the baseline window just before it (CAPR column: BASE_MED)')
+        || '</th><th class="num">Shift (pts)' || info_icon('recent median minus baseline median, in percentage points (CAPR column: SHIFT_PCT)')
+        || '</th><th class="num">Threshold' || info_icon('CAPR column: THRESHOLD_PCT')
+        || '</th><th class="num">N of M' || info_icon('how many days of the recent window are past the baseline median plus its MAD sigma -- all of them, for a flag (CAPR columns: N_ABOVE, N_BELOW, N_RECENT)')
+        || '</th><th>Flag' || info_icon('CAPR column: SHIFT_FLAG') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
     p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.metric) || '</td>'
@@ -2359,6 +2643,7 @@ BEGIN
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
+    p('</div>');  -- .tscroll
   ELSE
     p('<div class="empty-note">No sustained level shifts detected.</div>');
   END IF;
@@ -2407,10 +2692,15 @@ BEGIN
       ORDER  BY rank_report, horizon_days
     ) LOOP
       IF NOT any_rows THEN
+        p('<div class="tscroll">');
         p('<table class="tbl"><thead><tr>'
-          || '<th>DB/PDB</th><th>TABLESPACE</th><th class="num">HORIZON</th><th class="num">REGR_GIB</th>'
-          || '<th class="num">ESM_GIB</th><th class="num">ESM_LO</th><th class="num">ESM_HI</th>'
-          || '<th>ESM_MODEL</th></tr></thead><tbody>');
+          || '<th>DB/PDB</th><th>Tablespace' || info_icon('CAPR column: SERIES_KEY')
+          || '</th><th class="num">Horizon (days)' || info_icon('CAPR column: HORIZON_DAYS')
+          || '</th><th class="num">REGR (GiB)' || info_icon('CAPR column: REGR_GB')
+          || '</th><th class="num">ESM (GiB)' || info_icon('CAPR column: ESM_GB')
+          || '</th><th class="num">ESM low' || info_icon('CAPR column: ESM_LO_GB')
+          || '</th><th class="num">ESM high' || info_icon('CAPR column: ESM_HI_GB')
+          || '</th><th>ESM model' || info_icon('CAPR column: ESM_MODEL') || '</th></tr></thead><tbody>');
         any_rows := TRUE;
       END IF;
       p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.series_key) || '</td>'
@@ -2423,6 +2713,7 @@ BEGIN
     END LOOP;
     IF any_rows THEN
       p('</tbody></table>');
+      p('</div>');  -- .tscroll
     ELSE
       p('<div class="empty-note">No tablespace ESM/REGR comparison rows found.</div>');
     END IF;
@@ -2437,10 +2728,15 @@ BEGIN
       ORDER  BY con_dbid, series_key, horizon_days
     ) LOOP
       IF NOT any_rows THEN
+        p('<div class="tscroll">');
         p('<table class="tbl"><thead><tr>'
-          || '<th>DB/PDB</th><th>METRIC</th><th class="num">HORIZON</th><th class="num">REGR</th>'
-          || '<th class="num">ESM</th><th class="num">ESM_LO</th><th class="num">ESM_HI</th>'
-          || '<th>ESM_MODEL</th></tr></thead><tbody>');
+          || '<th>DB/PDB</th><th>Metric' || info_icon('CAPR column: SERIES_KEY')
+          || '</th><th class="num">Horizon (days)' || info_icon('CAPR column: HORIZON_DAYS')
+          || '</th><th class="num">REGR' || info_icon('CAPR column: REGR')
+          || '</th><th class="num">ESM' || info_icon('CAPR column: ESM')
+          || '</th><th class="num">ESM low' || info_icon('CAPR column: ESM_LO')
+          || '</th><th class="num">ESM high' || info_icon('CAPR column: ESM_HI')
+          || '</th><th>ESM model' || info_icon('CAPR column: ESM_MODEL') || '</th></tr></thead><tbody>');
         any_rows := TRUE;
       END IF;
       p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.series_key) || '</td>'
@@ -2453,6 +2749,7 @@ BEGIN
     END LOOP;
     IF any_rows THEN
       p('</tbody></table>');
+      p('</div>');  -- .tscroll
     ELSE
       p('<div class="empty-note">No CPU ESM/REGR comparison rows found.</div>');
     END IF;
@@ -2472,15 +2769,21 @@ BEGIN
       ORDER  BY con_dbid, series_kind, series_key
     ) LOOP
       IF NOT any_rows THEN
+        p('<div class="tscroll">');
         p('<table class="tbl"><thead><tr>'
-          || '<th>DB/PDB</th><th>KIND</th><th>SERIES</th><th>CUTOFF</th>'
-          || '<th class="num">REGR_MAPE%</th><th class="num">REGR_BIAS%</th>'
-          || '<th class="num">ESM_MAPE%</th><th class="num">ESM_BIAS%</th>'
-          || '<th>BETTER</th><th>ESM_PICK '
+          || '<th>DB/PDB</th><th>Kind' || info_icon('CAPR column: SERIES_KIND')
+          || '</th><th>Series' || info_icon('CAPR column: SERIES_KEY')
+          || '</th><th>Cutoff' || info_icon('the last day the engine was allowed to see before forecasting (CAPR column: CUTOFF_DAY)')
+          || '</th><th class="num">REGR MAPE %' || info_icon('CAPR column: REGR_MAPE')
+          || '</th><th class="num">REGR bias %' || info_icon('CAPR column: REGR_BIAS')
+          || '</th><th class="num">ESM MAPE %' || info_icon('CAPR column: ESM_MAPE')
+          || '</th><th class="num">ESM bias %' || info_icon('CAPR column: ESM_BIAS')
+          || '</th><th>Better' || info_icon('CAPR column: BETTER')
+          || '</th><th>ESM pick '
           || info_icon('which ESM variant this series was trained with and why: '
                     || 'H = the EXSM_HOLT candidate''s holdout MAPE, W = the '
                     || 'EXSM_ADDWINTERS(7) candidate''s. AUTO keeps the lower one '
-                    || '(knobs esm_tbspc_model / esm_select_by_backtest)')
+                    || '(knobs esm_tbspc_model / esm_select_by_backtest) (CAPR column: ESM_PICK)')
           || '</th></tr></thead><tbody>');
         any_rows := TRUE;
       END IF;
@@ -2498,6 +2801,7 @@ BEGIN
     END LOOP;
     IF any_rows THEN
       p('</tbody></table>');
+      p('</div>');  -- .tscroll
     ELSE
       p('<div class="empty-note">No backtest rows yet (needs enough history before the holdout window; '
         || 'ESM rows appear after <code>EXEC cap_forecast_ml.train_backtest</code>).</div>');
@@ -2529,13 +2833,22 @@ BEGIN
     ORDER  BY rank_series
   ) LOOP
     IF NOT any_rows THEN
+      p('<div class="tscroll">');
       p('<table class="tbl"><thead><tr>'
-        || '<th>DB/PDB</th><th>SERIES</th><th>UNIT</th><th class="num">CURRENT</th>'
-        || '<th class="num">LIMIT</th><th class="num">SAT'
-        || info_icon('the fraction of the limit treated as saturated -- the level DAYS_LIM counts down to')
-        || '</th><th class="num">PCT_LIM</th><th class="num">SLOPE/DAY</th><th class="num">R2</th>'
-        || '<th class="num">DAYS_LIM</th><th class="num">WORST</th><th class="num">BEST</th>'
-        || '<th>SEV</th><th>QUALITY</th></tr></thead><tbody>');
+        || '<th>DB/PDB</th><th>Series' || info_icon('CAPR column: SERIES')
+        || '</th><th>Unit' || info_icon('CAPR column: UNIT')
+        || '</th><th class="num">Current' || info_icon('CAPR column: CUR_VAL')
+        || '</th><th class="num">Limit' || info_icon('CAPR column: CUR_LIMIT')
+        || '</th><th class="num">Sat'
+        || info_icon('the fraction of the limit treated as saturated -- the level Days to limit counts down to (CAPR column: SAT_VALUE)')
+        || '</th><th class="num">% of limit' || info_icon('CAPR column: PCT_OF_LIMIT')
+        || '</th><th class="num">Slope/day' || info_icon('CAPR column: SLOPE_PER_DAY')
+        || '</th><th class="num">R2</th>'
+        || '<th class="num">Days to limit' || info_icon('CAPR column: DAYS_TO_LIMIT')
+        || '</th><th class="num">Worst' || info_icon('CAPR column: LIMIT_WORST')
+        || '</th><th class="num">Best' || info_icon('CAPR column: LIMIT_BEST')
+        || '</th><th>Severity' || info_icon('CAPR column: SEV')
+        || '</th><th>Quality' || info_icon('CAPR column: QUALITY') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
     p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.series) || '</td>'
@@ -2546,7 +2859,7 @@ BEGIN
       || '<td class="num">' || nz(r.pct_of_limit, 'FM9990.0') || '</td>'
       || '<td class="num">' || nz(r.slope_per_day, 'FM999999990.0000') || '</td>'
       || '<td class="num">' || nz(r.r2, 'FM90.999') || '</td>'
-      || '<td class="num">' || nz(r.days_to_limit, 'FM99999990') || '</td>'
+      || '<td class="num">' || dtf_cell(r.days_to_limit, r.quality, 'FM99999990') || '</td>'
       || '<td class="num">' || nz(r.limit_worst, 'FM99999990') || '</td>'
       || '<td class="num">' || nz(r.limit_best, 'FM99999990') || '</td>'
       || '<td>' || sev_pill(r.sev) || '</td>'
@@ -2554,6 +2867,7 @@ BEGIN
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
+    p('</div>');  -- .tscroll
   ELSE
     p('<div class="empty-note">No fixed-ceiling series yet (needs DBA_HIST_RESOURCE_LIMIT / '
       || 'DBA_HIST_SYSSTAT history, or tablespace history for DB_SIZE_GB).</div>');
