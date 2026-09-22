@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Getting started — AWR Capacity Predictions</title>
+<meta name="description" content="Clone the repository, run one command, read your first capacity report. Preflight, install and the first report in one go, with nothing written to AWR.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23b06a0d'/><path d='M16 8L24 23L8 23Z' fill='%23fff'/></svg>">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  // No-FOUC: apply the persisted theme before first paint.
+  (function(){try{var t=localStorage.getItem("cap-theme");
+    if(t){document.documentElement.setAttribute("data-theme",t);
+      var m=document.querySelector('meta[name="color-scheme"]');if(m)m.content=t;}}catch(e){}})();
+</script>
+</head>
+<body>
+<a class="skip-link visually-hidden" href="#content">Skip to content</a>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">
+      <div class="brand__mark" aria-hidden="true">▲</div>
+      <div>
+        <div class="brand__name">AWR Capacity<br>Predictions</div>
+        <div class="brand__sub">Documentation</div>
+      </div>
+    </a>
+    <nav class="nav" aria-label="Documentation pages">
+      <div class="nav__group">Start</div>
+      <a class="nav-page" href="index.html"><span class="n">01</span> Introduction</a>
+      <a class="nav-page" href="start.html"><span class="n">02</span> Getting started</a>
+      <div class="nav__group">Guides</div>
+      <a class="nav-page" href="concepts.html"><span class="n">03</span> How it works</a>
+      <a class="nav-page" href="usage.html"><span class="n">04</span> Usage</a>
+      <a class="nav-page" href="testing.html"><span class="n">05</span> Testing</a>
+      <div class="nav__group">Reference</div>
+      <a class="nav-page" href="reference.html"><span class="n">06</span> Reference</a>
+    </nav>
+    <div class="sidebar__foot">
+      <button class="theme-toggle" id="themeBtn" type="button">◐ System</button>
+      <a class="sidebar__link" href="https://github.com/davidbudac/awr_capacity_predictions">Source on GitHub ↗</a>
+    </div>
+  </aside>
+
+  <main class="main" id="content" tabindex="-1">
+    <div class="wrap">
+
+      <!-- ===================== HERO ===================== -->
+      <section class="hero" id="start">
+        <span class="eyebrow">Getting started</span>
+        <h1>Clone it, run one command, read the report</h1>
+        <p class="lead">Nothing to download beyond this repository, nothing to configure, nothing
+          written to your AWR data. One script runs the preflight, installs the views and prints
+          your first capacity report.</p>
+      </section>
+
+      <div class="callout">
+        <span class="ico">i</span>
+        <p><strong>You need three things.</strong> An Oracle Database 19c or newer with the
+        Diagnostics Pack (that is where AWR comes from), a <span class="inline">sqlplus</span> that
+        can reach it, and a connection as <span class="inline">sysdba</span> to
+        <span class="inline">CDB$ROOT</span>, because that is where AWR history lives. Anything
+        else is optional and covered under <a href="reference.html#advanced-install">Advanced
+        install</a>.</p>
+      </div>
+
+      <!-- ===================== STEPS ===================== -->
+      <div class="section-head" id="steps">
+        <span class="eyebrow">Three steps</span>
+        <h2>From zero to a report</h2>
+        <p>About five minutes, most of it waiting for the views to compile.</p>
+      </div>
+
+      <div class="steps">
+
+        <div class="step">
+          <div class="step__rail"><div class="step__n">1</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Get the code where <span class="inline">sqlplus</span> is</h4>
+            <p>The database host is the easiest place: <span class="inline">sqlplus</span> is
+              already there and <span class="inline">/ as sysdba</span> just works.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">DB host · bash</span><span class="term__tag in">you run</span></div>
+<pre>git clone https://github.com/davidbudac/awr_capacity_predictions.git
+cd awr_capacity_predictions</pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step__rail"><div class="step__n">2</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Run the quickstart</h4>
+            <p>One command. It runs the read-only preflight, installs every object into the current
+              schema and spools your first report. Safe to re-run at any time.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">DB host · bash</span><span class="term__tag in">you run</span></div>
+<pre>./quickstart.sh                    <span class="c-cmt"># connects as / as sysdba</span></pre>
+            </div>
+            <p>No shell, or connecting from elsewhere? The same thing from inside SQL*Plus, started
+              in the repository directory:</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">SQL*Plus · CDB$ROOT</span><span class="term__tag in">alternative</span></div>
+<pre>sqlplus / as sysdba
+<span class="c-prompt">SQL&gt;</span> @quickstart.sql</pre>
+            </div>
+            <p>The tail of the output tells you it worked and where the report went:</p>
+            <div class="term">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">output</span><span class="term__tag">expect</span></div>
+<pre>  <span class="c-pass">All CAP* objects valid.</span>
+============================================================
+ Install complete (seam_mode = local).
+============================================================
+...
+Report written to: reports/cap_report_CDB1_202609221410.txt</pre>
+            </div>
+          </div>
+        </div>
+
+        <div class="step">
+          <div class="step__rail"><div class="step__n">3</div><div class="step__line"></div></div>
+          <div class="step__body">
+            <h4>Read the report</h4>
+            <p>Plain text, eight sections, top to bottom: days-to-full per tablespace, growth
+              forecasts, anomalies, CPU trend, then the fixed-ceiling series. The first lines say in
+              plain English whether anything is heading for trouble.</p>
+            <div class="term in">
+              <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+                <span class="term__title">DB host · bash</span><span class="term__tag in">you run</span></div>
+<pre>less reports/cap_report_*.txt</pre>
+            </div>
+            <p>From here on, a report is just <span class="inline">@report/report.sql</span> from the
+              repository directory. <a href="usage.html">Usage</a> explains every section and the HTML
+              twin.</p>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="callout warn">
+        <span class="ico">!</span>
+        <p><strong>First report says INSUFFICIENT_HISTORY? That is expected.</strong> Stock AWR keeps
+        only 8 days of history and a forecast needs at least 14 daily points, so on a fresh database
+        the suite refuses to project a trend it cannot see yet. Nothing is broken. Raise retention
+        once and the forecasts fill in over the following weeks. This is the
+        <em>only</em> change to Oracle anywhere in this guide, and it is optional.</p>
+      </div>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">SQL*Plus · CDB$ROOT</span><span class="term__tag in">optional · once</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> EXEC DBMS_WORKLOAD_REPOSITORY.MODIFY_SNAPSHOT_SETTINGS(retention =&gt; 90*24*60);  <span class="c-cmt">-- 90 days</span></pre>
+      </div>
+
+      <!-- ===================== WHAT HAPPENED ===================== -->
+      <div class="section-head" id="what">
+        <span class="eyebrow">Under the hood</span>
+        <h2>What the quickstart just did</h2>
+        <p>Three existing scripts in a row, nothing more. You can run each on its own later.</p>
+      </div>
+
+      <div class="tablewrap">
+        <table>
+          <caption><span class="inline">quickstart.sql</span>, step by step</caption>
+          <thead><tr><th scope="col">Step</th><th scope="col">Script</th><th scope="col">Does</th></tr></thead>
+          <tbody>
+            <tr><td class="num">1</td><td><span class="inline">doctor.sql</span></td><td class="def">Read-only preflight: Diagnostics Pack, <span class="inline">DBA_HIST_*</span> grants, privileges, AWR retention and how much history each source holds. Prints a PASS / WARN / FAIL checklist and explains any gap.</td></tr>
+            <tr><td class="num">2</td><td><span class="inline">install.sql</span></td><td class="def">Creates the views, three small config tables and the Tier 2 package in the current schema, in local mode. Idempotent; re-running never overwrites a knob you changed. Fails loudly if any object is invalid.</td></tr>
+            <tr><td class="num">3</td><td><span class="inline">report/report.sql</span></td><td class="def">The read-only text report, spooled to <span class="inline">reports/</span>.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout tip">
+        <span class="ico">▸</span>
+        <p><strong>Read-only against AWR, always.</strong> The only rows the suite ever writes are in
+        its own <span class="inline">CAP_CONFIG</span>, <span class="inline">CAP_TBSPC_OVERRIDE</span>
+        and <span class="inline">CAP_ML_MODEL</span> tables. Remove everything again with
+        <span class="inline">@uninstall.sql</span>.</p>
+      </div>
+
+      <!-- ===================== NEXT ===================== -->
+      <div class="section-head" id="next">
+        <span class="eyebrow">Read next</span>
+        <h2>Where to go from here</h2>
+        <p>Installing from a monitoring schema, warehouse or fixture mode, scheduler jobs and
+          upgrades are all under Advanced install.</p>
+      </div>
+      <div class="cardgrid">
+        <a class="card" href="usage.html">
+          <div class="k">04 · Guide</div>
+          <h3>Usage</h3>
+          <p>Read the eight sections, drill into a series, poll the alert view, add Tier 2.</p>
+          <div class="go">Read the report →</div>
+        </a>
+        <a class="card" href="concepts.html">
+          <div class="k">03 · Guide</div>
+          <h3>How it works</h3>
+          <p>The seam, the five-layer pipeline, and how forecast quality is judged.</p>
+          <div class="go">See the architecture →</div>
+        </a>
+        <a class="card" href="reference.html#advanced-install">
+          <div class="k">06 · Reference</div>
+          <h3>Advanced install</h3>
+          <p>Prerequisites in detail, the three seam modes, load order, jobs, upgrading.</p>
+          <div class="go">Go deeper →</div>
+        </a>
+      </div>
+
+      <nav class="pager" id="pager" aria-label="Previous and next page"></nav>
+
+      <footer class="foot">
+        AWR Capacity Predictions · in-database capacity forecasting · Oracle 19c floor<br>
+        Documentation generated from <span class="inline">README.md</span> and
+        <span class="inline">docs/design.md</span>.
+      </footer>
+
+    </div><!-- /wrap -->
+  </main>
+  <aside class="rail"><nav class="toc" id="toc" aria-label="On this page"></nav></aside>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

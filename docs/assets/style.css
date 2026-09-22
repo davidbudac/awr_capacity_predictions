@@ -358,3 +358,14 @@ hr.soft{border:none;border-top:1px solid var(--border);margin:40px 0}
   .trackflow-scroll{overflow-x:auto}
   .trackflow{min-width:620px}
 }
+
+/* ---- collapsible reference block (Advanced install) ---- */
+.fold{margin:18px 0 28px;border:1px solid var(--border);border-radius:var(--r);background:var(--surface)}
+.fold>summary{cursor:pointer;list-style:none;padding:12px 16px;font-size:14px;font-weight:600;color:var(--accent-text);display:flex;align-items:center;gap:10px}
+.fold>summary::-webkit-details-marker{display:none}
+.fold>summary::before{content:"▸";font-family:var(--mono);transition:transform .15s}
+.fold[open]>summary::before{transform:rotate(90deg)}
+.fold[open]>summary{border-bottom:1px solid var(--border)}
+.fold__body{padding:4px 18px 8px}
+.toc a.toc__folded{padding-left:22px}
+.toc a[hidden]{display:none}

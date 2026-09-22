@@ -61,7 +61,24 @@ the thin `CAPV_*` views, so the identical SQL runs against local `DBA_HIST_*`,
 the `awr-fleet-warehouse` `AWRV_*` views, or the test fixtures — you just swap
 which seam file `install.sql` loads.
 
-## Install
+## Quickstart
+
+On the database host (or anywhere `sqlplus` can reach `CDB$ROOT` as sysdba):
+
+```bash
+git clone https://github.com/davidbudac/awr_capacity_predictions.git
+cd awr_capacity_predictions
+./quickstart.sh                  # preflight (doctor.sql) + install (local mode) + first report
+```
+
+That is the whole installation. The report lands in `reports/cap_report_<db>_<ts>.txt`.
+`./quickstart.sh user/pw@//host/svc` connects as someone else; `@quickstart.sql`
+from inside SQL*Plus (started in the repo root) does the same without the shell.
+On a stock box the first report says `INSUFFICIENT_HISTORY` -- AWR keeps only
+8 days by default; raise it once with
+`EXEC DBMS_WORKLOAD_REPOSITORY.MODIFY_SNAPSHOT_SETTINGS(retention => 90*24*60);`.
+
+## Install (manual / other modes)
 
 ```sql
 sqlplus / as sysdba           -- install where DBA_HIST_* is visible: CDB$ROOT

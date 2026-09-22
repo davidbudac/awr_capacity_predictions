@@ -1,0 +1,259 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Capacity Prediction Workflow",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "tier2",
+      "label": "Tier 2: OML ESM"
+    },
+    {
+      "id": "source",
+      "label": "AWR Source"
+    },
+    {
+      "id": "tier1",
+      "label": "Tier 1: SQL Regression"
+    },
+    {
+      "id": "output",
+      "label": "Verdict + Report"
+    }
+  ],
+  "phases": [
+    {
+      "id": "ingest",
+      "label": "Ingest",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "fit",
+      "label": "Fit + project",
+      "fromCol": 2,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "judge",
+      "label": "Compare + report",
+      "fromCol": 4,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "awr",
+    "seam",
+    "daily",
+    "trend",
+    "project",
+    "compare",
+    "report"
+  ],
+  "nodes": [
+    {
+      "id": "awr",
+      "lane": "source",
+      "col": 0,
+      "type": "database",
+      "label": "AWR History",
+      "sublabel": "DBA_HIST_*, read-only",
+      "width": 132
+    },
+    {
+      "id": "seam",
+      "lane": "source",
+      "col": 1,
+      "type": "backend",
+      "label": "CAPV_* Seam",
+      "sublabel": "3 source modes",
+      "width": 132
+    },
+    {
+      "id": "daily",
+      "lane": "source",
+      "col": 2,
+      "type": "backend",
+      "label": "CAPD_* Daily",
+      "sublabel": "tbspc, CPU, series",
+      "width": 132
+    },
+    {
+      "id": "cfg",
+      "lane": "tier1",
+      "col": 1,
+      "type": "database",
+      "label": "CAP_CONFIG",
+      "sublabel": "knobs + overrides",
+      "width": 132
+    },
+    {
+      "id": "trend",
+      "lane": "tier1",
+      "col": 2,
+      "type": "backend",
+      "label": "Trend Fit",
+      "sublabel": "OLS or Theil-Sen",
+      "tag": "reset-aware window",
+      "width": 132
+    },
+    {
+      "id": "project",
+      "lane": "tier1",
+      "col": 3,
+      "type": "backend",
+      "label": "Projection",
+      "sublabel": "bands + days-to-full",
+      "tag": "quality flag",
+      "width": 132
+    },
+    {
+      "id": "train",
+      "lane": "tier2",
+      "col": 3,
+      "type": "messagebus",
+      "label": "ESM Train",
+      "sublabel": "CAP_FORECAST_ML",
+      "tag": "writes CAP_ML_MODEL",
+      "width": 132
+    },
+    {
+      "id": "esm",
+      "lane": "tier2",
+      "col": 4,
+      "type": "backend",
+      "label": "ESM Forecast",
+      "sublabel": "CAPF_ESM_FORECAST",
+      "tag": "max +30 days",
+      "width": 132
+    },
+    {
+      "id": "backtest",
+      "lane": "tier2",
+      "col": 5,
+      "type": "security",
+      "label": "CAPF_BACKTEST",
+      "sublabel": "holdout error",
+      "width": 132
+    },
+    {
+      "id": "compare",
+      "lane": "output",
+      "col": 4,
+      "type": "backend",
+      "label": "CAPF_COMPARE",
+      "sublabel": "regression vs ESM",
+      "width": 132
+    },
+    {
+      "id": "report",
+      "lane": "output",
+      "col": 5,
+      "type": "frontend",
+      "label": "CAPR_* Report",
+      "sublabel": "days-to-full + alerts",
+      "width": 132
+    }
+  ],
+  "edges": [
+    {
+      "id": "awr-seam",
+      "from": "awr",
+      "to": "seam",
+      "variant": "default"
+    },
+    {
+      "id": "seam-daily",
+      "from": "seam",
+      "to": "daily",
+      "label": "daily rollup",
+      "variant": "default"
+    },
+    {
+      "id": "daily-trend",
+      "from": "daily",
+      "to": "trend",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cfg-trend",
+      "from": "cfg",
+      "to": "trend",
+      "label": "thresholds",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "trend-project",
+      "from": "trend",
+      "to": "project",
+      "label": "slope + intercept",
+      "variant": "emphasis"
+    },
+    {
+      "id": "project-compare",
+      "from": "project",
+      "to": "compare",
+      "variant": "emphasis"
+    },
+    {
+      "id": "daily-train",
+      "from": "daily",
+      "to": "train",
+      "label": "same daily series",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "train-esm",
+      "from": "train",
+      "to": "esm",
+      "label": "DM$VP view",
+      "variant": "default",
+      "role": "branch"
+    },
+    {
+      "id": "esm-compare",
+      "from": "esm",
+      "to": "compare",
+      "variant": "default",
+      "role": "branch"
+    },
+    {
+      "id": "esm-backtest",
+      "from": "esm",
+      "to": "backtest",
+      "label": "holdout twin",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "compare-report",
+      "from": "compare",
+      "to": "report",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Tier 1 contract",
+      "items": [
+        "slope_method picks OLS or Theil-Sen; r2 and bands stay OLS",
+        "Short history yields INSUFFICIENT_HISTORY, zero slope yields FLAT"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Tier 2 contract",
+      "items": [
+        "Steps capped at LEAST(30, cfg, FLOOR(rows/4)) on 19c",
+        "Backtest n_days reports actual ESM coverage"
+      ]
+    }
+  ]
+}

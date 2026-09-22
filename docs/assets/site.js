@@ -14,8 +14,8 @@
   // Canonical page order — drives current-page marking and the pager.
   var PAGES = [
     { file: "index.html",     label: "Introduction" },
+    { file: "start.html",     label: "Getting started" },
     { file: "concepts.html",  label: "How it works" },
-    { file: "install.html",   label: "Installation" },
     { file: "usage.html",     label: "Usage" },
     { file: "testing.html",   label: "Testing" },
     { file: "reference.html", label: "Reference" }
@@ -51,14 +51,30 @@
     toc.appendChild(group);
 
     var map = {};
+    var folds = [];
     headed.forEach(function (el) {
       var h = el.querySelector("h1, h2");
       if (!h) return;
       var a = document.createElement("a");
       a.href = "#" + el.id;
       a.textContent = h.textContent.trim();
+      // Headings inside a collapsed <details> only show in the TOC once it is open.
+      var d = el.closest ? el.closest("details") : null;
+      if (d) {
+        a.classList.add("toc__folded");
+        if (folds.indexOf(d) < 0) folds.push(d);
+        a.hidden = !d.open;
+      }
       toc.appendChild(a);
       map[el.id] = a;
+    });
+    folds.forEach(function (d) {
+      d.addEventListener("toggle", function () {
+        [].forEach.call(toc.querySelectorAll("a.toc__folded"), function (a) {
+          var t = document.getElementById(a.getAttribute("href").slice(1));
+          if (t && d.contains(t)) a.hidden = !d.open;
+        });
+      });
     });
 
     if ("IntersectionObserver" in window) {
@@ -81,6 +97,17 @@
       headed.forEach(function (el) { obs.observe(el); });
     }
   }
+
+  // ---- 2b. open a collapsed <details> when the URL hash points inside it ----
+  function unfoldForHash() {
+    if (!location.hash) return;
+    var el = document.getElementById(location.hash.slice(1));
+    if (!el) return;
+    var d = el.closest ? el.closest("details") : null;
+    if (d && !d.open) { d.open = true; el.scrollIntoView(); }
+  }
+  unfoldForHash();
+  window.addEventListener("hashchange", unfoldForHash);
 
   // ---- 3. build prev / next pager -----------------------------------
   var pager = document.getElementById("pager");

@@ -34,7 +34,9 @@ for making changes safely.
 `45_report_views` (CAPR_CONTAINER + CAPR_ALERTS + CAPR_SERIES) → `50_ml` (which
 pulls `ml/cap_forecast_ml.pks/.pkb` and builds the ESM views + CAPF_BACKTEST)
 → `55_report_views_ml` (the Tier-2-dependent CAPR_* section views).
-Opt-in extras outside install.sql: `doctor.sql` (preflight), `install_jobs.sql`
+Opt-in extras outside install.sql: `quickstart.sql` / `quickstart.sh`
+(doctor → install local → report/report.sql, in one run; the docs' "Getting
+started" path), `doctor.sql` (preflight), `install_jobs.sql`
 / `uninstall_jobs.sql` (DBMS_SCHEDULER, disabled by default),
 `report/drill_tbspc.sql` / `report/drill_cpu.sql` (single-series drill-down).
 Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomaly →
