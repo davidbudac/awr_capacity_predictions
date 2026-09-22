@@ -128,14 +128,20 @@
       <p><span class="inline">report/report_html.sql</span> shares the same defaults file, the same
         knobs, and the same <b>read-only</b> guarantee as the text report — the HTML is assembled in one
         PL/SQL block via <span class="inline">DBMS_OUTPUT</span> and captured by <span class="inline">SPOOL</span>.
-        It opens with a plain-English <em>“At a glance”</em> banner that says up front whether any
-        tablespace, the whole database, or CPU is heading for trouble. Then come severity badges, quality
-        pills, inline fill bars, and inline-SVG growth/trend charts (per-tablespace history + REGR projection
-        + ESM&nbsp;+30 point and CI + limit line + anomaly markers; per-<span class="inline">con_dbid</span>
-        host&nbsp;busy% and DB&nbsp;CPU charts with a saturation line). Every jargon column header carries a
-        plain-English tooltip, and a collapsible glossary defines the terms — all rendered as plain
-        <code>&lt;svg&gt;</code> with no JS chart library and no external assets, plus a sticky section nav
-        and light/dark theming.</p>
+        It opens with a verdict strip (critical, warnings, forecast quality, host CPU p95, Tier 2 models)
+        and a ranked <em>attention list</em> built from <span class="inline">CAPR_ALERTS</span>: one row per
+        issue with the number that matters at the right, and one line naming everything that is healthy.
+        Then come the charts, all drawn with one grammar: area under history, the 95% prediction band as a
+        shaded wedge, a labelled ceiling or saturation line, a “today” divider, hollow rings on unusual days,
+        the ESM&nbsp;+30 point with its interval, and the date printed where the projection crosses the ceiling.
+        Tablespaces that need a look get a card with days-to-full as the big figure; flat or far-from-full ones
+        collapse into a one-row sparkline strip. CPU shows the busy-hour p95 (what saturates) and each
+        container’s DB CPU as a share of the host’s cores, with any sustained level shift shaded. Unusual days
+        are dot strips per series with the numbers folded underneath, and Tier 2 vs Tier 1 is one row per
+        series at +30 with the backtest verdict. Every column header carries a plain-English tooltip, the
+        glossary sits in one “How to read this report” fold, and it all renders as plain
+        <code>&lt;svg&gt;</code> with no chart library and no external assets, plus a sticky section nav and
+        a light/dark toggle. See the <a href="demo/cap_report_demo.html" target="_blank" rel="noopener">sample report</a>.</p>
 
       <div class="callout">
         <span class="ico">i</span>

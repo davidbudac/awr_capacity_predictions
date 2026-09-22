@@ -419,6 +419,58 @@ DECLARE
     ORDER BY f.dbid, f.con_dbid;
 
   ----------------------------------------------------------------------
+  -- Redesign scratch (R1): shared chart grammar inputs. chart_svg() reads
+  -- these outer-block collections directly (xs/ys history, xs2/ys2 a faint
+  -- secondary line, px1/py1 the 2-point projection, bx/blo/bhi the
+  -- prediction-band knots, ax/ay anomaly markers) so every chart in the
+  -- document is drawn by one procedure and cannot drift in style.
+  ----------------------------------------------------------------------
+  xs2 num_tab;  ys2 num_tab;
+  bx  num_tab;  blo num_tab;  bhi num_tab;
+  ax  num_tab;  ay  num_tab;
+  v_cnt2      PLS_INTEGER := 0;
+  v_nband     PLS_INTEGER := 0;
+  v_nanom     PLS_INTEGER := 0;
+  v_has_proj  BOOLEAN := FALSE;
+  v_hist_days NUMBER;
+  v_n_crit    PLS_INTEGER := 0;
+  v_n_warn    PLS_INTEGER := 0;
+  v_n_info    PLS_INTEGER := 0;
+  v_n_cap     PLS_INTEGER := 0;
+  v_n_beh     PLS_INTEGER := 0;
+  v_first_crit VARCHAR2(300);
+  v_p95_cur   NUMBER;
+  v_p95_dts   NUMBER;
+  v_p95_q     VARCHAR2(30);
+  v_bt_rows   PLS_INTEGER := 0;
+  v_kind_lbl  VARCHAR2(60);
+  v_main      VARCHAR2(1000);
+  v_sub       VARCHAR2(1000);
+  v_big       VARCHAR2(120);
+  v_small     VARCHAR2(120);
+  v_stripe    VARCHAR2(10);
+  v_cross_x   NUMBER;
+  v_cross_lbl VARCHAR2(80);
+  v_shift_from NUMBER;
+  v_shift_to   NUMBER;
+  v_shift_lbl  VARCHAR2(120);
+  v_big_cls   VARCHAR2(10);
+  v_big_lbl   VARCHAR2(120);
+  v_dtf       NUMBER;
+  v_pct       NUMBER;
+  v_quiet     PLS_INTEGER := 0;
+  v_chips     PLS_INTEGER := 0;
+  v_last_day  DATE;
+  v_tmp       VARCHAR2(32000);
+  v_n         NUMBER;
+  v_horizon   NUMBER;
+  v_half      NUMBER;
+  v_gap_pct   NUMBER;
+  v_win_lo    DATE;
+  v_win_hi    DATE;
+  v_strip_n   PLS_INTEGER;
+
+  ----------------------------------------------------------------------
   -- p: emit one line. Lines are kept well under 32K; DBMS_OUTPUT itself
   -- caps a single PUT_LINE at 32767 bytes, which we never approach here.
   ----------------------------------------------------------------------
@@ -541,8 +593,10 @@ DECLARE
   -- result under OK/LOW_CONFIDENCE both mean "not heading toward the
   -- ceiling" (slope <= 0), so both read as "no crossing".
   ----------------------------------------------------------------------
-  FUNCTION dtf_cell(d IN NUMBER, q IN VARCHAR2, fmt IN VARCHAR2 DEFAULT 'FM99999990') RETURN VARCHAR2 IS
+  FUNCTION dtf_cell(d IN NUMBER, q IN VARCHAR2, fmt IN VARCHAR2 DEFAULT 'FM99999990',
+                    cap_year IN BOOLEAN DEFAULT FALSE) RETURN VARCHAR2 IS
   BEGIN
+    IF d IS NOT NULL AND cap_year AND d > 365 THEN RETURN '<span class="na">&gt; 1 year</span>'; END IF;
     IF d IS NOT NULL THEN RETURN TO_CHAR(d, fmt); END IF;
     IF q = 'INSUFFICIENT_HISTORY' THEN RETURN '<span class="na">insufficient history</span>'; END IF;
     IF q IN ('FLAT','OK','LOW_CONFIDENCE') THEN RETURN '<span class="na">no crossing</span>'; END IF;
@@ -853,14 +907,341 @@ DECLARE
   PROCEDURE chart_legend IS
   BEGIN
     p('<div class="chart-legend">');
-    p('<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="hist-line" x1="1" y1="5" x2="19" y2="5"/></svg> History</span>');
-    p('<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="proj-line" x1="1" y1="5" x2="19" y2="5"/></svg> Projection (REGR)</span>');
-    p('<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="esm-line" x1="10" y1="1" x2="10" y2="9"/><circle class="esm-dot" cx="10" cy="5" r="2"/></svg> ESM +30 (95% CI)</span>');
-    p('<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="limit-line" x1="1" y1="5" x2="19" y2="5"/></svg> Limit</span>');
-    p('<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="thresh-line" x1="1" y1="5" x2="19" y2="5"/></svg> Threshold</span>');
-    p('<span class="lg-item"><svg width="20" height="10" class="lg-ico"><circle class="anom-dot" cx="10" cy="5" r="3"/></svg> Anomaly</span>');
+    p('<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="hist-line" x1="1" y1="5" x2="19" y2="5"/></svg> history</span>');
+    p('<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="proj-line" x1="1" y1="5" x2="19" y2="5"/></svg> projection (REGR)</span>');
+    p('<span class="lg-item"><svg width="20" height="10" class="lg-ico"><rect class="band" x="1" y="1" width="18" height="8"/></svg> 95% band</span>');
+    p('<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="limit-line" x1="1" y1="5" x2="19" y2="5"/></svg> ceiling</span>');
+    p('<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="thresh-line" x1="1" y1="5" x2="19" y2="5"/></svg> saturation</span>');
+    p('<span class="lg-item"><svg width="20" height="10" class="lg-ico"><circle class="anom-dot" cx="10" cy="5" r="3.5"/></svg> unusual day</span>');
+    p('<span class="lg-item"><svg width="20" height="12" class="lg-ico"><line class="esm-line" x1="10" y1="1" x2="10" y2="11"/><path class="esm-dot" d="M10 2 l4 4 -4 4 -4 -4 Z"/></svg> ESM +30 &plusmn; 95%</span>');
+    p('<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="today-line" x1="10" y1="1" x2="10" y2="9"/></svg> today</span>');
     p('</div>');
   END chart_legend;
+
+  ----------------------------------------------------------------------
+  -- R1 chart grammar helpers. One geometry (560 x p_h, plot box pl..pr /
+  -- pt..pb), one tick rule, one axis style, one procedure (chart_svg) that
+  -- draws every layer in a fixed order: shift window, grid, months, frame,
+  -- area under history, prediction band, ceiling / saturation lines,
+  -- secondary line, history, projection, today divider, anomaly rings,
+  -- ESM point, crossing marker.
+  ----------------------------------------------------------------------
+  FUNCTION dfmt(d IN DATE) RETURN VARCHAR2 IS
+  BEGIN
+    IF d IS NULL THEN RETURN NULL; END IF;
+    IF ABS(d - SYSDATE) > 300 THEN RETURN TO_CHAR(d, 'FMDD Mon YYYY'); END IF;
+    RETURN TO_CHAR(d, 'FMDD Mon');
+  END dfmt;
+
+  -- growth rate from MiB/day: MiB below 1 GiB/day, GiB above
+  FUNCTION fmt_rate_mb(mb IN NUMBER) RETURN VARCHAR2 IS
+  BEGIN
+    IF mb IS NULL THEN RETURN 'unknown'; END IF;
+    IF ABS(mb) >= 1024 THEN RETURN TO_CHAR(mb / 1024, 'FM999990.0') || ' GiB/day'; END IF;
+    RETURN TO_CHAR(ROUND(mb), 'FM999990') || ' MiB/day';
+  END fmt_rate_mb;
+
+  -- container label for chips and strips: the PDB part alone when the
+  -- report spans containers, dimmed, so the series name stays readable
+  FUNCTION con_prefix(p_db_pdb IN VARCHAR2) RETURN VARCHAR2 IS
+  BEGIN
+    IF v_con_count <= 1 THEN RETURN NULL; END IF;
+    RETURN '<span class="dim">' || esc(CASE WHEN INSTR(p_db_pdb, '/') > 0 THEN SUBSTR(p_db_pdb, INSTR(p_db_pdb, '/') + 1) ELSE p_db_pdb END) || '/</span>';
+  END con_prefix;
+
+  -- days -> a short duration for the big figures: "17 d", "3 mo", "1.8 y"
+  FUNCTION short_dur(d IN NUMBER) RETURN VARCHAR2 IS
+  BEGIN
+    IF d IS NULL THEN RETURN NULL; END IF;
+    IF d < 1 THEN RETURN '&lt;1 d'; END IF;
+    IF d < 120 THEN RETURN TO_CHAR(ROUND(d), 'FM999990') || ' d'; END IF;
+    IF d < 365 THEN RETURN TO_CHAR(ROUND(d / 30), 'FM990') || ' mo'; END IF;
+    RETURN RTRIM(RTRIM(TO_CHAR(ROUND(d / 365, 1), 'FM9990.0'), '0'), '.') || ' y';
+  END short_dur;
+
+  -- 1 / 2 / 5 x 10^k tick step for a range, aiming at about `target` ticks.
+  FUNCTION nice_step(rng IN NUMBER, target IN PLS_INTEGER DEFAULT 4) RETURN NUMBER IS
+    raw NUMBER; mag NUMBER; f NUMBER;
+  BEGIN
+    IF rng IS NULL OR rng <= 0 THEN RETURN 1; END IF;
+    raw := rng / target;
+    mag := POWER(10, FLOOR(LOG(10, raw)));
+    f   := raw / mag;
+    IF f < 1.5 THEN RETURN mag;
+    ELSIF f < 3 THEN RETURN 2 * mag;
+    ELSIF f < 7 THEN RETURN 5 * mag;
+    ELSE RETURN 10 * mag; END IF;
+  END nice_step;
+
+  PROCEDURE emit_grid(ymin IN NUMBER, ymax IN NUMBER, unit IN VARCHAR2,
+                      pl IN NUMBER, pr IN NUMBER, pt IN NUMBER, pb IN NUMBER) IS
+    step NUMBER := nice_step(ymax - ymin);
+    v0   NUMBER;
+    val  NUMBER;
+    ypx  NUMBER;
+    fmt  VARCHAR2(20);
+    i    PLS_INTEGER := 0;
+  BEGIN
+    IF ymax <= ymin THEN RETURN; END IF;
+    fmt := CASE WHEN step < 0.1 THEN 'FM999999990.00'
+                WHEN step < 1   THEN 'FM999999990.0'
+                WHEN step - TRUNC(step) <> 0 THEN 'FM999999990.0'
+                ELSE 'FM999999990' END;
+    v0 := CEIL(ymin / step) * step;
+    LOOP
+      val := v0 + i * step;
+      EXIT WHEN val > ymax + step * 0.001 OR i > 40;
+      ypx := lin(val, ymin, ymax, pb, pt);
+      p('<line class="grid-line" x1="' || fmt_px(pl) || '" y1="' || fmt_px(ypx)
+        || '" x2="' || fmt_px(pr) || '" y2="' || fmt_px(ypx) || '"/>');
+      p('<text class="axis-label" x="' || fmt_px(pl - 6) || '" y="' || fmt_px(ypx + 3.5)
+        || '" text-anchor="end">' || TO_CHAR(val, fmt) || '</text>');
+      i := i + 1;
+    END LOOP;
+    IF unit IS NOT NULL THEN
+      p('<text class="axis-unit" x="' || fmt_px(pl + 4) || '" y="' || fmt_px(pt - 6) || '">' || unit || '</text>');
+    END IF;
+  END emit_grid;
+
+  -- Month labels along the x axis (every 1 / 2 / 3 months by span); the
+  -- first label and every January carry the year. Very short spans fall
+  -- back to start / end dates.
+  PROCEDURE emit_months(xmin IN NUMBER, xmax IN NUMBER,
+                        pl IN NUMBER, pr IN NUMBER, pb IN NUMBER, py IN NUMBER) IS
+    d      DATE;
+    dmax   DATE := c_epoch + xmax;
+    every  PLS_INTEGER;
+    nmon   NUMBER;
+    i      PLS_INTEGER := 0;
+    shown  PLS_INTEGER := 0;
+    xpx    NUMBER;
+    lbl    VARCHAR2(20);
+  BEGIN
+    IF xmax <= xmin THEN RETURN; END IF;
+    d    := ADD_MONTHS(TRUNC(c_epoch + xmin, 'MM'), 1);
+    IF TRUNC(c_epoch + xmin, 'MM') = c_epoch + xmin THEN d := c_epoch + xmin; END IF;
+    nmon := MONTHS_BETWEEN(TRUNC(dmax, 'MM'), TRUNC(d, 'MM'));
+    IF nmon < 1 THEN
+      p('<text class="axis-label" x="' || fmt_px(pl) || '" y="' || fmt_px(py)
+        || '" text-anchor="start">' || dfmt(c_epoch + xmin) || '</text>');
+      p('<text class="axis-label" x="' || fmt_px(pr) || '" y="' || fmt_px(py)
+        || '" text-anchor="end">' || dfmt(dmax) || '</text>');
+      RETURN;
+    END IF;
+    every := CASE WHEN nmon > 30 THEN 6 WHEN nmon > 14 THEN 3 WHEN nmon > 8 THEN 2 ELSE 1 END;
+    WHILE d <= dmax LOOP
+      IF MOD(i, every) = 0 THEN
+        xpx := lin(d - c_epoch, xmin, xmax, pl, pr);
+        lbl := TO_CHAR(d, 'Mon')
+               || CASE WHEN shown = 0 OR TO_CHAR(d, 'MM') = '01'
+                       THEN ' ''' || TO_CHAR(d, 'YY') END;
+        p('<line class="axis-tick" x1="' || fmt_px(xpx) || '" y1="' || fmt_px(pb)
+          || '" x2="' || fmt_px(xpx) || '" y2="' || fmt_px(pb + 4) || '"/>');
+        p('<text class="axis-label" x="' || fmt_px(xpx) || '" y="' || fmt_px(py)
+          || '" text-anchor="middle">' || lbl || '</text>');
+        shown := shown + 1;
+      END IF;
+      i := i + 1;
+      d := ADD_MONTHS(d, 1);
+    END LOOP;
+  END emit_months;
+
+  -- The one chart procedure. Reads xs/ys (history, v_cnt), xs2/ys2
+  -- (secondary faint line, v_cnt2), px1/py1 (projection, v_has_proj),
+  -- bx/blo/bhi (band knots, v_nband) and ax/ay (anomaly rings, v_nanom).
+  PROCEDURE chart_svg(p_aria   IN VARCHAR2,
+                      p_xmin   IN NUMBER, p_xmax IN NUMBER,
+                      p_ymin   IN NUMBER, p_ymax IN NUMBER,
+                      p_unit   IN VARCHAR2,
+                      p_today  IN NUMBER,
+                      p_ceil   IN NUMBER, p_ceil_lbl IN VARCHAR2,
+                      p_sat    IN NUMBER, p_sat_lbl  IN VARCHAR2,
+                      p_esm_x  IN NUMBER, p_esm_val IN NUMBER,
+                      p_esm_lo IN NUMBER, p_esm_hi  IN NUMBER,
+                      p_sh_from IN NUMBER, p_sh_to IN NUMBER, p_sh_lbl IN VARCHAR2,
+                      p_cross_x IN NUMBER, p_cross_y IN NUMBER, p_cross_lbl IN VARCHAR2,
+                      p_h      IN NUMBER DEFAULT 230) IS
+    pl  CONSTANT NUMBER := 48;
+    pr  CONSTANT NUMBER := 548;
+    pt  CONSTANT NUMBER := 22;
+    pb  NUMBER := p_h - 26;
+    buf VARCHAR2(4000);
+    ypx NUMBER;
+    xpx NUMBER;
+    x0  NUMBER;
+    x1  NUMBER;
+    FUNCTION sx(v IN NUMBER) RETURN NUMBER IS BEGIN RETURN lin(v, p_xmin, p_xmax, pl, pr); END;
+    FUNCTION sy(v IN NUMBER) RETURN NUMBER IS BEGIN RETURN lin(v, p_ymin, p_ymax, pb, pt); END;
+  BEGIN
+    p('<svg viewBox="0 0 560 ' || TO_CHAR(p_h, 'FM9990') || '" class="chart-svg" role="img" aria-label="'
+      || p_aria || '">');
+    -- shaded level-shift window (background layer)
+    IF p_sh_from IS NOT NULL AND p_sh_to IS NOT NULL AND p_sh_to > p_sh_from THEN
+      x0 := sx(GREATEST(p_sh_from, p_xmin)); x1 := sx(LEAST(p_sh_to, p_xmax));
+      p('<rect class="shift" x="' || fmt_px(x0) || '" y="' || fmt_px(pt) || '" width="' || fmt_px(x1 - x0)
+        || '" height="' || fmt_px(pb - pt) || '"/>');
+      IF p_sh_lbl IS NOT NULL THEN
+        IF x0 > (pl + pr) / 2 THEN
+          p('<text class="shift-label" x="' || fmt_px(x0 - 4) || '" y="' || fmt_px(pt + 11) || '" text-anchor="end">' || p_sh_lbl || '</text>');
+        ELSE
+          p('<text class="shift-label" x="' || fmt_px(x1 + 4) || '" y="' || fmt_px(pt + 11) || '">' || p_sh_lbl || '</text>');
+        END IF;
+      END IF;
+    END IF;
+    emit_grid(p_ymin, p_ymax, p_unit, pl, pr, pt, pb);
+    emit_months(p_xmin, p_xmax, pl, pr, pb, p_h - 7);
+    p('<line class="axis-line" x1="' || fmt_px(pl) || '" y1="' || fmt_px(pb) || '" x2="' || fmt_px(pr) || '" y2="' || fmt_px(pb) || '"/>');
+    p('<line class="axis-line" x1="' || fmt_px(pl) || '" y1="' || fmt_px(pt) || '" x2="' || fmt_px(pl) || '" y2="' || fmt_px(pb) || '"/>');
+    -- area under history
+    IF v_cnt >= 2 THEN
+      p('<path class="area" d="M' || fmt_px(sx(xs(1))) || ' ' || fmt_px(pb));
+      buf := NULL;
+      FOR i IN 1 .. v_cnt LOOP
+        buf := buf || ' L' || fmt_px(sx(xs(i))) || ' ' || fmt_px(sy(ys(i)));
+        IF LENGTH(buf) > 2000 THEN p(buf); buf := NULL; END IF;
+      END LOOP;
+      p(buf || ' L' || fmt_px(sx(xs(v_cnt))) || ' ' || fmt_px(pb) || ' Z"/>');
+    END IF;
+    -- prediction band: from today's actual value out along the hi knots,
+    -- back along the lo knots
+    IF v_nband >= 1 AND v_cnt >= 1 THEN
+      buf := 'M' || fmt_px(sx(xs(v_cnt))) || ' ' || fmt_px(sy(ys(v_cnt)));
+      FOR i IN 1 .. v_nband LOOP
+        buf := buf || ' L' || fmt_px(sx(bx(i))) || ' ' || fmt_px(sy(bhi(i)));
+      END LOOP;
+      FOR i IN REVERSE 1 .. v_nband LOOP
+        buf := buf || ' L' || fmt_px(sx(bx(i))) || ' ' || fmt_px(sy(blo(i)));
+      END LOOP;
+      p('<path class="band" d="' || buf || ' Z"/>');
+    END IF;
+    -- ceiling / saturation lines with their value labels
+    IF p_ceil IS NOT NULL THEN
+      ypx := sy(p_ceil);
+      p('<line class="limit-line" x1="' || fmt_px(pl) || '" y1="' || fmt_px(ypx) || '" x2="' || fmt_px(pr) || '" y2="' || fmt_px(ypx) || '"/>');
+      IF p_ceil_lbl IS NOT NULL THEN
+        p('<text class="limit-label" x="' || fmt_px(pl + 4) || '" y="' || fmt_px(ypx - 4) || '">' || p_ceil_lbl || '</text>');
+      END IF;
+    END IF;
+    IF p_sat IS NOT NULL THEN
+      ypx := sy(p_sat);
+      p('<line class="thresh-line" x1="' || fmt_px(pl) || '" y1="' || fmt_px(ypx) || '" x2="' || fmt_px(pr) || '" y2="' || fmt_px(ypx) || '"/>');
+      IF p_sat_lbl IS NOT NULL THEN
+        p('<text class="thresh-label" x="' || fmt_px(pl + 4) || '" y="' || fmt_px(ypx - 4) || '">' || p_sat_lbl || '</text>');
+      END IF;
+    END IF;
+    -- secondary (faint) line, then the main history line
+    IF v_cnt2 >= 2 THEN
+      emit_poly_box(xs2, ys2, v_cnt2, p_xmin, p_xmax, p_ymin, p_ymax, pl, pr, pt, pb, 'hist2-line');
+    END IF;
+    emit_poly_box(xs, ys, v_cnt, p_xmin, p_xmax, p_ymin, p_ymax, pl, pr, pt, pb, 'hist-line');
+    IF v_has_proj THEN
+      emit_poly_box(px1, py1, 2, p_xmin, p_xmax, p_ymin, p_ymax, pl, pr, pt, pb, 'proj-line');
+    END IF;
+    -- today divider
+    IF p_today IS NOT NULL AND p_today < p_xmax THEN
+      xpx := sx(p_today);
+      p('<line class="today-line" x1="' || fmt_px(xpx) || '" y1="' || fmt_px(pt) || '" x2="' || fmt_px(xpx) || '" y2="' || fmt_px(pb) || '"/>');
+      p('<text class="today-label" x="' || fmt_px(xpx + 4) || '" y="' || fmt_px(pb - 5) || '">TODAY</text>');
+    END IF;
+    -- anomaly rings
+    FOR i IN 1 .. v_nanom LOOP
+      p('<circle class="anom-dot" cx="' || fmt_px(sx(ax(i))) || '" cy="' || fmt_px(sy(ay(i))) || '" r="4"/>');
+    END LOOP;
+    -- ESM +30: whisker + diamond
+    IF p_esm_val IS NOT NULL AND p_esm_x IS NOT NULL THEN
+      xpx := sx(p_esm_x);
+      IF p_esm_lo IS NOT NULL AND p_esm_hi IS NOT NULL THEN
+        p('<line class="esm-line" x1="' || fmt_px(xpx) || '" y1="' || fmt_px(sy(GREATEST(p_esm_lo, p_ymin)))
+          || '" x2="' || fmt_px(xpx) || '" y2="' || fmt_px(sy(LEAST(p_esm_hi, p_ymax))) || '"/>');
+      END IF;
+      ypx := sy(p_esm_val);
+      p('<path class="esm-dot" d="M' || fmt_px(xpx) || ' ' || fmt_px(ypx - 5) || ' l5 5 -5 5 -5 -5 Z"/>');
+    END IF;
+    -- crossing marker (where the projection meets the ceiling / saturation)
+    IF p_cross_x IS NOT NULL AND p_cross_y IS NOT NULL AND p_cross_x <= p_xmax AND p_cross_x >= p_xmin THEN
+      xpx := sx(p_cross_x); ypx := sy(p_cross_y);
+      p('<circle class="cross-dot" cx="' || fmt_px(xpx) || '" cy="' || fmt_px(ypx) || '" r="3.5"/>');
+      IF p_cross_lbl IS NOT NULL THEN
+        IF xpx > (pl + pr) * 0.6 THEN
+          p('<text class="cross-label" x="' || fmt_px(xpx - 7) || '" y="' || fmt_px(ypx + 15) || '" text-anchor="end">' || p_cross_lbl || '</text>');
+        ELSE
+          p('<text class="cross-label" x="' || fmt_px(xpx + 7) || '" y="' || fmt_px(ypx + 15) || '">' || p_cross_lbl || '</text>');
+        END IF;
+      END IF;
+    END IF;
+    p('</svg>');
+  END chart_svg;
+
+  -- Card frame around a chart: title + pills, a muted subtitle, and the
+  -- big figure at the right (days to full / to saturation / shift size).
+  PROCEDURE card_open(p_title IN VARCHAR2, p_sub IN VARCHAR2,
+                      p_big IN VARCHAR2, p_big_lbl IN VARCHAR2, p_big_cls IN VARCHAR2,
+                      p_border IN VARCHAR2 DEFAULT NULL, p_id IN VARCHAR2 DEFAULT NULL) IS
+  BEGIN
+    p('<div class="chart-card' || CASE WHEN p_border IS NOT NULL THEN ' ' || p_border END || '"'
+      || CASE WHEN p_id IS NOT NULL THEN ' id="' || p_id || '"' END || '>');
+    p('<div class="ch"><div class="t">' || p_title
+      || CASE WHEN p_sub IS NOT NULL THEN '<small>' || p_sub || '</small>' END || '</div>');
+    IF p_big IS NOT NULL THEN
+      p('<div class="big ' || NVL(p_big_cls, '') || '"><div class="v">' || p_big || '</div><div class="l">'
+        || p_big_lbl || '</div></div>');
+    END IF;
+    p('</div>');
+  END card_open;
+
+  -- Sparkline for the quiet-series strip: history only, normalised.
+  PROCEDURE spark_svg IS
+    lo NUMBER; hi NUMBER; buf VARCHAR2(4000);
+  BEGIN
+    IF v_cnt = 0 THEN RETURN; END IF;
+    lo := ys(1); hi := ys(1);
+    FOR i IN 1 .. v_cnt LOOP
+      IF ys(i) < lo THEN lo := ys(i); END IF;
+      IF ys(i) > hi THEN hi := ys(i); END IF;
+    END LOOP;
+    IF hi - lo < 0.000001 THEN lo := lo - 1; hi := hi + 1; END IF;
+    p('<svg viewBox="0 0 300 24" preserveAspectRatio="none" class="spark" aria-hidden="true">');
+    p('<polyline class="hist-line" points="');
+    buf := NULL;
+    FOR i IN 1 .. v_cnt LOOP
+      buf := buf || fmt_px(lin(xs(i), xs(1), xs(v_cnt), 2, 298)) || ',' || fmt_px(lin(ys(i), lo, hi, 21, 3)) || ' ';
+      IF LENGTH(buf) > 2000 THEN p(buf); buf := NULL; END IF;
+    END LOOP;
+    IF buf IS NOT NULL THEN p(buf); END IF;
+    p('"/></svg>');
+  END spark_svg;
+
+  -- Anomaly strip frame (sections 3 and 5): a baseline with weekly ticks
+  -- across the alert window; the caller emits the day markers and closes.
+  PROCEDURE strip_open(p_xmin IN NUMBER, p_xmax IN NUMBER) IS
+    d DATE := c_epoch + p_xmax;
+  BEGIN
+    p('<svg viewBox="0 0 600 30" class="strip-svg" aria-hidden="true">');
+    p('<line class="tl-baseline" x1="4" y1="15" x2="596" y2="15"/>');
+    WHILE d > c_epoch + p_xmin LOOP
+      p('<line class="tl-grid" x1="' || fmt_px(lin(d - c_epoch, p_xmin, p_xmax, 4, 596)) || '" y1="8" x2="'
+        || fmt_px(lin(d - c_epoch, p_xmin, p_xmax, 4, 596)) || '" y2="22"/>');
+      d := d - 7;
+    END LOOP;
+  END strip_open;
+
+  -- Table-row severity tint class.
+  FUNCTION row_cls(sev IN VARCHAR2) RETURN VARCHAR2 IS
+  BEGIN
+    RETURN CASE sev WHEN 'CRIT' THEN ' class="r-crit"' WHEN 'WARN' THEN ' class="r-warn"' ELSE '' END;
+  END row_cls;
+
+  -- Attention-list row (section 0).
+  PROCEDURE attn_row(p_sev IN VARCHAR2, p_kind IN VARCHAR2, p_main IN VARCHAR2,
+                     p_sub IN VARCHAR2, p_big IN VARCHAR2, p_small IN VARCHAR2) IS
+  BEGIN
+    p('<div class="row ' || LOWER(p_sev) || '"><div class="stripe"></div><div class="kind">' || p_kind
+      || '</div><div class="msg">' || p_main
+      || CASE WHEN p_sub IS NOT NULL THEN '<span class="sub">' || p_sub || '</span>' END
+      || '</div><div class="when">' || NVL(p_big, '') 
+      || CASE WHEN p_small IS NOT NULL THEN '<small>' || p_small || '</small>' END
+      || '</div></div>');
+  END attn_row;
 
 BEGIN
   do_esm := NOT (show_esm = 'N' OR (show_esm = 'AUTO' AND esm_ok = 0));
@@ -1078,6 +1459,114 @@ BEGIN
   p('.g-hero{gap:6px}');
   p('.g-hero .g-head{font-size:16px}');
   p('.g-hero .hero-svg{width:100%;height:auto;display:block;margin-top:8px}');
+  ------------------------------------------------------------------------
+  -- R1 redesign: extra tokens (band / area fills, a second panel tone, a
+  -- fainter text tone) declared for every theme state, then the components
+  -- the redesigned header, attention list, chart cards, quiet strip,
+  -- anomaly strips and tables use. Later rules win over the base ones above.
+  ------------------------------------------------------------------------
+  p(':root{--panel2:#f8f9fb; --faint:#8a94a3; --band:rgba(43,95,173,.13); --area:rgba(43,95,173,.08); --accent-soft:rgba(43,95,173,.12); --accent-text:#2b5fad; --shift-bg:rgba(183,121,31,.16)}');
+  p('@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){--panel2:#1f242c; --faint:#6f7987; --band:rgba(122,162,232,.16); --area:rgba(122,162,232,.10); --accent-soft:rgba(122,162,232,.16); --accent-text:#9dbcf2; --shift-bg:rgba(224,176,76,.18)}}');
+  p(':root[data-theme="dark"]{--panel2:#1f242c; --faint:#6f7987; --band:rgba(122,162,232,.16); --area:rgba(122,162,232,.10); --accent-soft:rgba(122,162,232,.16); --accent-text:#9dbcf2; --shift-bg:rgba(224,176,76,.18)}');
+  p(':root[data-theme="light"]{--panel2:#f8f9fb; --faint:#8a94a3; --band:rgba(43,95,173,.13); --area:rgba(43,95,173,.08); --accent-soft:rgba(43,95,173,.12); --accent-text:#2b5fad; --shift-bg:rgba(183,121,31,.16)}');
+  -- header with the verdict strip
+  p('.rep-head{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px 18px;margin:20px 0;display:grid;grid-template-columns:1fr auto;gap:12px 20px;align-items:start}');
+  p('.rep-head h1{margin:0;font-size:20px}');
+  p('.rep-head .id{color:var(--muted);font-size:12.5px;margin-top:2px}');
+  p('.rep-head .id b{color:var(--text);font-weight:600}');
+  p('.tools{display:flex;gap:6px;flex-wrap:wrap}');
+  p('.tbtn{font:inherit;font-size:12px;padding:5px 10px;border:1px solid var(--border);border-radius:7px;color:var(--muted);background:var(--panel);cursor:pointer}');
+  p('.tbtn:hover{color:var(--text);border-color:var(--accent)}');
+  p('.kpis{grid-column:1/-1;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:2px}');
+  p('.kpi{border:1px solid var(--border);border-radius:9px;padding:9px 12px;background:var(--panel2)}');
+  p('.kpi .l{font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}');
+  p('.kpi .v{font-size:22px;font-weight:700;line-height:1.15;font-variant-numeric:tabular-nums;margin-top:2px}');
+  p('.kpi .v small{font-size:13px;color:var(--muted);font-weight:400}');
+  p('.kpi .s{font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}');
+  p('.kpi.crit .v{color:var(--crit)}.kpi.warn .v{color:var(--warn)}.kpi.ok .v{color:var(--ok)}');
+  p('.rep-head details.fold{grid-column:1/-1;margin:0}');
+  p('details.fold{border:1px solid var(--border);border-radius:10px;background:var(--panel);font-size:12.5px;margin:10px 0 6px}');
+  p('details.fold>summary{cursor:pointer;padding:10px 14px;font-weight:600;color:var(--text);list-style:none}');
+  p('details.fold>summary::-webkit-details-marker{display:none}');
+  p('details.fold>summary::before{content:"+ ";color:var(--muted);font-weight:700}');
+  p('details.fold[open]>summary::before{content:"- "}');
+  p('details.fold .fold-body{padding:0 14px 12px}');
+  p('details.fold .fold-body table.tbl{margin:0}');
+  -- attention list (section 0)
+  p('.attn{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;margin:10px 0 8px}');
+  p('.attn .row{display:grid;grid-template-columns:5px 96px 1fr auto;gap:0 12px;align-items:center;padding:10px 14px 10px 0;border-bottom:1px solid var(--border)}');
+  p('.attn .row:last-child{border-bottom:none}');
+  p('.attn .stripe{align-self:stretch;background:var(--border)}');
+  p('.attn .crit .stripe{background:var(--crit)}.attn .warn .stripe{background:var(--warn)}');
+  p('.attn .kind{font-size:10.5px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}');
+  p('.attn .msg{font-size:13.5px;min-width:0}');
+  p('.attn .msg b{font-weight:600}');
+  p('.attn .msg .sub{display:block;color:var(--muted);font-size:12px}');
+  p('.attn .when{font-variant-numeric:tabular-nums;text-align:right;font-weight:700;font-size:15px;white-space:nowrap}');
+  p('.attn .when small{display:block;font-weight:400;font-size:11px;color:var(--muted)}');
+  p('.attn .crit .when{color:var(--crit)}.attn .warn .when{color:var(--warn)}');
+  p('.healthy{margin:10px 0 6px;font-size:12.5px;color:var(--muted);line-height:1.8}');
+  p('.healthy b{color:var(--text);font-weight:600;margin-right:4px}');
+  p('.chip{display:inline-block;background:var(--flat-bg);border-radius:6px;padding:1px 7px;margin:0 3px 3px 0;font-variant-numeric:tabular-nums;color:var(--text)}');
+  p('.chip.q{color:var(--muted)}');
+  p('@media(max-width:640px){.attn .row{grid-template-columns:5px 1fr auto}.attn .kind{display:none}.rep-head{grid-template-columns:1fr}}');
+  -- chart cards: header row with the big figure, severity border
+  p('.chart-card.crit{border-color:var(--crit)}.chart-card.warn{border-color:var(--warn)}');
+  p('.chart-card .ch{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:4px}');
+  p('.chart-card .ch .t{font-weight:700;font-size:14px;min-width:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px}');
+  p('.chart-card .ch .t small{flex-basis:100%;font-weight:400;color:var(--muted);font-size:12px}');
+  p('.big{text-align:right;font-variant-numeric:tabular-nums;flex:0 0 auto}');
+  p('.big .v{font-size:24px;font-weight:700;line-height:1}');
+  p('.big .l{font-size:11px;color:var(--muted);margin-top:2px}');
+  p('.big.crit .v{color:var(--crit)}.big.warn .v{color:var(--warn)}.big.ok .v{color:var(--ok)}.big.muted .v{color:var(--muted)}');
+  p('.hero-duo .chart-card{padding:14px 16px 8px}');
+  -- chart layers
+  p('.axis-unit{fill:var(--muted);font-size:10.5px;letter-spacing:.04em}');
+  p('.axis-tick{stroke:var(--border);stroke-width:1}');
+  p('.area{fill:var(--area)}');
+  p('.band{fill:var(--band)}');
+  p('.hist2-line{fill:none;stroke:var(--accent);stroke-width:1.2;opacity:.35;stroke-linejoin:round}');
+  p('.hist2-line-pt{fill:var(--accent);opacity:.35}');
+  p('.today-line{stroke:var(--faint);stroke-width:1;stroke-dasharray:1 3}');
+  p('.today-label{fill:var(--faint);font-size:9.5px;letter-spacing:.08em}');
+  p('.limit-label{fill:var(--crit);font-size:11px;font-weight:600}');
+  p('.thresh-label{fill:var(--warn);font-size:11px;font-weight:600}');
+  p('.anom-dot{fill:var(--panel);stroke:var(--crit);stroke-width:2}');
+  p('.esm-line{stroke:var(--ok);stroke-width:1.5}');
+  p('.esm-dot{fill:var(--ok)}');
+  p('.cross-dot{fill:var(--crit)}');
+  p('.cross-label{fill:var(--crit);font-size:11px;font-weight:700}');
+  p('.shift{fill:var(--shift-bg)}');
+  p('.shift-label{fill:var(--warn);font-size:11px;font-weight:600}');
+  -- quiet-series strip and anomaly strips
+  p('.quiet{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:10px 14px;margin:0 0 20px}');
+  p('.quiet .qh{font-size:12px;color:var(--muted);margin-bottom:6px}');
+  p('.quiet .qrow{display:grid;grid-template-columns:minmax(150px,1.2fr) 2fr 110px 60px 90px;gap:12px;align-items:center;padding:5px 0;border-top:1px solid var(--border);font-size:12.5px}');
+  p('.quiet .qrow:first-of-type{border-top:none}');
+  p('.quiet .qrow .q{color:var(--muted);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}');
+  p('.spark{width:100%;height:24px;display:block}');
+  p('.strips{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:8px 14px 10px;margin:8px 0 10px}');
+  p('.strip{display:grid;grid-template-columns:minmax(150px,180px) 1fr;gap:10px;align-items:center;padding:6px 0;border-top:1px solid var(--border);font-size:12.5px}');
+  p('.strip:first-child{border-top:none}');
+  p('.strip .sl b{font-weight:600}');
+  p('.strip .sl span{display:block;color:var(--faint);font-size:11px}');
+  p('.strip-svg{width:100%;height:30px;display:block}');
+  p('.strip-axis{display:grid;grid-template-columns:minmax(150px,180px) 1fr;gap:10px;font-size:11px;color:var(--muted);padding-top:2px}');
+  p('.strip-axis div{display:flex;justify-content:space-between}');
+  p('.sd-hi{fill:var(--crit)}.sd-lo{fill:var(--accent)}');
+  p('@media(max-width:640px){.quiet .qrow{grid-template-columns:1fr 90px 50px}.quiet .qrow svg,.quiet .qrow .qd{display:none}.strip,.strip-axis{grid-template-columns:1fr}.strip .sl span{display:inline;margin-left:6px}}');
+  -- tables: zebra rows, severity tint, winner badge
+  p('tbody tr:nth-child(even) td{background:var(--panel2)}');
+  p('tbody tr:hover td{background:var(--flat-bg)}');
+  p('tbody tr.r-crit td:first-child{box-shadow:inset 3px 0 0 var(--crit)}');
+  p('tbody tr.r-warn td:first-child{box-shadow:inset 3px 0 0 var(--warn)}');
+  p('tbody td{padding:6px 10px}');
+  p('.win{font-size:10.5px;font-weight:700;padding:1px 6px;border-radius:5px;background:var(--ok-bg);color:var(--ok)}');
+  p('.win.r{background:var(--accent-soft);color:var(--accent-text)}');
+  p('.dim{color:var(--faint)}');
+  p('.gap-hi{color:var(--warn);font-weight:700}');
+  p('.glossary dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:10px 0 0}');
+  p('@media print{.tools{display:none}}');
   p('</style>');
   p('</head><body>');
 
@@ -1087,46 +1576,119 @@ BEGIN
   p('<nav class="topnav">');
   p('<span class="brand">AWR Capacity Report</span>');
   p('<a href="#s0">At a glance</a>');
-  p('<a href="#s1">1. Days-to-full</a>');
-  p('<a href="#s2">2. Forecast</a>');
-  p('<a href="#s3">3. Tbspc anomalies</a>');
-  p('<a href="#s4">4. CPU trend</a>');
-  p('<a href="#s5">5. CPU anomalies</a>');
-  p('<a href="#s6">6. ESM vs REGR</a>');
-  p('<a href="#s7">7. Fixed-ceiling series</a>');
+  p('<a href="#s1">1 Days to full</a>');
+  p('<a href="#s2">2 Forecast</a>');
+  p('<a href="#s3">3 Unusual days</a>');
+  p('<a href="#s4">4 CPU</a>');
+  p('<a href="#s5">5 Unusual CPU days</a>');
+  p('<a href="#s6">6 ESM vs REGR</a>');
+  p('<a href="#s7">7 Fixed ceilings</a>');
   p('</nav>');
   p('<div class="wrap">');
 
   ----------------------------------------------------------------------
-  -- Header card
+  -- Header with the verdict strip (R1). Counts come straight from
+  -- CAPR_ALERTS, the same view the text report''s section 0 prints, so the
+  -- five numbers cannot disagree with the attention list below them.
   ----------------------------------------------------------------------
-  p('<div class="card header-card">');
-  p('<h1>AWR Capacity Predictions</h1>');
-  p('<div class="sub">capacity + anomaly report -- read-only</div>');
-  -- Only Database / Host / Generated stay in the always-visible kv-grid;
-  -- everything else (Schema, Thresholds, Tier 2 models, the amber NOTE) moves
-  -- into a collapsed details block below, styled like the section 0 .glossary.
-  p('<dl class="kv-grid">');
-  p('<div class="kv"><dt>Database</dt><dd>' || esc(cap_db) || '</dd></div>');
-  p('<div class="kv"><dt>Host</dt><dd>' || esc(cap_host) || '</dd></div>');
-  p('<div class="kv"><dt>Generated</dt><dd>' || esc(cap_gen) || '</dd></div>');
-  p('</dl>');
-  p('<details class="report-details">');
-  p('<summary>Report details &amp; methodology</summary>');
-  p('<div class="rd-body">');
-  p('<dl class="kv-grid">');
-  p('<div class="kv"><dt>Schema</dt><dd>' || esc(cap_user) || '</dd></div>');
+  SELECT COUNT(DISTINCT con_dbid) INTO v_con_count FROM capd_tbspc_daily;
+  SELECT NVL(MAX(day_dt) - MIN(day_dt) + 1, 0), MAX(day_dt) INTO v_hist_days, v_last_day FROM capd_tbspc_daily;
+  SELECT SUM(CASE WHEN severity = 'CRIT' THEN 1 ELSE 0 END),
+         SUM(CASE WHEN severity = 'WARN' THEN 1 ELSE 0 END),
+         SUM(CASE WHEN severity = 'INFO' THEN 1 ELSE 0 END),
+         SUM(CASE WHEN severity IN ('CRIT','WARN') AND kind IN ('TBSPC_FULL','TBSPC_NEARFULL','CPU_SAT','SERIES_LIMIT','SERIES_NEARLIMIT') THEN 1 ELSE 0 END),
+         SUM(CASE WHEN severity IN ('CRIT','WARN') AND kind IN ('TBSPC_ANOM','CPU_ANOM','CPU_SHIFT') THEN 1 ELSE 0 END)
+    INTO v_n_crit, v_n_warn, v_n_info, v_n_cap, v_n_beh
+  FROM   capr_alerts;
+  v_n_crit := NVL(v_n_crit, 0); v_n_warn := NVL(v_n_warn, 0); v_n_info := NVL(v_n_info, 0);
+  v_n_cap := NVL(v_n_cap, 0); v_n_beh := NVL(v_n_beh, 0);
+  v_first_crit := NULL;
+  FOR a IN (SELECT series_key, kind, value, unit FROM capr_alerts WHERE severity = 'CRIT'
+            ORDER BY sev_rank, value FETCH FIRST 1 ROW ONLY) LOOP
+    v_first_crit := esc(a.series_key)
+                    || CASE WHEN a.unit = 'DAYS' THEN ', ' || TO_CHAR(a.value, 'FM999990') || ' days'
+                            WHEN a.unit = 'PCT'  THEN ', ' || TO_CHAR(a.value, 'FM990.0') || '%' END;
+  END LOOP;
+  -- forecast quality rollup (reused by the healthy line further down)
+  SELECT COUNT(*),
+         SUM(CASE WHEN quality = 'OK'                   THEN 1 ELSE 0 END),
+         SUM(CASE WHEN quality = 'FLAT'                 THEN 1 ELSE 0 END),
+         SUM(CASE WHEN quality = 'LOW_CONFIDENCE'       THEN 1 ELSE 0 END),
+         SUM(CASE WHEN quality = 'INSUFFICIENT_HISTORY' THEN 1 ELSE 0 END)
+    INTO v_cov_total, v_cov_ok, v_n_flat, v_n_low, v_n_insuf
+  FROM   capr_tbspc_days_to_full;
+  -- host CPU busy-hour p95 (first container that has one)
+  v_p95_cur := NULL; v_p95_dts := NULL; v_p95_q := NULL;
+  FOR c IN (SELECT cur_val, days_to_sat, quality FROM capr_cpu_trend
+            WHERE metric = 'BUSY_P95' ORDER BY con_dbid FETCH FIRST 1 ROW ONLY) LOOP
+    v_p95_cur := c.cur_val; v_p95_dts := c.days_to_sat; v_p95_q := c.quality;
+  END LOOP;
+  SELECT COUNT(*) INTO v_bt_rows FROM capr_backtest WHERE esm_mape IS NOT NULL;
+
+  p('<div class="rep-head">');
+  p('<div><h1>AWR Capacity Report</h1><div class="id"><b>' || esc(cap_db) || '</b> &middot; ' || esc(cap_host)
+    || ' &middot; generated ' || esc(cap_gen) || ' &middot; ' || TO_CHAR(v_hist_days, 'FM999990')
+    || ' days of AWR history &middot; schema ' || esc(cap_user) || '</div></div>');
+  p('<div class="tools"><button class="tbtn" id="themeBtn" type="button" title="Switch light / dark">&#9681; Theme</button>'
+    || '<button class="tbtn" type="button" onclick="window.print()">&#9113; Print</button></div>');
+  p('<div class="kpis">');
+  p('<div class="kpi' || CASE WHEN v_n_crit > 0 THEN ' crit' END || '"><div class="l">Critical</div><div class="v">'
+    || TO_CHAR(v_n_crit, 'FM999990') || '</div><div class="s">' || NVL(v_first_crit, 'nothing critical') || '</div></div>');
+  p('<div class="kpi' || CASE WHEN v_n_warn > 0 THEN ' warn' END || '"><div class="l">Warnings</div><div class="v">'
+    || TO_CHAR(v_n_warn, 'FM999990') || '</div><div class="s">' || TO_CHAR(v_n_cap, 'FM999990') || ' capacity &middot; '
+    || TO_CHAR(v_n_beh, 'FM999990') || ' behaviour</div></div>');
+  p('<div class="kpi' || CASE WHEN NVL(v_cov_total, 0) > 0 AND v_cov_ok = v_cov_total THEN ' ok' END
+    || '"><div class="l">Forecast quality</div><div class="v">' || TO_CHAR(NVL(v_cov_ok, 0), 'FM999990')
+    || '<small> / ' || TO_CHAR(NVL(v_cov_total, 0), 'FM999990') || '</small></div><div class="s">tablespaces rated OK</div></div>');
+  IF v_p95_cur IS NOT NULL THEN
+    p('<div class="kpi' || CASE WHEN v_p95_dts IS NOT NULL AND v_p95_dts <= dtf_crit THEN ' crit'
+                                WHEN v_p95_dts IS NOT NULL AND v_p95_dts <= dtf_warn THEN ' warn' END
+      || '"><div class="l">Host CPU p95</div><div class="v">' || TO_CHAR(ROUND(v_p95_cur), 'FM990') || '<small>%</small></div><div class="s">'
+      || CASE WHEN v_p95_q = 'OK' AND v_p95_dts IS NOT NULL THEN TO_CHAR(cpu_sat, 'FM990') || '% in ~' || TO_CHAR(v_p95_dts, 'FM999990') || ' days'
+              WHEN v_p95_q = 'OK' THEN 'no saturation in sight'
+              WHEN v_p95_q = 'LOW_CONFIDENCE' THEN 'trend too erratic to project'
+              WHEN v_p95_q = 'INSUFFICIENT_HISTORY' THEN 'not enough history yet'
+              ELSE 'not trending' END || '</div></div>');
+  ELSE
+    p('<div class="kpi"><div class="l">Host CPU p95</div><div class="v">&ndash;</div><div class="s">no CPU history yet</div></div>');
+  END IF;
+  p('<div class="kpi"><div class="l">Tier 2 models</div><div class="v">' || TO_CHAR(esm_ok, 'FM999990') || '</div><div class="s">'
+    || CASE WHEN esm_ok = 0 THEN 'none trained'
+            WHEN v_bt_rows > 0 THEN 'ESM trained &middot; backtest on'
+            ELSE 'ESM trained &middot; no backtest yet' END || '</div></div>');
+  p('</div>');  -- .kpis
+  -- one fold for everything about reading the report
+  p('<details class="fold"><summary>How to read this report</summary><div class="fold-body">');
+  p('<dl class="kv-grid" style="margin:8px 0 0">');
   p('<div class="kv"><dt>Thresholds</dt><dd>days-to-full WARN&lt;=' || dtf_warn
-      || ' CRIT&lt;=' || dtf_crit || '; CPU saturation ' || cpu_sat || '%</dd></div>');
+      || ' CRIT&lt;=' || dtf_crit || '; near-full WARN&gt;=' || TO_CHAR(nf_warn, 'FM990') || '% CRIT&gt;=' || TO_CHAR(nf_crit, 'FM990')
+      || '%; CPU saturation ' || cpu_sat || '%</dd></div>');
+  p('<div class="kv"><dt>Training window</dt><dd>last ' || TO_CHAR(train_days, 'FM999990') || ' days; at least '
+      || TO_CHAR(min_train_days, 'FM999990') || ' days before a forecast is trusted; R2 gate ' || TO_CHAR(r2_gate, 'FM0.00') || '</dd></div>');
   p('<div class="kv"><dt>Tier 2 models</dt><dd>' || esm_ok || ' OML ESM model(s) trained (OK)</dd></div>');
   p('</dl>');
-  p('<div class="note">NOTE: forecasts degrade loudly on short AWR retention -- watch TRAIN_N and '
-      || 'QUALITY. INSUFFICIENT_HISTORY means fewer than the configured minimum training days; raise '
-      || 'DBMS_WORKLOAD_REPOSITORY retention for real trends.</div>');
-  p('</div>');  -- .rd-body
-  p('</details>');
-  p('</div>');
-
+  p('<div class="note">Forecasts degrade loudly on short AWR retention: watch Train days and Quality. '
+      || 'INSUFFICIENT_HISTORY means fewer than the configured minimum training days; raise '
+      || 'DBMS_WORKLOAD_REPOSITORY retention for real trends. Everything in this report is read-only.</div>');
+  p('<div class="glossary" style="border:0;margin:0"><dl>');
+  p('<dt>Forecast / projection</dt><dd>Where a number is heading, based on its recent trend.</dd>');
+  p('<dt>REGR (straight-line trend)</dt><dd>Fits a straight line through recent history and extends it forward.</dd>');
+  p('<dt>ESM</dt><dd>Oracle''s machine-learning forecast; it also learns weekly patterns and is usually best for the next 30 days.</dd>');
+  p('<dt>95% band</dt><dd>The shaded wedge on a chart: the actual value should land inside it 95 times out of 100 if growth stays like the recent past.</dd>');
+  p('<dt>R2</dt><dd>How closely growth follows a straight line: 1.00 is perfectly steady, near 0 is erratic.</dd>');
+  p('<dt>Quality: OK</dt><dd>Steady enough to forecast reliably.</dd>');
+  p('<dt>Quality: LOW_CONFIDENCE</dt><dd>Growth is too erratic for a dependable estimate.</dd>');
+  p('<dt>Quality: FLAT</dt><dd>Not growing at all.</dd>');
+  p('<dt>Quality: INSUFFICIENT_HISTORY</dt><dd>Not enough days of AWR history yet.</dd>');
+  p('<dt>Anomaly</dt><dd>A day that stands out sharply from what is normal for that series.</dd>');
+  p('<dt>Level shift</dt><dd>A sustained step in the level a series runs at, as opposed to a one-day outlier.</dd>');
+  p('<dt>Robust z-score</dt><dd>How far outside its normal range a day was; 3 or more is clearly unusual.</dd>');
+  p('<dt>MAD</dt><dd>Median absolute deviation -- a spike-resistant way of measuring "normal".</dd>');
+  p('<dt>Days-to-full</dt><dd>Estimated days until a tablespace reaches its allocated limit.</dd>');
+  p('<dt>Saturation</dt><dd>The busy percent at which the CPU is treated as maxed out.</dd>');
+  p('</dl></div>');
+  p('</div></details>');
+  p('</div>');  -- .rep-head
   ----------------------------------------------------------------------
   -- Section 0: "At a glance" -- plain-English best-guess prediction cards
   -- and an anomaly timeline, for readers who do not want the statistics.
@@ -1135,269 +1697,264 @@ BEGIN
   ----------------------------------------------------------------------
   p('<section id="s0">');
   p('<h2>At a glance</h2>');
-  p('<p class="desc">The short version, in plain language: what is most likely to need '
-      || 'attention, and anything unusual lately. The detailed tables and charts follow below.</p>');
+  p('<p class="desc">What needs attention, ranked, then everything that is fine in one line. '
+      || 'Every row comes from CAPR_ALERTS, the same view a monitoring system would poll.</p>');
 
   ----------------------------------------------------------------------
-  -- Attention banner: is anything about to need attention? Gather items
-  -- (SELECT-only, reusing the same views/knobs as the detail sections, and
-  -- cur_hero for the whole-DB days-to-limit so the banner can never disagree
-  -- with the heroes), then render ONE status banner at the very top.
+  -- Attention list: one row per CRIT / WARN alert, with the kind, a plain
+  -- sentence, one line of supporting numbers and the number that matters
+  -- at the right. The lookups only fetch columns the detail sections print.
   ----------------------------------------------------------------------
-  SELECT COUNT(DISTINCT con_dbid) INTO v_con_count FROM capd_tbspc_daily;
-
-  v_nitems := 0; v_max_sev := 0;
-
-  -- (a) tablespaces forecast to fill within the warning window.
-  FOR ta IN (
-    SELECT con_dbid, tablespace_name, days_to_full,
-           CASE WHEN sev_dtf = 'CRIT' THEN 2 ELSE 1 END AS sev
-    FROM   capr_tbspc_days_to_full
-    WHERE  quality = 'OK' AND days_to_full IS NOT NULL AND days_to_full <= dtf_warn
-    ORDER  BY days_to_full
-  ) LOOP
-    v_nitems := v_nitems + 1;
-    v_items(v_nitems) := '<li>' || esc(ta.tablespace_name)
-                         || ' could be full in ' || time_phrase(ta.days_to_full)
-                         || evidence_link('TBSPC_FULL', ta.con_dbid, ta.tablespace_name) || '</li>';
-    v_max_sev := GREATEST(v_max_sev, ta.sev);
-  END LOOP;
-
-  -- (a2) tablespaces nearly full RIGHT NOW regardless of fit quality (M7.1),
-  -- from CAPR_ALERTS so this banner and the text report's section 0 agree.
-  FOR nf IN (
-    SELECT con_dbid, series_key, db_pdb, value AS pct_used,
-           CASE WHEN severity = 'CRIT' THEN 2 ELSE 1 END AS sev
-    FROM   capr_alerts
-    WHERE  kind = 'TBSPC_NEARFULL'
-    ORDER  BY value DESC
-  ) LOOP
-    v_nitems := v_nitems + 1;
-    v_items(v_nitems) := '<li>' || esc(nf.series_key)
-                         || CASE WHEN v_con_count > 1 THEN ' (' || esc(nf.db_pdb) || ')' END
-                         || ' is ' || TO_CHAR(nf.pct_used, 'FM990.0')
-                         || '% full right now'
-                         || evidence_link('TBSPC_NEARFULL', nf.con_dbid, nf.series_key) || '</li>';
-    v_max_sev := GREATEST(v_max_sev, nf.sev);
-  END LOOP;
-
-  -- (b) whole database projected to reach its total allocated limit within the
-  -- warning window (same regression + gates as the hero, via cur_hero).
-  FOR hf IN cur_hero LOOP
-    IF hf.n < min_train_days THEN            v_hquality := 'INSUFFICIENT_HISTORY';
-    ELSIF hf.slope = 0 OR hf.r2 IS NULL THEN v_hquality := 'FLAT';
-    ELSIF hf.r2 < r2_gate THEN               v_hquality := 'LOW_CONFIDENCE';
-    ELSE                                     v_hquality := 'OK'; END IF;
-    v_hlimit_gb := CASE WHEN hf.limit_all = 1 THEN hf.cur_limit / 1073741824 END;
-    v_days_to_lim := NULL;
-    IF v_hquality = 'OK' AND hf.slope > 0 AND v_hlimit_gb IS NOT NULL
-       AND hf.cur_limit > hf.cur_used THEN
-      v_days_to_lim := FLOOR((hf.cur_limit - hf.cur_used) / hf.slope);
-    END IF;
-    IF v_days_to_lim IS NOT NULL AND v_days_to_lim <= dtf_warn THEN
-      v_hlabel := 'The whole database'
-                  || CASE WHEN v_con_count > 1 THEN ' (' || db_label(hf.dbid, hf.con_dbid) || ')' END;
-      v_nitems := v_nitems + 1;
-      v_items(v_nitems) := '<li>' || esc(v_hlabel)
-                           || ' could reach its total allocated limit in '
-                           || time_phrase(v_days_to_lim)
-                           || evidence_link('DB_FULL', hf.con_dbid, NULL) || '</li>';
-      v_max_sev := GREATEST(v_max_sev, CASE WHEN v_days_to_lim <= dtf_crit THEN 2 ELSE 1 END);
-    END IF;
-  END LOOP;
-
-  -- (c) host CPU projected to reach saturation within the warning window.
-  FOR cc IN (
-    SELECT db_pdb, con_dbid, days_to_sat,
-           CASE WHEN days_to_sat <= dtf_crit THEN 2 ELSE 1 END AS sev
-    FROM   capr_cpu_trend
-    WHERE  metric = 'BUSY_PCT' AND quality = 'OK'
-      AND  days_to_sat IS NOT NULL AND days_to_sat <= dtf_warn
-    ORDER  BY con_dbid
-  ) LOOP
-    v_nitems := v_nitems + 1;
-    v_items(v_nitems) := '<li>Host CPU'
-                         || CASE WHEN v_con_count > 1 THEN ' (' || esc(cc.db_pdb) || ')' END
-                         || ' could reach ' || TO_CHAR(cpu_sat, 'FM990') || '% busy in '
-                         || time_phrase(cc.days_to_sat)
-                         || evidence_link('CPU_SAT', cc.con_dbid, NULL) || '</li>';
-    v_max_sev := GREATEST(v_max_sev, cc.sev);
-  END LOOP;
-
-  -- (d) neutral info: flagged unusual days in the window (never raises severity).
-  SELECT (SELECT COUNT(*) FROM capr_tbspc_anomalies WHERE days_ago < anomaly_days)
-       + (SELECT COUNT(*) FROM capr_cpu_anomalies   WHERE days_ago < anomaly_days)
-    INTO v_anom_count FROM dual;
-
-  -- "Capacity" and "Forecast coverage" are two independent lines in one
-  -- container -- a clean "Capacity" line must never be read as a statement
-  -- that the forecasts behind it are trustworthy.
-  p('<div class="glance-banner">');
-  p('<div class="glance-line-label">Capacity</div>');
-  IF v_nitems = 0 THEN
-    v_msg := 'All clear -- nothing needs attention: nothing is near-full now, no tablespace or '
-             || 'whole-database limit within '
-             || TO_CHAR(dtf_warn, 'FM999990') || ' days, and CPU saturation is not in sight.';
-    IF v_anom_count > 0 THEN
-      v_msg := v_msg || ' ' || TO_CHAR(v_anom_count, 'FM999990') || ' unusual day'
-               || CASE WHEN v_anom_count = 1 THEN '' ELSE 's' END
-               || ' in the last ' || TO_CHAR(anomaly_days, 'FM999990') || ' days -- see the timeline below.';
-    END IF;
-    p('<div class="glance-ok">' || v_msg || '</div>');
+  IF v_n_crit + v_n_warn = 0 THEN
+    p('<div class="glance-ok">All clear: nothing is near-full, no tablespace, series or CPU is forecast to hit its limit within '
+      || TO_CHAR(dtf_warn, 'FM999990') || ' days, and no sustained shift or spike is open.'
+      || CASE WHEN v_n_info > 0 THEN ' ' || TO_CHAR(v_n_info, 'FM999990') || ' informational item(s) below.' END || '</div>');
   ELSE
-    v_banner_cls := CASE WHEN v_max_sev >= 2 THEN 'glance-crit' ELSE 'glance-warn' END;
-    p('<div class="' || v_banner_cls || '"><span class="attn-lead">Needs attention:</span>');
-    p('<ul class="attn-list">');
-    FOR i IN 1 .. v_nitems LOOP
-      p(v_items(i));
+    p('<div class="attn">');
+    FOR a IN (
+      SELECT severity, kind, dbid, con_dbid, db_pdb, series_key, day_dt, value, threshold, unit, message,
+             CASE kind WHEN 'TBSPC_FULL' THEN 1 WHEN 'CPU_SAT' THEN 2 WHEN 'SERIES_LIMIT' THEN 3
+                       WHEN 'CPU_SHIFT' THEN 4 WHEN 'TBSPC_NEARFULL' THEN 5 WHEN 'SERIES_NEARLIMIT' THEN 6
+                       WHEN 'TBSPC_ANOM' THEN 7 WHEN 'CPU_ANOM' THEN 8 ELSE 9 END AS kord
+      FROM   capr_alerts
+      WHERE  severity IN ('CRIT','WARN')
+      ORDER  BY sev_rank, kord, value
+    ) LOOP
+      v_main := NULL; v_sub := NULL; v_big := NULL; v_small := NULL; v_kind_lbl := NULL;
+      v_tmp := CASE WHEN v_con_count > 1 THEN esc(a.db_pdb) || ' &middot; ' END;
+
+      IF a.kind = 'TBSPC_FULL' THEN
+        v_kind_lbl := 'Days to full';
+        FOR t IN (SELECT slope_mb, cur_gb, limit_gb, dtf_worst, accel, pct_used, days_to_full
+                  FROM capr_tbspc_days_to_full WHERE con_dbid = a.con_dbid AND tablespace_name = a.series_key
+                  FETCH FIRST 1 ROW ONLY) LOOP
+          v_main := '<b>' || esc(a.series_key) || '</b> fills at ' || fmt_rate_mb(t.slope_mb)
+                    || CASE WHEN t.accel >= 1.5 THEN ', growth &times;' || TO_CHAR(t.accel, 'FM990.0') || ' vs its longer-term pace' END;
+          v_sub  := v_tmp || fmt_size_gb(t.cur_gb) || ' of ' || fmt_size_gb(t.limit_gb) || ' (' || TO_CHAR(t.pct_used, 'FM990.0') || '%)'
+                    || CASE WHEN t.dtf_worst IS NOT NULL AND t.dtf_worst < t.days_to_full
+                            THEN ' &middot; worst case ' || TO_CHAR(t.dtf_worst, 'FM999990') || ' days' END;
+          v_big  := TO_CHAR(a.value, 'FM999990') || ' days';
+          v_small := '&asymp; ' || dfmt(NVL(v_last_day, SYSDATE) + a.value);
+        END LOOP;
+      ELSIF a.kind = 'TBSPC_NEARFULL' THEN
+        v_kind_lbl := 'Near full';
+        FOR t IN (SELECT slope_mb, cur_gb, limit_gb, days_to_full, quality
+                  FROM capr_tbspc_days_to_full WHERE con_dbid = a.con_dbid AND tablespace_name = a.series_key
+                  FETCH FIRST 1 ROW ONLY) LOOP
+          v_main := '<b>' || esc(a.series_key) || '</b> is ' || TO_CHAR(a.value, 'FM990.0') || '% full now'
+                    || CASE WHEN t.quality = 'FLAT' THEN ', not growing'
+                            WHEN t.days_to_full IS NOT NULL AND t.days_to_full > 365 THEN ', growing slowly'
+                            WHEN t.days_to_full IS NOT NULL THEN ', still growing'
+                            WHEN t.quality = 'OK' THEN ', not growing'
+                            ELSE ', growth too erratic to forecast' END;
+          v_sub  := v_tmp || fmt_size_gb(t.cur_gb) || ' of ' || fmt_size_gb(t.limit_gb)
+                    || CASE WHEN t.days_to_full IS NOT NULL THEN ' &middot; at ' || fmt_rate_mb(t.slope_mb)
+                            || ' full in ' || time_phrase(t.days_to_full) END;
+          v_big  := TO_CHAR(a.value, 'FM990.0') || '%';
+          v_small := 'now';
+        END LOOP;
+      ELSIF a.kind = 'CPU_SAT' THEN
+        v_kind_lbl := 'CPU saturation';
+        FOR t IN (SELECT cur_val, slope_per_day, sat_worst, sat_best FROM capr_cpu_trend
+                  WHERE con_dbid = a.con_dbid AND metric = a.series_key FETCH FIRST 1 ROW ONLY) LOOP
+          v_main := '<b>Host CPU</b> ' || CASE a.series_key WHEN 'BUSY_P95' THEN 'busy-hour p95' WHEN 'BUSY_PEAK' THEN 'peak-window busy%'
+                                                             ELSE 'daily average busy%' END
+                    || ' is trending toward the ' || TO_CHAR(cpu_sat, 'FM990') || '% line';
+          v_sub  := v_tmp || 'now ' || TO_CHAR(t.cur_val, 'FM990.0') || '% &middot; slope +' || TO_CHAR(t.slope_per_day, 'FM990.00') || ' pts/day'
+                    || CASE WHEN t.sat_worst IS NOT NULL THEN ' &middot; ' || TO_CHAR(t.sat_worst, 'FM999990') || '&ndash;'
+                            || NVL(TO_CHAR(t.sat_best, 'FM999990'), 'never') || ' day range' END;
+        END LOOP;
+        v_big := TO_CHAR(a.value, 'FM999990') || ' days';
+        v_small := '&asymp; ' || dfmt(NVL(v_last_day, SYSDATE) + a.value);
+      ELSIF a.kind = 'CPU_SHIFT' THEN
+        v_kind_lbl := 'Level shift';
+        FOR t IN (SELECT recent_days, base_days, recent_med, base_med, n_above, n_below, n_recent, shift_flag, last_day
+                  FROM capr_cpu_shifts WHERE con_dbid = a.con_dbid AND metric = a.series_key FETCH FIRST 1 ROW ONLY) LOOP
+          v_main := '<b>' || esc(a.db_pdb) || '</b> ' || CASE a.series_key WHEN 'DB_CPU_PCT' THEN 'DB CPU' ELSE esc(a.series_key) END
+                    || CASE WHEN t.shift_flag = 'UP' THEN ' stepped up and stayed up' ELSE ' stepped down and stayed down' END;
+          v_sub  := 'last ' || TO_CHAR(t.recent_days, 'FM990') || ' days median ' || TO_CHAR(t.recent_med, 'FM990.0')
+                    || '% vs ' || TO_CHAR(t.base_med, 'FM990.0') || '% over the ' || TO_CHAR(t.base_days, 'FM990') || ' days before &middot; '
+                    || TO_CHAR(GREATEST(t.n_above, t.n_below), 'FM990') || ' of ' || TO_CHAR(t.n_recent, 'FM990') || ' days past the baseline';
+          v_small := 'since ' || dfmt(t.last_day - t.recent_days + 1);
+        END LOOP;
+        v_big := CASE WHEN a.value >= 0 THEN '+' ELSE '' END || TO_CHAR(a.value, 'FM9990.0') || ' pts';
+      ELSIF a.kind IN ('SERIES_LIMIT', 'SERIES_NEARLIMIT') THEN
+        v_kind_lbl := CASE a.series_key WHEN 'SESSIONS' THEN 'Sessions' WHEN 'PROCESSES' THEN 'Processes'
+                                        WHEN 'DB_SIZE_GB' THEN 'Database size' ELSE esc(a.series_key) END;
+        FOR t IN (SELECT cur_val, cur_limit, unit, pct_of_limit, slope_per_day, sat_value, days_to_limit
+                  FROM capr_series WHERE con_dbid = a.con_dbid AND series = a.series_key FETCH FIRST 1 ROW ONLY) LOOP
+          IF a.kind = 'SERIES_LIMIT' THEN
+            v_main := '<b>' || esc(a.series_key) || '</b> heading for ' || TO_CHAR(ROUND(100 * t.sat_value / NULLIF(t.cur_limit, 0)), 'FM990')
+                      || '% of its limit';
+            v_big  := TO_CHAR(a.value, 'FM999990') || ' days';
+            v_small := '&asymp; ' || dfmt(NVL(v_last_day, SYSDATE) + a.value);
+          ELSE
+            v_main := '<b>' || esc(a.series_key) || '</b> is at ' || TO_CHAR(a.value, 'FM990.0') || '% of its limit now';
+            v_big  := TO_CHAR(a.value, 'FM990.0') || '%';
+            v_small := 'now';
+          END IF;
+          v_sub := v_tmp || RTRIM(TO_CHAR(t.cur_val, 'FM99999999990.99'), '.') || ' of ' || RTRIM(TO_CHAR(t.cur_limit, 'FM99999999990.99'), '.')
+                   || ' ' || LOWER(esc(t.unit))
+                   || CASE WHEN t.slope_per_day IS NOT NULL AND t.slope_per_day <> 0
+                           THEN ' &middot; ' || CASE WHEN t.slope_per_day > 0 THEN '+' END || TO_CHAR(t.slope_per_day, 'FM99990.00') || ' per day' END;
+        END LOOP;
+      ELSIF a.kind = 'TBSPC_ANOM' THEN
+        v_kind_lbl := 'Anomaly';
+        FOR t IN (SELECT delta_mb, med_mb, z, anomaly_flag, day_str FROM capr_tbspc_anomalies
+                  WHERE con_dbid = a.con_dbid AND tablespace_name = a.series_key AND day_dt = a.day_dt FETCH FIRST 1 ROW ONLY) LOOP
+          v_main := '<b>' || esc(a.series_key) || '</b> ' || CASE WHEN t.delta_mb >= 0 THEN 'grew ' ELSE 'shrank ' END
+                    || fmt_size_gb(ABS(t.delta_mb) / 1024) || ' in one day'
+                    || CASE WHEN t.med_mb IS NOT NULL THEN ' (normal: ' || fmt_size_gb(t.med_mb / 1024) || ')' END;
+          v_sub  := v_tmp || dfmt(a.day_dt) || ' &middot; robust z ' || TO_CHAR(t.z, 'FM99990.0')
+                    || ' &middot; one day; the forecast is not driven by it';
+          v_big  := CASE WHEN t.delta_mb >= 0 THEN '+' ELSE '&minus;' END || fmt_size_gb(ABS(t.delta_mb) / 1024);
+        END LOOP;
+        v_small := dfmt(a.day_dt);
+      ELSIF a.kind = 'CPU_ANOM' THEN
+        v_kind_lbl := 'Anomaly';
+        FOR t IN (SELECT busy_pct, median_pct, z FROM capr_cpu_anomalies
+                  WHERE con_dbid = a.con_dbid AND day_dt = a.day_dt FETCH FIRST 1 ROW ONLY) LOOP
+          v_main := '<b>Host CPU</b> ran ' || TO_CHAR(t.busy_pct, 'FM990.0') || '% busy vs the usual '
+                    || TO_CHAR(t.median_pct, 'FM990.0') || '% for a ' || TO_CHAR(a.day_dt, 'FMDay');
+          v_sub  := v_tmp || dfmt(a.day_dt) || ' &middot; robust z ' || TO_CHAR(t.z, 'FM99990.0') || ' &middot; single day';
+          v_big  := CASE WHEN t.busy_pct >= t.median_pct THEN '+' ELSE '&minus;' END
+                    || TO_CHAR(ABS(t.busy_pct - t.median_pct), 'FM990') || ' pts';
+        END LOOP;
+        v_small := dfmt(a.day_dt);
+      END IF;
+
+      IF v_main IS NULL THEN
+        v_kind_lbl := NVL(v_kind_lbl, esc(REPLACE(a.kind, '_', ' ')));
+        v_main := esc(a.message);
+        v_big  := CASE a.unit WHEN 'DAYS' THEN TO_CHAR(a.value, 'FM999990') || ' days'
+                              WHEN 'PCT'  THEN TO_CHAR(a.value, 'FM990.0') || '%'
+                              WHEN 'BYTES' THEN fmt_size_gb(a.value / 1073741824) END;
+      END IF;
+      v_sub := v_sub || evidence_link(a.kind, a.con_dbid, a.series_key);
+      attn_row(a.severity, v_kind_lbl, v_main, v_sub, v_big, v_small);
     END LOOP;
-    p('</ul>');
-    IF v_anom_count > 0 THEN
-      p('<div class="attn-note">' || TO_CHAR(v_anom_count, 'FM999990') || ' unusual day'
-        || CASE WHEN v_anom_count = 1 THEN '' ELSE 's' END
-        || ' in the last ' || TO_CHAR(anomaly_days, 'FM999990') || ' days -- see the timeline below.</div>');
+    p('</div>');  -- .attn
+  END IF;
+
+  -- informational alerts (shrinks, low-side days) stay out of the list
+  IF v_n_info > 0 THEN
+    p('<details class="fold"><summary>' || TO_CHAR(v_n_info, 'FM999990') || ' informational item'
+      || CASE WHEN v_n_info = 1 THEN '' ELSE 's' END || ' (shrinks and low-side days)</summary><div class="fold-body"><ul class="attn-list" style="margin:0">');
+    FOR a IN (SELECT message, kind, con_dbid, series_key FROM capr_alerts WHERE severity = 'INFO' ORDER BY kind, value) LOOP
+      p('<li>' || esc(a.message) || evidence_link(a.kind, a.con_dbid, a.series_key) || '</li>');
+    END LOOP;
+    p('</ul></div></details>');
+  END IF;
+
+  ----------------------------------------------------------------------
+  -- Healthy line: every capacity series NOT in the attention list, with a
+  -- short verdict each, so "fine" is stated rather than implied.
+  ----------------------------------------------------------------------
+  v_chips := 0; v_tmp := NULL;
+  FOR r IN (
+    SELECT t.tablespace_name, t.db_pdb, t.days_to_full, t.quality, t.pct_used
+    FROM   capr_tbspc_days_to_full t
+    WHERE  NOT EXISTS (SELECT 1 FROM capr_alerts a
+                       WHERE a.con_dbid = t.con_dbid AND a.series_key = t.tablespace_name
+                         AND a.kind IN ('TBSPC_FULL','TBSPC_NEARFULL') AND a.severity IN ('CRIT','WARN'))
+    ORDER  BY CASE WHEN t.quality = 'OK' AND t.days_to_full IS NOT NULL THEN 0 ELSE 1 END, t.days_to_full, t.tablespace_name
+  ) LOOP
+    v_chips := v_chips + 1;
+    IF v_chips <= 30 THEN
+      v_tmp := v_tmp || '<span class="chip' || CASE WHEN r.quality <> 'OK' THEN ' q' END || '">'
+               || con_prefix(r.db_pdb) || esc(r.tablespace_name) || ' &middot; '
+               || CASE WHEN r.quality = 'OK' AND r.days_to_full IS NOT NULL THEN short_dur(r.days_to_full)
+                       WHEN r.quality = 'OK' THEN 'not filling'
+                       WHEN r.quality = 'FLAT' THEN 'flat'
+                       WHEN r.quality = 'LOW_CONFIDENCE' THEN 'erratic'
+                       WHEN r.quality = 'INSUFFICIENT_HISTORY' THEN 'new'
+                       ELSE LOWER(esc(r.quality)) END || '</span>';
     END IF;
+  END LOOP;
+  IF v_chips > 30 THEN
+    v_tmp := v_tmp || '<span class="chip q">and ' || TO_CHAR(v_chips - 30, 'FM999990') || ' more</span>';
+  END IF;
+  FOR r IN (
+    SELECT s.series, s.db_pdb, s.pct_of_limit, s.days_to_limit, s.quality, s.cur_val, s.unit
+    FROM   capr_series s
+    WHERE  NOT EXISTS (SELECT 1 FROM capr_alerts a
+                       WHERE a.con_dbid = s.con_dbid AND a.series_key = s.series
+                         AND a.kind IN ('SERIES_LIMIT','SERIES_NEARLIMIT') AND a.severity IN ('CRIT','WARN'))
+    ORDER  BY s.rank_series
+  ) LOOP
+    v_tmp := v_tmp || '<span class="chip' || CASE WHEN r.quality <> 'OK' THEN ' q' END || '">'
+             || con_prefix(r.db_pdb)
+             || CASE r.series WHEN 'DB_SIZE_GB' THEN 'DB size' WHEN 'REDO_GB_DAY' THEN 'Redo' ELSE INITCAP(esc(r.series)) END
+             || CASE WHEN r.pct_of_limit IS NOT NULL THEN ' &middot; ' || TO_CHAR(r.pct_of_limit, 'FM990') || '%'
+                     WHEN r.series = 'REDO_GB_DAY' THEN ' &middot; ' || TO_CHAR(r.cur_val, 'FM999990.0') || ' GiB/day' END
+             || CASE WHEN r.quality = 'OK' AND r.days_to_limit IS NOT NULL THEN ' &middot; ' || short_dur(r.days_to_limit)
+                     WHEN r.quality = 'FLAT' THEN ' &middot; flat'
+                     WHEN r.quality = 'OK' THEN ''
+                     WHEN r.quality = 'LOW_CONFIDENCE' THEN ' &middot; erratic'
+                     ELSE ' &middot; new' END || '</span>';
+  END LOOP;
+  FOR r IN (
+    SELECT c.db_pdb, c.cur_val, c.days_to_sat, c.quality
+    FROM   capr_cpu_trend c
+    WHERE  c.metric = 'BUSY_P95'
+      AND  NOT EXISTS (SELECT 1 FROM capr_alerts a WHERE a.con_dbid = c.con_dbid AND a.kind = 'CPU_SAT')
+    ORDER  BY c.con_dbid
+  ) LOOP
+    v_tmp := v_tmp || '<span class="chip' || CASE WHEN r.quality <> 'OK' THEN ' q' END || '">Host CPU'
+             || CASE WHEN v_con_count > 1 THEN ' (' || esc(r.db_pdb) || ')' END
+             || ' &middot; p95 ' || TO_CHAR(ROUND(r.cur_val), 'FM990') || '%'
+             || CASE WHEN r.quality = 'OK' AND r.days_to_sat IS NOT NULL THEN ' &middot; ' || short_dur(r.days_to_sat)
+                     WHEN r.quality = 'OK' THEN ' &middot; no saturation in sight'
+                     WHEN r.quality = 'LOW_CONFIDENCE' THEN ' &middot; erratic'
+                     WHEN r.quality = 'FLAT' THEN ' &middot; flat'
+                     ELSE ' &middot; new' END || '</span>';
+  END LOOP;
+  IF v_tmp IS NOT NULL THEN
+    p('<div class="healthy"><b>' || CASE WHEN v_n_crit + v_n_warn = 0 THEN 'Everything:' ELSE 'Healthy, nothing to do:' END || '</b>');
+    WHILE v_tmp IS NOT NULL LOOP
+      p(SUBSTR(v_tmp, 1, INSTR(v_tmp || '</span>', '</span>') + 6));
+      v_tmp := SUBSTR(v_tmp, INSTR(v_tmp || '</span>', '</span>') + 7);
+    END LOOP;
     p('</div>');
   END IF;
 
   ----------------------------------------------------------------------
-  -- "Forecast coverage" -- a NEUTRAL line, independent of the Capacity
-  -- verdict above, so a green "all clear" can never be mistaken for a claim
-  -- that the underlying forecasts are reliable. Counts reuse the SAME
-  -- CAPR_TBSPC_DAYS_TO_FULL.quality rollup the "Not shown as predictions"
-  -- sentence further down this section builds from -- computed once here,
-  -- v_n_flat/v_n_low/v_n_insuf are reused there rather than re-queried.
-  ----------------------------------------------------------------------
-  SELECT COUNT(*),
-         SUM(CASE WHEN quality = 'OK'                   THEN 1 ELSE 0 END),
-         SUM(CASE WHEN quality = 'FLAT'                 THEN 1 ELSE 0 END),
-         SUM(CASE WHEN quality = 'LOW_CONFIDENCE'       THEN 1 ELSE 0 END),
-         SUM(CASE WHEN quality = 'INSUFFICIENT_HISTORY' THEN 1 ELSE 0 END)
-    INTO v_cov_total, v_cov_ok, v_n_flat, v_n_low, v_n_insuf
-  FROM   capr_tbspc_days_to_full;
-
-  v_msg := 'Forecast coverage: ' || TO_CHAR(NVL(v_cov_ok, 0), 'FM999990') || ' of '
-           || TO_CHAR(NVL(v_cov_total, 0), 'FM999990') || ' tablespace series rated OK; '
-           || TO_CHAR(NVL(v_n_flat, 0), 'FM999990') || ' FLAT, '
-           || TO_CHAR(NVL(v_n_low, 0), 'FM999990') || ' LOW_CONFIDENCE, '
-           || TO_CHAR(NVL(v_n_insuf, 0), 'FM999990') || ' INSUFFICIENT_HISTORY.';
-
-  -- One clause per host-CPU (BUSY_PCT) series, plain English per quality --
-  -- the same values CAPR_CPU_TREND.quality already carries, no new statistic.
-  v_cpu_txt := NULL;
-  FOR c IN (SELECT db_pdb, quality FROM capr_cpu_trend
-            WHERE metric = 'BUSY_PCT' ORDER BY con_dbid) LOOP
-    v_cpu_txt := v_cpu_txt || ' Host CPU'
-                 || CASE WHEN v_con_count > 1 THEN ' (' || esc(c.db_pdb) || ')' END
-                 || ': ' || CASE c.quality
-                              WHEN 'OK'                   THEN 'a reliable estimate is available.'
-                              WHEN 'LOW_CONFIDENCE'       THEN 'too erratic for a reliable estimate.'
-                              WHEN 'FLAT'                 THEN 'not trending, nothing to project.'
-                              WHEN 'INSUFFICIENT_HISTORY' THEN 'not enough history yet.'
-                              ELSE 'no estimate available.' END;
-  END LOOP;
-  IF v_cpu_txt IS NULL THEN
-    v_cpu_txt := ' Host CPU: no daily history collected yet.';
-  END IF;
-
-  p('<div class="glance-line-label">Forecast coverage</div>');
-  p('<div class="glance-cov">' || v_msg || v_cpu_txt || '</div>');
-  p('</div>');  -- .glance-banner
-
-  ----------------------------------------------------------------------
-  -- Hero duo: whole-database total-size hero, then host-CPU hero, side by side.
-  -- Both use cur_hero / CAPR_CPU_TREND, the same views/knobs as the detail
-  -- sections, so a hero can never contradict the tables below.
+  -- Hero duo: whole-database total size and host CPU busy-hour p95, drawn
+  -- with the shared chart grammar. cur_hero mirrors CAPF_TBSPC_FORECAST
+  -- (same epoch, window, REGR aggregates and quality ladder).
   ----------------------------------------------------------------------
   p('<div class="hero-duo">');
-
-  -- Whole-database hero: cumulative total size, one per (dbid, con_dbid), from
-  -- cur_hero (gap-filled regression mirroring CAPF_TBSPC_FORECAST exactly:
-  -- same day_n epoch, train_days window, REGR_* aggregates and quality ladder).
   FOR hf IN cur_hero LOOP
-    v_hlabel := 'Whole database'
-                || CASE WHEN v_con_count > 1 THEN ' (' || db_label(hf.dbid, hf.con_dbid) || ')' END;
-
-    -- Quality ladder, identical priority + gates to CAPF_TBSPC_FORECAST.
-    IF hf.n < min_train_days THEN
-      v_hquality := 'INSUFFICIENT_HISTORY';
-    ELSIF hf.slope = 0 OR hf.r2 IS NULL THEN
-      v_hquality := 'FLAT';
-    ELSIF hf.r2 < r2_gate THEN
-      v_hquality := 'LOW_CONFIDENCE';
-    ELSE
-      v_hquality := 'OK';
-    END IF;
-
+    v_hlabel := 'Whole database' || CASE WHEN v_con_count > 1 THEN ' (' || db_label(hf.dbid, hf.con_dbid) || ')' END;
+    IF hf.n < min_train_days THEN v_hquality := 'INSUFFICIENT_HISTORY';
+    ELSIF hf.slope = 0 OR hf.r2 IS NULL THEN v_hquality := 'FLAT';
+    ELSIF hf.r2 < r2_gate THEN v_hquality := 'LOW_CONFIDENCE';
+    ELSE v_hquality := 'OK'; END IF;
     v_hero_gb    := hf.cur_used / 1073741824;
-    v_proj_gb    := hf.proj_180 / 1073741824;
     v_rate_gb_mo := hf.slope * 30 / 1073741824;
     v_hlimit_gb  := CASE WHEN hf.limit_all = 1 THEN hf.cur_limit / 1073741824 END;
-
-    -- Days until the (meaningful) total allocated limit is reached: OK &
-    -- growing & not already over, using the same slope-based arithmetic as
-    -- days_to_full.
     v_days_to_lim := NULL;
-    IF v_hquality = 'OK' AND hf.slope > 0 AND v_hlimit_gb IS NOT NULL
-       AND hf.cur_limit > hf.cur_used THEN
+    IF v_hquality = 'OK' AND hf.slope > 0 AND v_hlimit_gb IS NOT NULL AND hf.cur_limit > hf.cur_used THEN
       v_days_to_lim := FLOOR((hf.cur_limit - hf.cur_used) / hf.slope);
     END IF;
-
-    -- Accent: reuse dtf day thresholds when a limit-reached date exists.
+    v_big := NULL; v_big_lbl := NULL; v_big_cls := NULL; v_accent := NULL;
     IF v_days_to_lim IS NOT NULL THEN
-      v_accent := CASE WHEN v_days_to_lim <= dtf_crit THEN 'g-crit'
-                       WHEN v_days_to_lim <= dtf_warn THEN 'g-warn'
-                       ELSE 'g-ok' END;
-    ELSE
-      v_accent := 'g-ok';
+      v_big := short_dur(v_days_to_lim);
+      v_big_lbl := 'to the allocated limit &middot; &asymp; ' || dfmt(hf.last_day + v_days_to_lim);
+      v_big_cls := CASE WHEN v_days_to_lim <= dtf_crit THEN 'crit' WHEN v_days_to_lim <= dtf_warn THEN 'warn' ELSE 'ok' END;
+      v_accent  := CASE WHEN v_days_to_lim <= dtf_crit THEN 'crit' WHEN v_days_to_lim <= dtf_warn THEN 'warn' END;
     END IF;
+    v_subtitle := 'using ' || fmt_size_gb(v_hero_gb)
+                  || CASE WHEN v_hlimit_gb IS NOT NULL THEN ' of ' || fmt_size_gb(v_hlimit_gb) || ' allocated' END
+                  || CASE WHEN v_hquality = 'OK' AND hf.slope > 0 THEN ' &middot; growing ' || fmt_size_gb(v_rate_gb_mo) || ' per month'
+                          WHEN v_hquality = 'OK' AND hf.slope < 0 THEN ' &middot; shrinking ' || fmt_size_gb(ABS(v_rate_gb_mo)) || ' per month'
+                          WHEN v_hquality = 'FLAT' THEN ' &middot; not growing'
+                          WHEN v_hquality = 'INSUFFICIENT_HISTORY' THEN ' &middot; not enough history for a whole-database estimate yet'
+                          ELSE ' &middot; size changes too unevenly for a reliable estimate' END;
+    card_open(esc(v_hlabel) || ' ' || quality_pill(v_hquality), v_subtitle, v_big, v_big_lbl, v_big_cls, v_accent,
+              'dbhero-' || TO_CHAR(hf.con_dbid));
 
-    -- Confidence pill (OK only, same r2 rule as the prediction cards).
-    v_hpill := CASE WHEN v_hquality = 'OK'
-                    THEN ' <span class="pill '
-                         || CASE WHEN hf.r2 >= 0.9 THEN 'pill-ok">high confidence'
-                                 ELSE 'pill-flat">good confidence' END
-                         || '</span>'
-               END;
-
-    -- Headline copy per quality / slope sign.
-    IF v_hquality = 'OK' AND hf.slope > 0 THEN
-      v_head := esc(v_hlabel) || ' &mdash; growing about ' || fmt_size_gb(v_rate_gb_mo) || ' per month';
-    ELSIF v_hquality = 'OK' AND hf.slope < 0 THEN
-      v_head := esc(v_hlabel) || ' &mdash; shrinking about ' || fmt_size_gb(ABS(v_rate_gb_mo)) || ' per month';
-    ELSIF v_hquality = 'FLAT' THEN
-      v_head := esc(v_hlabel) || ' &mdash; not growing';
-    ELSIF v_hquality = 'INSUFFICIENT_HISTORY' THEN
-      v_head := esc(v_hlabel) || ' &mdash; not enough history yet for a whole-database estimate';
-    ELSE
-      v_head := esc(v_hlabel) || ' &mdash; size is changing too unevenly for a reliable estimate';
-    END IF;
-
-    -- id: the "View evidence" link on the section 0 attention banner's
-    -- whole-database item (DB_FULL) jumps straight here.
-    p('<div class="gcard g-hero ' || v_accent || '" id="dbhero-' || hf.con_dbid || '">');
-    p('<h4 class="g-head">' || v_head || v_hpill
-      || CASE WHEN v_hpill IS NOT NULL
-              THEN info_icon('based on how closely past growth follows a straight line') END
-      || '</h4>');
-
-    IF v_hquality = 'OK' THEN
-      p('<div class="g-line">now using ' || fmt_size_gb(v_hero_gb)
-        || ', likely around ' || fmt_size_gb(v_proj_gb)
-        || ' by ' || TO_CHAR(hf.last_day + 180, 'FMMonth YYYY') || '</div>');
-    ELSE
-      p('<div class="g-line">now using ' || fmt_size_gb(v_hero_gb) || '</div>');
-    END IF;
-    IF v_days_to_lim IS NOT NULL THEN
-      p('<div class="g-line">at this pace, the total allocated limit of ' || fmt_size_gb(v_hlimit_gb)
-        || ' would be reached around ' || TO_CHAR(hf.last_day + v_days_to_lim, 'FMMonth YYYY') || '</div>');
-    END IF;
-
-    -- Full-width chart: total-size history (+ projection when OK) + limit line.
-    -- Same gap-fill as the regression series above (carry each tablespace's
-    -- last known size across missing days), so the plotted line matches the
-    -- fitted one and never shows a phantom dip on an AWR-gap day.
-    xs.DELETE; ys.DELETE; v_cnt := 0;
+    xs.DELETE; ys.DELETE; v_cnt := 0; v_cnt2 := 0; v_nband := 0; v_nanom := 0; v_has_proj := FALSE;
     FOR d IN (
       SELECT gg.day_dt, SUM(gg.used_fill) / 1073741824 AS gb
       FROM (
@@ -1431,123 +1988,77 @@ BEGIN
       v_last_day_n := xs(v_cnt);
       v_xmin := xs(1); v_xmax := v_last_day_n; v_proj_y := NULL;
       IF v_hquality = 'OK' AND hf.slope IS NOT NULL THEN
-        v_proj_y := ys(v_cnt) + (hf.slope / 1073741824) * 180;
-        v_xmax   := v_last_day_n + 180;
+        v_horizon := CASE WHEN v_days_to_lim IS NOT NULL AND v_days_to_lim > 180 AND v_days_to_lim <= 365 THEN 365 ELSE 180 END;
+        v_proj_y := ys(v_cnt) + (hf.slope / 1073741824) * v_horizon;
+        v_xmax   := v_last_day_n + v_horizon;
+        px1(1) := v_last_day_n; py1(1) := ys(v_cnt);
+        px1(2) := v_xmax;       py1(2) := v_proj_y;
+        v_has_proj := TRUE;
       END IF;
-
       v_ymin := 0; v_ymax := ys(1);
       FOR i IN 1 .. v_cnt LOOP
         IF ys(i) > v_ymax THEN v_ymax := ys(i); END IF;
-        IF ys(i) < v_ymin THEN v_ymin := ys(i); END IF;
       END LOOP;
       IF v_proj_y IS NOT NULL AND v_proj_y > v_ymax THEN v_ymax := v_proj_y; END IF;
-      IF v_proj_y IS NOT NULL AND v_proj_y < v_ymin THEN v_ymin := v_proj_y; END IF;
-
-      -- Limit line: only when meaningful (all tablespaces non-null on the last
-      -- day) AND within 3x the data range (same heuristic as per-tablespace).
       v_limit_gb   := v_hlimit_gb;
       v_range      := v_ymax - v_ymin;
       v_show_limit := (v_limit_gb IS NOT NULL) AND (v_limit_gb - v_ymax) <= 3 * v_range;
-      IF v_show_limit THEN
-        v_ymax := GREATEST(v_ymax, v_limit_gb * 1.04);
+      IF v_show_limit THEN v_ymax := GREATEST(v_ymax, v_limit_gb * 1.04); END IF;
+      IF (v_ymax - v_ymin) < 0.001 THEN v_ymax := v_ymin + 1; END IF;
+      v_ymax := v_ymax + (v_ymax - v_ymin) * 0.10;
+      v_cross_x := NULL; v_cross_lbl := NULL;
+      IF v_show_limit AND v_days_to_lim IS NOT NULL THEN
+        v_cross_x := v_last_day_n + v_days_to_lim;
+        v_cross_lbl := 'limit &asymp; ' || dfmt(hf.last_day + v_days_to_lim);
       END IF;
-      IF (v_ymax - v_ymin) < 0.001 THEN v_ymax := v_ymin + 1; END IF; -- flat guard
-      v_ymax := v_ymax + (v_ymax - v_ymin) * 0.08;
-
+      chart_svg('Whole database total size: history, projection and allocated limit',
+                v_xmin, v_xmax, v_ymin, v_ymax, 'GiB', v_last_day_n,
+                CASE WHEN v_show_limit THEN v_limit_gb END,
+                CASE WHEN v_show_limit THEN 'allocated ' || fmt_size_gb(v_limit_gb) END,
+                NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                v_cross_x, CASE WHEN v_show_limit THEN v_limit_gb END, v_cross_lbl, 250);
       IF v_limit_gb IS NOT NULL AND NOT v_show_limit THEN
-        p('<div class="g-line">(allocated-limit line hidden: off the chart scale)</div>');
+        p('<div class="chart-sub">allocated-limit line hidden: ' || fmt_size_gb(v_limit_gb) || ' is off the chart scale</div>');
       END IF;
-
-      p('<svg viewBox="0 0 ' || TO_CHAR(c_hw, 'FM9990') || ' ' || TO_CHAR(c_hh, 'FM9990')
-        || '" class="hero-svg" role="img" aria-label="Whole database total size chart">');
-      emit_yaxis_box(v_ymin, v_ymax, ' GiB', c_hml, c_hw - c_hmr, c_hmt, c_hh - c_hmb, 5);
-      p('<text class="axis-label" x="' || fmt_px(lin(v_xmin, v_xmin, v_xmax, c_hml, c_hw - c_hmr))
-        || '" y="' || fmt_px(c_hh - 6) || '" text-anchor="start">'
-        || TO_CHAR(c_epoch + v_xmin, 'YYYY-MM-DD') || '</text>');
-      IF v_xmax > v_xmin THEN
-        p('<text class="axis-label" x="'
-          || fmt_px(lin(ROUND((v_xmin + v_xmax) / 2), v_xmin, v_xmax, c_hml, c_hw - c_hmr))
-          || '" y="' || fmt_px(c_hh - 6) || '" text-anchor="middle">'
-          || TO_CHAR(c_epoch + ROUND((v_xmin + v_xmax) / 2), 'YYYY-MM-DD') || '</text>');
-        p('<text class="axis-label" x="' || fmt_px(lin(v_xmax, v_xmin, v_xmax, c_hml, c_hw - c_hmr))
-          || '" y="' || fmt_px(c_hh - 6) || '" text-anchor="end">'
-          || TO_CHAR(c_epoch + v_xmax, 'YYYY-MM-DD') || '</text>');
-      END IF;
-      p('<line class="axis-line" x1="' || fmt_px(c_hml) || '" y1="' || fmt_px(c_hh - c_hmb)
-        || '" x2="' || fmt_px(c_hw - c_hmr) || '" y2="' || fmt_px(c_hh - c_hmb) || '"/>');
-      p('<line class="axis-line" x1="' || fmt_px(c_hml) || '" y1="' || fmt_px(c_hmt)
-        || '" x2="' || fmt_px(c_hml) || '" y2="' || fmt_px(c_hh - c_hmb) || '"/>');
-      IF v_show_limit THEN
-        p('<line class="limit-line" x1="' || fmt_px(c_hml)
-          || '" y1="' || fmt_px(lin(v_limit_gb, v_ymin, v_ymax, c_hh - c_hmb, c_hmt))
-          || '" x2="' || fmt_px(c_hw - c_hmr)
-          || '" y2="' || fmt_px(lin(v_limit_gb, v_ymin, v_ymax, c_hh - c_hmb, c_hmt)) || '"/>');
-      END IF;
-      emit_poly_box(xs, ys, v_cnt, v_xmin, v_xmax, v_ymin, v_ymax,
-                    c_hml, c_hw - c_hmr, c_hmt, c_hh - c_hmb, 'hist-line');
-      IF v_proj_y IS NOT NULL THEN
-        px1(1) := v_last_day_n;       py1(1) := ys(v_cnt);
-        px1(2) := v_last_day_n + 180; py1(2) := v_proj_y;
-        emit_poly_box(px1, py1, 2, v_xmin, v_xmax, v_ymin, v_ymax,
-                      c_hml, c_hw - c_hmr, c_hmt, c_hh - c_hmb, 'proj-line');
-      END IF;
-      p('</svg>');
     END IF;
-
-    p('</div>');  -- .g-hero
+    p('</div>');  -- .chart-card
   END LOOP;
 
-  -- Host-CPU hero: one per con_dbid with BUSY_PCT data (same multiplicity rule
-  -- as the DB hero). Headline reuses the CPU card copy; below it a busy% chart
-  -- like section 4's (threshold line at cpu_sat, dashed REGR projection to +90
-  -- when quality=OK, red anomaly dots) at the same 560x250 hero geometry.
+  -- Host CPU hero: busy-hour p95 (what saturates) with the daily average as
+  -- a faint second line; projection, band and crossing from CAPF_CPU_TREND.
   FOR ch IN (
-    SELECT db_pdb, con_dbid, cur_val, days_to_sat, r2, quality, slope_per_day
-    FROM   capr_cpu_trend
-    WHERE  metric = 'BUSY_PCT'
-    ORDER  BY con_dbid
+    SELECT t.db_pdb, t.con_dbid, t.dbid, t.cur_val, t.days_to_sat, t.sat_worst, t.sat_best, t.r2, t.quality, t.slope_per_day,
+           f.proj_30_lo, f.proj_30_hi, f.proj_90_lo, f.proj_90_hi, f.proj_30, f.proj_90
+    FROM   capr_cpu_trend t
+    LEFT   JOIN capf_cpu_trend f ON f.dbid = t.dbid AND f.con_dbid = t.con_dbid AND f.metric = t.metric
+    WHERE  t.metric = 'BUSY_P95'
+    ORDER  BY t.con_dbid
   ) LOOP
-    v_hlabel := 'Host CPU'
-                || CASE WHEN v_con_count > 1 THEN ' (' || ch.db_pdb || ')' END;
-    v_hpill := NULL;
+    v_hlabel := 'Host CPU busy-hour p95' || CASE WHEN v_con_count > 1 THEN ' (' || ch.db_pdb || ')' END;
+    v_big := NULL; v_big_lbl := NULL; v_big_cls := NULL; v_accent := NULL;
     IF ch.quality = 'OK' AND ch.days_to_sat IS NOT NULL THEN
-      v_accent := CASE WHEN ch.days_to_sat <= dtf_crit THEN 'g-crit'
-                       WHEN ch.days_to_sat <= dtf_warn THEN 'g-warn'
-                       ELSE 'g-ok' END;
-      v_head := esc(v_hlabel) || ' &mdash; reaches ' || TO_CHAR(cpu_sat, 'FM990')
-                || '% busy in ' || time_phrase(ch.days_to_sat);
-      v_hpill := ' <span class="pill '
-                 || CASE WHEN ch.r2 >= 0.9 THEN 'pill-ok">high confidence'
-                         ELSE 'pill-flat">good confidence' END || '</span>';
-    ELSE
-      v_accent := 'g-ok';
-      IF ch.quality = 'INSUFFICIENT_HISTORY' THEN
-        v_head := esc(v_hlabel) || ' &mdash; not enough history yet for a reliable estimate';
-      ELSIF ch.quality = 'LOW_CONFIDENCE' THEN
-        v_head := esc(v_hlabel) || ' &mdash; recent CPU is too erratic for a reliable estimate';
-      ELSE
-        v_head := esc(v_hlabel) || ' &mdash; no saturation in sight at the current trend';
-      END IF;
+      v_big := short_dur(ch.days_to_sat);
+      v_big_lbl := 'to ' || TO_CHAR(cpu_sat, 'FM990') || '% &middot; '
+                   || CASE WHEN ch.sat_worst IS NOT NULL THEN TO_CHAR(ch.sat_worst, 'FM999990') || '&ndash;' || NVL(TO_CHAR(ch.sat_best, 'FM999990'), 'never')
+                           ELSE '&asymp; ' || dfmt(SYSDATE + ch.days_to_sat) END;
+      v_big_cls := CASE WHEN ch.days_to_sat <= dtf_crit THEN 'crit' WHEN ch.days_to_sat <= dtf_warn THEN 'warn' ELSE 'ok' END;
+      v_accent  := CASE WHEN ch.days_to_sat <= dtf_crit THEN 'crit' WHEN ch.days_to_sat <= dtf_warn THEN 'warn' END;
     END IF;
+    v_subtitle := 'now ' || TO_CHAR(ch.cur_val, 'FM990.0') || '% in the busiest hour &middot; '
+                  || CASE WHEN ch.quality = 'OK' THEN 'trend fit OK, R2 ' || TO_CHAR(ch.r2, 'FM0.00')
+                          WHEN ch.quality = 'LOW_CONFIDENCE' THEN 'too erratic to project reliably'
+                          WHEN ch.quality = 'INSUFFICIENT_HISTORY' THEN 'not enough history yet'
+                          ELSE 'not trending' END
+                  || ' &middot; faint line = daily average';
+    card_open(esc(v_hlabel) || ' ' || quality_pill(ch.quality), v_subtitle, v_big, v_big_lbl, v_big_cls, v_accent, NULL);
 
-    p('<div class="gcard g-hero ' || v_accent || '">');
-    p('<h4 class="g-head">' || v_head || v_hpill
-      || CASE WHEN v_hpill IS NOT NULL
-              THEN info_icon('based on how closely past growth follows a straight line') END
-      || '</h4>');
-    IF ch.quality = 'OK' AND ch.days_to_sat IS NOT NULL THEN
-      p('<div class="g-date">around ' || TO_CHAR(SYSDATE + ch.days_to_sat, 'FMMonth YYYY') || '</div>');
-    END IF;
-    p('<div class="g-line">now at ' || TO_CHAR(ch.cur_val, 'FM990.0') || '% busy</div>');
-
-    xs.DELETE; ys.DELETE; v_cnt := 0;
-    FOR d IN (SELECT day_dt, busy_pct FROM capd_cpu_daily
-              WHERE con_dbid = ch.con_dbid ORDER BY day_dt) LOOP
+    xs.DELETE; ys.DELETE; xs2.DELETE; ys2.DELETE; v_cnt := 0; v_cnt2 := 0; v_nband := 0; v_nanom := 0; v_has_proj := FALSE;
+    FOR d IN (SELECT day_dt, busy_pct, busy_p95 FROM capd_cpu_daily WHERE con_dbid = ch.con_dbid ORDER BY day_dt) LOOP
       v_cnt := v_cnt + 1;
-      xs(v_cnt) := d.day_dt - c_epoch;
-      ys(v_cnt) := d.busy_pct;
+      xs(v_cnt) := d.day_dt - c_epoch; ys(v_cnt) := NVL(d.busy_p95, d.busy_pct);
+      v_cnt2 := v_cnt2 + 1;
+      xs2(v_cnt2) := d.day_dt - c_epoch; ys2(v_cnt2) := d.busy_pct;
     END LOOP;
-
     IF v_cnt = 0 THEN
       p('<div class="empty-note">No daily CPU history collected yet to chart.</div>');
     ELSE
@@ -1555,377 +2066,49 @@ BEGIN
       IF ch.quality = 'OK' AND ch.slope_per_day IS NOT NULL THEN
         v_proj_y := ys(v_cnt) + ch.slope_per_day * 90;
         v_xmax   := v_last_day_n + 90;
-      END IF;
-      v_ymin := 0; v_ymax := ys(1);
-      FOR i IN 1 .. v_cnt LOOP
-        IF ys(i) > v_ymax THEN v_ymax := ys(i); END IF;
-      END LOOP;
-      IF v_proj_y IS NOT NULL AND v_proj_y > v_ymax THEN v_ymax := v_proj_y; END IF;
-      v_ymax := GREATEST(100, v_ymax);   -- 0..100+ keeps the cpu_sat line in range
-      IF (v_ymax - v_ymin) < 1 THEN v_ymax := v_ymin + 1; END IF;
-      v_ymax := v_ymax + (v_ymax - v_ymin) * 0.08;
-
-      p('<svg viewBox="0 0 ' || TO_CHAR(c_hw, 'FM9990') || ' ' || TO_CHAR(c_hh, 'FM9990')
-        || '" class="hero-svg" role="img" aria-label="Host CPU busy percent chart">');
-      emit_yaxis_box(v_ymin, v_ymax, '%', c_hml, c_hw - c_hmr, c_hmt, c_hh - c_hmb, 5);
-      p('<text class="axis-label" x="' || fmt_px(lin(v_xmin, v_xmin, v_xmax, c_hml, c_hw - c_hmr))
-        || '" y="' || fmt_px(c_hh - 6) || '" text-anchor="start">'
-        || TO_CHAR(c_epoch + v_xmin, 'YYYY-MM-DD') || '</text>');
-      IF v_xmax > v_xmin THEN
-        p('<text class="axis-label" x="'
-          || fmt_px(lin(ROUND((v_xmin + v_xmax) / 2), v_xmin, v_xmax, c_hml, c_hw - c_hmr))
-          || '" y="' || fmt_px(c_hh - 6) || '" text-anchor="middle">'
-          || TO_CHAR(c_epoch + ROUND((v_xmin + v_xmax) / 2), 'YYYY-MM-DD') || '</text>');
-        p('<text class="axis-label" x="' || fmt_px(lin(v_xmax, v_xmin, v_xmax, c_hml, c_hw - c_hmr))
-          || '" y="' || fmt_px(c_hh - 6) || '" text-anchor="end">'
-          || TO_CHAR(c_epoch + v_xmax, 'YYYY-MM-DD') || '</text>');
-      END IF;
-      p('<line class="axis-line" x1="' || fmt_px(c_hml) || '" y1="' || fmt_px(c_hh - c_hmb)
-        || '" x2="' || fmt_px(c_hw - c_hmr) || '" y2="' || fmt_px(c_hh - c_hmb) || '"/>');
-      p('<line class="axis-line" x1="' || fmt_px(c_hml) || '" y1="' || fmt_px(c_hmt)
-        || '" x2="' || fmt_px(c_hml) || '" y2="' || fmt_px(c_hh - c_hmb) || '"/>');
-      p('<line class="thresh-line" x1="' || fmt_px(c_hml)
-        || '" y1="' || fmt_px(lin(cpu_sat, v_ymin, v_ymax, c_hh - c_hmb, c_hmt))
-        || '" x2="' || fmt_px(c_hw - c_hmr)
-        || '" y2="' || fmt_px(lin(cpu_sat, v_ymin, v_ymax, c_hh - c_hmb, c_hmt)) || '"/>');
-      p('<text class="thresh-label" x="' || fmt_px(c_hw - c_hmr - 2)
-        || '" y="' || fmt_px(lin(cpu_sat, v_ymin, v_ymax, c_hh - c_hmb, c_hmt) - 3)
-        || '" text-anchor="end">sat ' || TO_CHAR(cpu_sat, 'FM990') || '%</text>');
-      emit_poly_box(xs, ys, v_cnt, v_xmin, v_xmax, v_ymin, v_ymax,
-                    c_hml, c_hw - c_hmr, c_hmt, c_hh - c_hmb, 'hist-line');
-      IF v_proj_y IS NOT NULL THEN
-        px1(1) := v_last_day_n;      py1(1) := ys(v_cnt);
-        px1(2) := v_last_day_n + 90; py1(2) := v_proj_y;
-        emit_poly_box(px1, py1, 2, v_xmin, v_xmax, v_ymin, v_ymax,
-                      c_hml, c_hw - c_hmr, c_hmt, c_hh - c_hmb, 'proj-line');
-      END IF;
-      FOR a IN (SELECT day_dt, busy_pct FROM capa_cpu_anom
-                WHERE con_dbid = ch.con_dbid AND anomaly_flag IS NOT NULL) LOOP
-        p('<circle class="anom-dot" cx="' || fmt_px(lin(a.day_dt - c_epoch, v_xmin, v_xmax, c_hml, c_hw - c_hmr))
-          || '" cy="' || fmt_px(lin(a.busy_pct, v_ymin, v_ymax, c_hh - c_hmb, c_hmt)) || '" r="3"/>');
-      END LOOP;
-      p('</svg>');
-    END IF;
-
-    p('</div>');  -- .g-hero (CPU)
-  END LOOP;
-
-  p('</div>');  -- .hero-duo
-
-  -- Anomaly timeline (second, per DBA priority: is anything spiking?) --------
-  p('<h3 style="font-size:13px;margin:18px 0 6px">Unusual activity in the last '
-      || TO_CHAR(anomaly_days, 'FM999990') || ' days</h3>');
-
-  -- Window: [max(day) - anomaly_days, max(day)] across both daily fact
-  -- views. NULL max => no daily data at all.
-  SELECT MAX(mx) INTO v_tl_max FROM (
-    SELECT MAX(day_dt) AS mx FROM capd_tbspc_daily
-    UNION ALL
-    SELECT MAX(day_dt) AS mx FROM capd_cpu_daily
-  );
-
-  IF v_tl_max IS NULL THEN
-    p('<div class="empty-note">No daily history collected yet to scan for unusual activity.</div>');
-  ELSE
-    v_tl_min := v_tl_max - anomaly_days;
-
-    -- Total number of series (lanes) with >=1 flagged anomaly in-window.
-    SELECT COUNT(*) INTO v_lane_total FROM (
-      SELECT con_dbid, tablespace_name
-      FROM   capa_tbspc_anom
-      WHERE  anomaly_flag IS NOT NULL AND day_dt > v_tl_min AND day_dt <= v_tl_max
-      GROUP  BY con_dbid, tablespace_name
-      UNION ALL
-      SELECT con_dbid, TO_CHAR(NULL)
-      FROM   capa_cpu_anom
-      WHERE  anomaly_flag IS NOT NULL AND day_dt > v_tl_min AND day_dt <= v_tl_max
-      GROUP  BY con_dbid
-    );
-
-    IF v_lane_total = 0 THEN
-      p('<div class="glance-ok">No unusual activity in the last '
-        || TO_CHAR(anomaly_days, 'FM999990') || ' days.</div>');
-    ELSE
-      v_lane_shown := LEAST(v_lane_total, 12);
-      v_tl_h  := c_tlmt + v_lane_shown * c_lane + c_tlmb;
-      v_axis_y := c_tlmt + v_lane_shown * c_lane + 16;
-      v_xmin  := v_tl_min - c_epoch;   -- reuse chart x-extent scratch as day numbers
-      v_xmax  := v_tl_max - c_epoch;
-
-      p('<div class="timeline-card">');
-      p('<svg viewBox="0 0 ' || TO_CHAR(c_tlw, 'FM9990') || ' ' || TO_CHAR(v_tl_h, 'FM99990')
-        || '" class="timeline-svg" role="img" aria-label="Anomaly timeline">');
-
-      -- Light weekly gridlines, anchored to the newest day.
-      v_gd := v_tl_max;
-      WHILE v_gd > v_tl_min LOOP
-        p('<line class="tl-grid" x1="' || fmt_px(lin(v_gd - c_epoch, v_xmin, v_xmax, c_tllm, c_tlw - c_tlrm))
-          || '" y1="' || fmt_px(c_tlmt - 2)
-          || '" x2="' || fmt_px(lin(v_gd - c_epoch, v_xmin, v_xmax, c_tllm, c_tlw - c_tlrm))
-          || '" y2="' || fmt_px(c_tlmt + v_lane_shown * c_lane + 2) || '"/>');
-        v_gd := v_gd - 7;
-      END LOOP;
-
-      -- Date labels: start / middle / end.
-      p('<text class="tl-axis-label" x="' || fmt_px(c_tllm) || '" y="' || fmt_px(v_axis_y)
-        || '" text-anchor="start">' || TO_CHAR(v_tl_min, 'YYYY-MM-DD') || '</text>');
-      p('<text class="tl-axis-label" x="' || fmt_px((c_tllm + c_tlw - c_tlrm) / 2) || '" y="' || fmt_px(v_axis_y)
-        || '" text-anchor="middle">' || TO_CHAR(v_tl_min + (v_tl_max - v_tl_min) / 2, 'YYYY-MM-DD') || '</text>');
-      p('<text class="tl-axis-label" x="' || fmt_px(c_tlw - c_tlrm) || '" y="' || fmt_px(v_axis_y)
-        || '" text-anchor="end">' || TO_CHAR(v_tl_max, 'YYYY-MM-DD') || '</text>');
-
-      -- One lane per affected series, most-active first, capped at 12.
-      v_lane_i := 0;
-      FOR ln IN (
-        SELECT kind, con_dbid, skey, label, ac FROM (
-          SELECT 'TBSPC' AS kind, con_dbid, tablespace_name AS skey,
-                 tablespace_name AS label, COUNT(*) AS ac
-          FROM   capa_tbspc_anom
-          WHERE  anomaly_flag IS NOT NULL AND day_dt > v_tl_min AND day_dt <= v_tl_max
-          GROUP  BY con_dbid, tablespace_name
-          UNION ALL
-          SELECT 'CPU' AS kind, con_dbid, TO_CHAR(NULL) AS skey,
-                 'Host CPU' AS label, COUNT(*) AS ac
-          FROM   capa_cpu_anom
-          WHERE  anomaly_flag IS NOT NULL AND day_dt > v_tl_min AND day_dt <= v_tl_max
-          GROUP  BY con_dbid
-        )
-        ORDER  BY ac DESC, label
-        FETCH FIRST 12 ROWS ONLY
-      ) LOOP
-        v_lane_i := v_lane_i + 1;
-        v_base_y := c_tlmt + (v_lane_i - 0.5) * c_lane;
-        p('<line class="tl-baseline" x1="' || fmt_px(c_tllm) || '" y1="' || fmt_px(v_base_y)
-          || '" x2="' || fmt_px(c_tlw - c_tlrm) || '" y2="' || fmt_px(v_base_y) || '"/>');
-        p('<text class="tl-lane-label" x="6" y="' || fmt_px(v_base_y + 3) || '">'
-          || esc(ln.label) || '</text>');
-
-        IF ln.kind = 'TBSPC' THEN
-          FOR a IN (
-            SELECT TO_CHAR(day_dt, 'YYYY-MM-DD') AS d_str, day_dt,
-                   used_delta_bytes, used_rate_bpd, median_rate_bpd
-            FROM   capa_tbspc_anom
-            WHERE  con_dbid = ln.con_dbid AND tablespace_name = ln.skey
-              AND  anomaly_flag IS NOT NULL AND day_dt > v_tl_min AND day_dt <= v_tl_max
-          ) LOOP
-            v_delta_gb := NVL(a.used_delta_bytes, 0) / 1073741824;
-            IF NVL(a.used_delta_bytes, 0) >= 0 THEN
-              v_tip := a.d_str || ': grew ' || TO_CHAR(v_delta_gb, 'FM999990.0') || ' GiB in one day';
-              IF a.median_rate_bpd IS NULL OR a.median_rate_bpd <= 0 THEN
-                v_tip := v_tip || ', vs almost no usual growth';
-              ELSE
-                v_mult := a.used_rate_bpd / a.median_rate_bpd;
-                IF v_mult >= 10 THEN
-                  v_tip := v_tip || ', about ' || TO_CHAR(ROUND(v_mult), 'FM999990') || 'x its usual pace';
-                ELSIF v_mult > 0 THEN
-                  v_tip := v_tip || ', about ' || TO_CHAR(ROUND(v_mult, 1), 'FM990.0') || 'x its usual pace';
-                END IF;
-              END IF;
-            ELSE
-              v_tip := a.d_str || ': shrank ' || TO_CHAR(ABS(v_delta_gb), 'FM999990.0') || ' GiB in one day';
-            END IF;
-            p('<circle class="anom-dot" cx="'
-              || fmt_px(lin(a.day_dt - c_epoch, v_xmin, v_xmax, c_tllm, c_tlw - c_tlrm))
-              || '" cy="' || fmt_px(v_base_y) || '" r="3.4"><title>' || esc(v_tip) || '</title></circle>');
-          END LOOP;
-        ELSE
-          FOR a IN (
-            SELECT TO_CHAR(day_dt, 'YYYY-MM-DD') AS d_str, day_dt, busy_pct, median_pct
-            FROM   capa_cpu_anom
-            WHERE  con_dbid = ln.con_dbid
-              AND  anomaly_flag IS NOT NULL AND day_dt > v_tl_min AND day_dt <= v_tl_max
-          ) LOOP
-            IF a.median_pct IS NULL THEN
-              v_tip := a.d_str || ': ' || TO_CHAR(ROUND(a.busy_pct), 'FM990')
-                       || '% busy, unusual for that weekday';
-            ELSE
-              v_tip := a.d_str || ': ' || TO_CHAR(ROUND(a.busy_pct), 'FM990')
-                       || '% busy vs the usual ' || TO_CHAR(ROUND(a.median_pct), 'FM990')
-                       || '% for that weekday';
-            END IF;
-            p('<circle class="anom-dot" cx="'
-              || fmt_px(lin(a.day_dt - c_epoch, v_xmin, v_xmax, c_tllm, c_tlw - c_tlrm))
-              || '" cy="' || fmt_px(v_base_y) || '" r="3.4"><title>' || esc(v_tip) || '</title></circle>');
-          END LOOP;
+        px1(1) := v_last_day_n; py1(1) := ys(v_cnt);
+        px1(2) := v_xmax;       py1(2) := v_proj_y;
+        v_has_proj := TRUE;
+        IF ch.proj_30_lo IS NOT NULL AND ch.proj_90_lo IS NOT NULL THEN
+          v_half := (ch.proj_30_hi - ch.proj_30_lo) / 2;
+          v_nband := 2;
+          bx(1) := v_last_day_n + 30; blo(1) := ys(v_cnt) + ch.slope_per_day * 30 - v_half; bhi(1) := ys(v_cnt) + ch.slope_per_day * 30 + v_half;
+          v_half := (ch.proj_90_hi - ch.proj_90_lo) / 2;
+          bx(2) := v_last_day_n + 90; blo(2) := v_proj_y - v_half; bhi(2) := v_proj_y + v_half;
         END IF;
-      END LOOP;
-
-      p('</svg>');
-      p('</div>');  -- .timeline-card
-      IF v_lane_total > v_lane_shown THEN
-        p('<div class="note">Showing the ' || TO_CHAR(v_lane_shown, 'FM990')
-          || ' most active series; ' || TO_CHAR(v_lane_total - v_lane_shown, 'FM999990')
-          || ' more with unusual activity are not charted here.</div>');
       END IF;
+      v_ymin := 0; v_ymax := 100;
+      FOR i IN 1 .. v_cnt LOOP IF ys(i) > v_ymax THEN v_ymax := ys(i); END IF; END LOOP;
+      IF v_proj_y IS NOT NULL AND v_proj_y > v_ymax THEN v_ymax := v_proj_y; END IF;
+      IF v_nband = 2 AND bhi(2) > v_ymax THEN v_ymax := bhi(2); END IF;
+      v_ymax := v_ymax * 1.06;
+      FOR a IN (SELECT day_dt, busy_pct FROM capa_cpu_anom WHERE con_dbid = ch.con_dbid AND anomaly_flag IS NOT NULL) LOOP
+        v_nanom := v_nanom + 1; ax(v_nanom) := a.day_dt - c_epoch; ay(v_nanom) := a.busy_pct;
+      END LOOP;
+      v_cross_x := NULL; v_cross_lbl := NULL;
+      IF ch.quality = 'OK' AND ch.days_to_sat IS NOT NULL AND ch.days_to_sat <= 90 THEN
+        v_cross_x := v_last_day_n + ch.days_to_sat;
+        v_cross_lbl := TO_CHAR(cpu_sat, 'FM990') || '% &asymp; ' || dfmt(SYSDATE + ch.days_to_sat);
+      END IF;
+      chart_svg('Host CPU busy-hour p95 with the daily average, projection and saturation line',
+                v_xmin, v_xmax, v_ymin, v_ymax, '%', v_last_day_n,
+                NULL, NULL, cpu_sat, 'saturation ' || TO_CHAR(cpu_sat, 'FM990') || '%',
+                NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                v_cross_x, cpu_sat, v_cross_lbl, 250);
     END IF;
-  END IF;
-
-  -- Best-guess tablespace cards (which specific tablespace, and when). CPU now
-  -- lives in the hero duo above, so this grid is tablespace-only.
-  v_card_count := 0;
-  p('<div class="glance-grid">');
-
-  -- Near-full-NOW cards first (M7.1): any tablespace at/over the near-full
-  -- warning percent gets a card regardless of fit quality, so being unable
-  -- to forecast it can never hide it.
-  FOR r IN (
-    SELECT tablespace_name,
-           cur_gb,
-           limit_gb AS lim_gb,
-           pct_used, quality, sev_nearfull
-    FROM   capr_tbspc_days_to_full
-    WHERE  pct_used >= nf_warn
-      AND  rank_nearfull <= top_n
-    ORDER  BY rank_nearfull
-  ) LOOP
-    v_card_count := v_card_count + 1;
-    v_accent := CASE WHEN r.sev_nearfull = 'CRIT' THEN 'g-crit' ELSE 'g-warn' END;
-    p('<div class="gcard ' || v_accent || '">');
-    p('<h4 class="g-head">' || esc(r.tablespace_name) || ' &mdash; '
-      || TO_CHAR(r.pct_used, 'FM990.0') || '% full right now'
-      || info_icon('how full it is today; this needs no forecast and is shown whatever the fit quality') || '</h4>');
-    p('<div class="g-line">using ' || TO_CHAR(r.cur_gb, 'FM999999990.0')
-      || ' of ' || TO_CHAR(r.lim_gb, 'FM999999990.0') || ' GiB today</div>');
-    IF r.quality <> 'OK' THEN
-      p('<div class="g-line">growth cannot be forecast reliably (' || esc(r.quality) || ')</div>');
-    END IF;
-    p('</div>');
+    p('</div>');  -- .chart-card
   END LOOP;
-
-  -- One card per tablespace with a confident, computable days-to-full.
-  FOR r IN (
-    SELECT tablespace_name,
-           cur_gb,
-           limit_gb AS lim_gb,
-           days_to_full,
-           dtf_worst AS days_to_full_lo,
-           r2, sev_dtf
-    FROM   capr_tbspc_days_to_full
-    WHERE  quality = 'OK'
-      AND  days_to_full IS NOT NULL
-    ORDER  BY days_to_full
-    FETCH FIRST top_n ROWS ONLY
-  ) LOOP
-    v_card_count := v_card_count + 1;
-    v_accent := CASE r.sev_dtf WHEN 'CRIT' THEN 'g-crit'
-                               WHEN 'WARN' THEN 'g-warn'
-                               ELSE 'g-ok' END;
-    v_conf   := CASE WHEN r.r2 >= 0.9 THEN 'high confidence' ELSE 'good confidence' END;
-    p('<div class="gcard ' || v_accent || '">');
-    p('<h4 class="g-head">' || esc(r.tablespace_name) || ' &mdash; full in ' || time_phrase(r.days_to_full)
-      || ' <span class="pill ' || CASE WHEN r.r2 >= 0.9 THEN 'pill-ok' ELSE 'pill-flat' END
-      || '">' || v_conf || '</span>'
-      || info_icon('based on how closely past growth follows a straight line') || '</h4>');
-    p('<div class="g-date">around ' || TO_CHAR(SYSDATE + r.days_to_full, 'FMMonth YYYY') || '</div>');
-    -- M9.1: worst-case (soonest plausible) fill date from the slope CI, shown
-    -- only when it is meaningfully sooner than the central estimate.
-    IF r.days_to_full_lo IS NOT NULL AND r.days_to_full_lo < r.days_to_full THEN
-      p('<div class="g-line">worst case: in ' || time_phrase(r.days_to_full_lo)
-        || ' (' || TO_CHAR(SYSDATE + r.days_to_full_lo, 'FMMonth YYYY') || ')</div>');
-    END IF;
-    IF r.lim_gb IS NOT NULL THEN
-      p('<div class="g-line">using ' || TO_CHAR(r.cur_gb, 'FM999999990.0')
-        || ' of ' || TO_CHAR(r.lim_gb, 'FM999999990.0') || ' GiB today</div>');
-    ELSE
-      p('<div class="g-line">using ' || TO_CHAR(r.cur_gb, 'FM999999990.0') || ' GiB today</div>');
-    END IF;
-    p('</div>');
-  END LOOP;
-
-  -- No cards at all: a single friendly empty-state card that explains why,
-  -- keyed off whichever quality dominates the tablespace forecast.
-  IF v_card_count = 0 THEN
-    BEGIN
-      SELECT quality INTO v_dom FROM (
-        SELECT quality, COUNT(*) AS c
-        FROM   capr_tbspc_days_to_full
-        GROUP  BY quality
-        ORDER  BY c DESC, quality
-      ) WHERE ROWNUM = 1;
-    EXCEPTION WHEN NO_DATA_FOUND THEN v_dom := NULL;
-    END;
-    v_msg := CASE v_dom
-               WHEN 'INSUFFICIENT_HISTORY' THEN
-                 'There is not enough history yet to make a reliable prediction. Once more days of '
-                 || 'AWR data accumulate, best-guess forecasts will appear here.'
-               WHEN 'FLAT' THEN
-                 'Good news: nothing is on a path to filling up. No tablespace is growing enough to '
-                 || 'run out of space at the current trend.'
-               WHEN 'LOW_CONFIDENCE' THEN
-                 'Growth is too up-and-down right now to give a dependable estimate. The detailed '
-                 || 'tables below still show the raw numbers.'
-               ELSE
-                 'No forecast data is available yet.'
-             END;
-    p('<div class="gcard g-ok"><h4 class="g-head">'
-      || CASE v_dom WHEN 'INSUFFICIENT_HISTORY' THEN 'Not enough history yet'
-                    WHEN 'FLAT'                 THEN 'All quiet'
-                    WHEN 'LOW_CONFIDENCE'       THEN 'No reliable estimate yet'
-                    ELSE 'Nothing to show yet' END
-      || '</h4><div class="g-line">' || v_msg || '</div></div>');
-  END IF;
-  p('</div>');  -- .glance-grid
-
-  -- Roll-up line: what is NOT shown as a card, in friendly words. v_n_flat /
-  -- v_n_low / v_n_insuf were already computed once for the "Forecast
-  -- coverage" line above -- reused here rather than re-queried.
-  v_roll := NULL;
-  IF v_n_flat > 0 THEN
-    v_roll := CASE WHEN v_n_flat = 1
-                   THEN '1 tablespace isn''t growing at all (FLAT)'
-                   ELSE TO_CHAR(v_n_flat, 'FM999990') || ' tablespaces aren''t growing at all (FLAT)' END;
-  END IF;
-  IF v_n_low > 0 THEN
-    v_roll := v_roll || CASE WHEN v_roll IS NOT NULL THEN '; ' END
-              || CASE WHEN v_n_low = 1
-                      THEN '1 is growing too erratically for a reliable estimate (LOW_CONFIDENCE)'
-                      ELSE TO_CHAR(v_n_low, 'FM999990')
-                           || ' are growing too erratically for a reliable estimate (LOW_CONFIDENCE)' END;
-  END IF;
-  IF v_n_insuf > 0 THEN
-    v_roll := v_roll || CASE WHEN v_roll IS NOT NULL THEN '; ' END
-              || CASE WHEN v_n_insuf = 1
-                      THEN '1 doesn''t have enough history yet (INSUFFICIENT_HISTORY)'
-                      ELSE TO_CHAR(v_n_insuf, 'FM999990')
-                           || ' don''t have enough history yet (INSUFFICIENT_HISTORY)' END;
-  END IF;
-  IF v_card_count > 0 AND v_roll IS NOT NULL THEN
-    p('<div class="glance-rollup">Not shown as predictions: ' || v_roll || '.</div>');
-  END IF;
-
-  ----------------------------------------------------------------------
-  -- Collapsible plain-English glossary (end of section 0). One line per term,
-  -- worded for DBAs. Native details/summary -- no JS, prints collapsed.
-  ----------------------------------------------------------------------
-  p('<details class="glossary">');
-  p('<summary>New to these terms? Plain-English glossary</summary>');
-  p('<div class="gl-body"><dl>');
-  p('<dt>Forecast / projection</dt><dd>Where a number is heading, based on its recent trend.</dd>');
-  p('<dt>REGR (straight-line trend)</dt><dd>Fits a straight line through recent history and extends it forward.</dd>');
-  p('<dt>ESM</dt><dd>Oracle''s machine-learning forecast; it also learns weekly patterns and is usually best for the next 30 days.</dd>');
-  p('<dt>R2</dt><dd>How closely growth follows a straight line: 1.00 is perfectly steady, near 0 is erratic.</dd>');
-  p('<dt>Quality: OK</dt><dd>Steady enough to forecast reliably.</dd>');
-  p('<dt>Quality: LOW_CONFIDENCE</dt><dd>Growth is too erratic for a dependable estimate.</dd>');
-  p('<dt>Quality: FLAT</dt><dd>Not growing at all.</dd>');
-  p('<dt>Quality: INSUFFICIENT_HISTORY</dt><dd>Not enough days of AWR history yet.</dd>');
-  p('<dt>Anomaly</dt><dd>A day that stands out sharply from what is normal for that series.</dd>');
-  p('<dt>Robust z-score</dt><dd>How far outside its normal range a day was; 3 or more is clearly unusual.</dd>');
-  p('<dt>MAD</dt><dd>Median absolute deviation -- a spike-resistant way of measuring "normal".</dd>');
-  p('<dt>Days-to-full</dt><dd>Estimated days until a tablespace reaches its allocated limit.</dd>');
-  p('<dt>Saturation</dt><dd>The busy percent at which the CPU is treated as maxed out.</dd>');
-  p('</dl></div>');
-  p('</details>');
+  p('</div>');  -- .hero-duo
   p('</section>');
 
   ----------------------------------------------------------------------
   -- Section 1: days-to-full ranking
   ----------------------------------------------------------------------
   p('<section id="s1">');
-  p('<h2>1. Tablespaces by days-to-full <span class="pill pill-crit">CRIT&le;' || dtf_crit
+  p('<h2>1. Days to full <span class="pill pill-crit">CRIT&le;' || dtf_crit
       || '</span> <span class="pill pill-warn">WARN&le;' || dtf_warn || '</span></h2>');
-  p('<p class="desc">The tablespaces most likely to run out of space soonest, any fit quality '
-      || '(trust the estimate per Quality; only OK is reliable); top ' || top_n
-      || '. The prediction-band bounds and ACCEL move to the Diagnostics table right below this one.</p>');
+  p('<p class="desc">Which tablespace runs out first, at any fit quality (only OK is a dependable estimate); top ' || top_n
+      || '. Uncertainty range and acceleration are in the fold below the table.</p>');
 
   -- Primary table keeps DB/PDB / Tablespace / a combined Used-limit cell /
   -- Growth / Days to full / Severity / Quality; the 95% band bounds
@@ -1968,7 +2151,7 @@ BEGIN
     END IF;
     -- Row id: the attention banner's "View evidence" links for a specific
     -- tablespace jump straight here.
-    p('<tr id="' || dtf_row_id(r.con_dbid, r.tablespace_name) || '"><td>' || esc(r.db_pdb)
+    p('<tr' || row_cls(r.sev) || ' id="' || dtf_row_id(r.con_dbid, r.tablespace_name) || '"><td>' || esc(r.db_pdb)
       || '</td><td>' || esc(r.tablespace_name) || '</td>'
       || '<td>' || used_limit_cell(r.cur_gb, r.limit_gb, r.pct_used,
                         CASE r.sev WHEN 'CRIT' THEN 'crit' WHEN 'WARN' THEN 'warn' ELSE '' END) || '</td>'
@@ -1989,7 +2172,7 @@ BEGIN
     p('</div>');  -- .tscroll
 
     p('<details class="diag">');
-    p('<summary>Diagnostics (3 more columns)</summary>');
+    p('<summary>Uncertainty range and acceleration</summary>');
     p('<div class="diag-body">');
     p('<p class="desc">ACCEL&gt;1.5 = growth accelerating. Fill low / Fill high bracket '
         || 'Days to full with its statistical uncertainty range: earliest and latest credible fill '
@@ -2057,7 +2240,7 @@ BEGIN
     -- Row id: TBSPC_NEARFULL alerts can name a tablespace that never appears
     -- in the days-to-full table above (that one requires a computable
     -- days_to_full; this one does not), so this table needs its own anchor.
-    p('<tr id="' || nf_row_id(r.con_dbid, r.tablespace_name) || '"><td>' || esc(r.db_pdb)
+    p('<tr' || row_cls(r.sev) || ' id="' || nf_row_id(r.con_dbid, r.tablespace_name) || '"><td>' || esc(r.db_pdb)
       || '</td><td>' || esc(r.tablespace_name) || '</td>'
       || '<td>' || used_limit_cell(r.cur_gb, r.limit_gb, r.pct_used,
                         CASE r.sev WHEN 'CRIT' THEN 'crit' WHEN 'WARN' THEN 'warn' ELSE '' END) || '</td>'
@@ -2089,10 +2272,9 @@ BEGIN
       || v_ts_shown || ' of ' || v_ts_all || ': growing, near-full, or &ge; '
       || RTRIM(TO_CHAR(min_gb, 'FM99999990.999'), '.') || ' GiB, top '
       || top_n || ')</span></h2>');
-  p('<p class="desc">Where each tablespace is headed in size over the next six months. '
-      || 'current / +30 / +90 / +180, plus ESM +30 (Tier 2, 19c hard-capped at +30). '
-      || 'Small, flat, half-empty tablespaces are left out (knob report_min_gb); '
-      || 'CAPR_TBSPC_FORECAST still has every row.</p>');
+  p('<p class="desc">Where each tablespace is headed. A card for every one that needs a look, a one-line strip for the '
+      || 'quiet ones, then the numbers at +30 / +90 / +180 with the 95% band and the ESM +30 second opinion. '
+      || 'Small, flat, half-empty tablespaces are left out of the table (knob report_min_gb); CAPR_TBSPC_FORECAST still has every row.</p>');
 
   ----------------------------------------------------------------------
   -- Chart grid: history + REGR projection (+180) + ESM+30 point/CI + limit
@@ -2104,27 +2286,34 @@ BEGIN
   ----------------------------------------------------------------------
   chart_legend;
 
-  IF v_total_ts > top_n THEN
-    p('<div class="note">Chart grid capped at top ' || top_n || ' of ' || v_total_ts
-      || ' tablespaces (by days-to-full, NULLS LAST, then name); ' || (v_total_ts - top_n)
-      || ' additional tablespace(s) are not charted here but still appear in the forecast '
-      || 'table below.</div>');
-  END IF;
-
+  ----------------------------------------------------------------------
+  -- Chart cards for the tablespaces that need a look (near-full now, a
+  -- crossing within a year, or a fit that is erratic / too new to trust);
+  -- everything quiet (FLAT, or a crossing more than a year out) goes to the
+  -- one-row sparkline strip underneath. Both read CAPR_TBSPC_FORECAST; the
+  -- 95% band knots come from CAPF_TBSPC_FORECAST's proj_*_lo/hi columns,
+  -- centred on the line the report projects from today's actual value.
+  ----------------------------------------------------------------------
   IF v_total_ts = 0 THEN
     p('<div class="empty-note">No tablespace forecast data to chart.</div>');
   ELSE
+    v_quiet := 0;
     p('<div class="chart-grid">');
     FOR f IN (
-      SELECT dbid, con_dbid, tablespace_name, cur_bytes, limit_bytes, slope_bpd, quality,
-             esm30, esm30_lo, esm30_hi
-      FROM   capr_tbspc_forecast
-      WHERE  rank_chart <= top_n
-      ORDER  BY rank_chart
+      SELECT r.dbid, r.con_dbid, r.db_pdb, r.tablespace_name, r.cur_bytes, r.limit_bytes, r.slope_bpd, r.quality,
+             r.esm30, r.esm30_lo, r.esm30_hi, r.days_to_full, r.r2, r.cur_gb, r.limit_gb, r.rank_chart,
+             c.proj_30_lo, c.proj_30_hi, c.proj_90_lo, c.proj_90_hi, c.proj_180_lo, c.proj_180_hi,
+             c.proj_365_lo, c.proj_365_hi, c.days_to_full_lo, c.last_day, c.accel_ratio
+      FROM   capr_tbspc_forecast r
+      LEFT   JOIN capf_tbspc_forecast c
+        ON   c.dbid = r.dbid AND c.con_dbid = r.con_dbid AND c.tablespace_name = r.tablespace_name
+      WHERE  r.rank_chart <= top_n
+        AND  (   (r.limit_gb IS NOT NULL AND r.limit_gb > 0 AND 100 * r.cur_gb / r.limit_gb >= nf_warn)
+              OR (r.quality = 'OK' AND r.days_to_full IS NOT NULL AND r.days_to_full <= 365)
+              OR  r.quality IN ('LOW_CONFIDENCE', 'INSUFFICIENT_HISTORY'))
+      ORDER  BY r.rank_chart
     ) LOOP
-      xs.DELETE;
-      ys.DELETE;
-      v_cnt := 0;
+      xs.DELETE; ys.DELETE; v_cnt := 0; v_cnt2 := 0; v_nband := 0; v_nanom := 0; v_has_proj := FALSE;
       FOR h IN (SELECT day_dt, used_bytes / 1073741824 AS gb
                 FROM   capd_tbspc_daily
                 WHERE  dbid = f.dbid AND con_dbid = f.con_dbid AND tablespace_name = f.tablespace_name
@@ -2134,84 +2323,80 @@ BEGIN
         ys(v_cnt) := h.gb;
       END LOOP;
 
+      v_pct := CASE WHEN f.limit_gb > 0 THEN 100 * f.cur_gb / f.limit_gb END;
+      v_big := NULL; v_big_lbl := NULL; v_big_cls := NULL; v_accent := NULL;
+      IF f.quality = 'OK' AND f.days_to_full IS NOT NULL THEN
+        v_big := short_dur(f.days_to_full);
+        v_big_lbl := 'to full &middot; ' || CASE WHEN f.days_to_full_lo IS NOT NULL AND f.days_to_full_lo < f.days_to_full
+                                                 THEN 'worst ' || TO_CHAR(f.days_to_full_lo, 'FM999990')
+                                                 ELSE '&asymp; ' || dfmt(NVL(f.last_day, SYSDATE) + f.days_to_full) END;
+        v_big_cls := CASE WHEN f.days_to_full <= dtf_crit THEN 'crit' WHEN f.days_to_full <= dtf_warn THEN 'warn' ELSE 'ok' END;
+        v_accent  := CASE WHEN f.days_to_full <= dtf_crit THEN 'crit' WHEN f.days_to_full <= dtf_warn THEN 'warn' END;
+      ELSIF v_pct IS NOT NULL AND v_pct >= nf_warn THEN
+        v_big := TO_CHAR(v_pct, 'FM990.0') || '%';
+        v_big_lbl := 'full now';
+        v_big_cls := CASE WHEN v_pct >= nf_crit THEN 'crit' ELSE 'warn' END;
+        v_accent  := v_big_cls;
+      END IF;
+      IF v_pct IS NOT NULL AND v_pct >= nf_warn AND v_accent IS NULL THEN
+        v_accent := CASE WHEN v_pct >= nf_crit THEN 'crit' ELSE 'warn' END;
+      END IF;
+      v_subtitle := CASE WHEN v_con_count > 1 THEN esc(f.db_pdb) || ' &middot; ' END
+                    || fmt_size_gb(f.cur_gb) || CASE WHEN f.limit_gb IS NOT NULL THEN ' of ' || fmt_size_gb(f.limit_gb) END
+                    || CASE WHEN f.slope_bpd IS NOT NULL AND f.quality <> 'FLAT'
+                            THEN ' &middot; ' || CASE WHEN f.slope_bpd < 0 THEN '&minus;' END || fmt_rate_mb(ABS(f.slope_bpd) / 1048576) END
+                    || CASE WHEN f.accel_ratio >= 1.5 THEN ' &middot; accelerating &times;' || TO_CHAR(f.accel_ratio, 'FM990.0') END
+                    || CASE WHEN f.r2 IS NOT NULL AND f.quality IN ('OK','LOW_CONFIDENCE') THEN ' &middot; R2 ' || TO_CHAR(f.r2, 'FM0.00') END;
+      card_open(esc(f.tablespace_name) || ' ' || quality_pill(f.quality), v_subtitle, v_big, v_big_lbl, v_big_cls, v_accent, NULL);
+
       IF v_cnt = 0 THEN
-        chart_open(esc(f.tablespace_name) || ' ' || quality_pill(f.quality), NULL);
         p('<div class="empty-note">No daily history collected yet for this tablespace.</div>');
-        p('</div>');
       ELSE
-        -- ESM +30 point (if a fresh model exists for this series) -- the very
-        -- same CAPR_TBSPC_FORECAST columns the ESM+30 cell prints below.
-        v_esm_val := f.esm30; v_esm_lo := f.esm30_lo; v_esm_hi := f.esm30_hi;
-
         v_last_day_n := xs(v_cnt);
-        v_xmin       := xs(1);
-        v_xmax       := v_last_day_n;
-        v_proj_y     := NULL;
-        -- REGR projection only when quality=OK (matches the report's own
-        -- quality gate); FLAT/LOW_CONFIDENCE/INSUFFICIENT_HISTORY tablespaces
-        -- still get a history-only chart.
+        v_xmin := xs(1); v_xmax := v_last_day_n; v_proj_y := NULL;
+        v_horizon := CASE WHEN f.days_to_full > 180 AND f.days_to_full <= 365 THEN 365 ELSE 180 END;
         IF f.quality = 'OK' AND f.slope_bpd IS NOT NULL THEN
-          v_proj_y := ys(v_cnt) + (f.slope_bpd / 1073741824) * 180;
-          v_xmax   := v_last_day_n + 180;
+          v_proj_y := ys(v_cnt) + (f.slope_bpd / 1073741824) * v_horizon;
+          v_xmax   := v_last_day_n + v_horizon;
+          px1(1) := v_last_day_n; py1(1) := ys(v_cnt);
+          px1(2) := v_xmax;       py1(2) := v_proj_y;
+          v_has_proj := TRUE;
+          IF f.proj_30_lo IS NOT NULL THEN
+            v_nband := 0;
+            v_half := (f.proj_30_hi - f.proj_30_lo) / 2 / 1073741824;
+            v_nband := v_nband + 1; bx(v_nband) := v_last_day_n + 30;
+            blo(v_nband) := ys(v_cnt) + (f.slope_bpd / 1073741824) * 30 - v_half; bhi(v_nband) := blo(v_nband) + 2 * v_half;
+            v_half := (f.proj_90_hi - f.proj_90_lo) / 2 / 1073741824;
+            v_nband := v_nband + 1; bx(v_nband) := v_last_day_n + 90;
+            blo(v_nband) := ys(v_cnt) + (f.slope_bpd / 1073741824) * 90 - v_half; bhi(v_nband) := blo(v_nband) + 2 * v_half;
+            v_half := (f.proj_180_hi - f.proj_180_lo) / 2 / 1073741824;
+            v_nband := v_nband + 1; bx(v_nband) := v_last_day_n + 180;
+            blo(v_nband) := ys(v_cnt) + (f.slope_bpd / 1073741824) * 180 - v_half; bhi(v_nband) := blo(v_nband) + 2 * v_half;
+            IF v_horizon = 365 AND f.proj_365_lo IS NOT NULL THEN
+              v_half := (f.proj_365_hi - f.proj_365_lo) / 2 / 1073741824;
+              v_nband := v_nband + 1; bx(v_nband) := v_last_day_n + 365;
+              blo(v_nband) := v_proj_y - v_half; bhi(v_nband) := v_proj_y + v_half;
+            END IF;
+          END IF;
         END IF;
-        IF v_esm_val IS NOT NULL THEN
-          v_xmax := GREATEST(v_xmax, v_last_day_n + 30);
-        END IF;
+        v_esm_val := f.esm30; v_esm_lo := f.esm30_lo; v_esm_hi := f.esm30_hi;
+        IF v_esm_val IS NOT NULL THEN v_xmax := GREATEST(v_xmax, v_last_day_n + 30); END IF;
 
-        -- Y-range: floor at 0, pad 8%, then decide whether the tablespace
-        -- limit fits without blowing up the scale (limit line would sit
-        -- more than 3x the current data range above the data/projection
-        -- max) -- if not, omit the line and say so in the subtitle instead.
-        v_ymin := 0;
-        v_ymax := ys(1);
-        FOR i IN 1 .. v_cnt LOOP
-          IF ys(i) > v_ymax THEN v_ymax := ys(i); END IF;
-        END LOOP;
+        v_ymin := 0; v_ymax := ys(1);
+        FOR i IN 1 .. v_cnt LOOP IF ys(i) > v_ymax THEN v_ymax := ys(i); END IF; END LOOP;
         IF v_proj_y IS NOT NULL AND v_proj_y > v_ymax THEN v_ymax := v_proj_y; END IF;
-        IF v_esm_hi  IS NOT NULL AND v_esm_hi  > v_ymax THEN v_ymax := v_esm_hi; END IF;
-        IF v_esm_lo  IS NOT NULL AND v_esm_lo  < v_ymin THEN v_ymin := v_esm_lo; END IF;
-        IF (v_ymax - v_ymin) < 1 THEN v_ymax := v_ymin + 1; END IF; -- flat/zero-series guard
-
+        FOR i IN 1 .. v_nband LOOP IF bhi(i) > v_ymax THEN v_ymax := bhi(i); END IF; END LOOP;
+        IF v_esm_hi IS NOT NULL AND v_esm_hi > v_ymax THEN v_ymax := v_esm_hi; END IF;
+        IF (v_ymax - v_ymin) < 1 THEN v_ymax := v_ymin + 1; END IF;
         v_limit_gb   := f.limit_bytes / 1073741824;
         v_range      := v_ymax - v_ymin;
         v_show_limit := (v_limit_gb IS NOT NULL) AND (v_limit_gb - v_ymax) <= 3 * v_range;
-        IF v_show_limit THEN
-          v_ymax := GREATEST(v_ymax, v_limit_gb * 1.04);
-        END IF;
-        v_ymax := v_ymax + (v_ymax - v_ymin) * 0.08;
+        IF v_show_limit THEN v_ymax := GREATEST(v_ymax, v_limit_gb * 1.04); END IF;
+        v_ymax := v_ymax + (v_ymax - v_ymin) * 0.10;
+        -- a band or ESM interval far below zero would waste the scale
+        FOR i IN 1 .. v_nband LOOP blo(i) := GREATEST(blo(i), 0); END LOOP;
+        IF v_esm_lo IS NOT NULL THEN v_esm_lo := GREATEST(v_esm_lo, 0); END IF;
 
-        -- COALESCE, not nz(): nz's '&ndash;' placeholder would be re-escaped
-        -- by chart_open's esc() and render as literal "&amp;ndash;" text.
-        v_subtitle := 'cur ' || COALESCE(TO_CHAR(f.cur_bytes / 1073741824, 'FM999999990.00'), 'n/a')
-                      || ' GiB | limit ' || COALESCE(TO_CHAR(v_limit_gb, 'FM999999990.00'), 'n/a') || ' GiB';
-        IF v_limit_gb IS NOT NULL AND NOT v_show_limit THEN
-          v_subtitle := v_subtitle || ' (line hidden, out of chart scale)';
-        END IF;
-        chart_open(esc(f.tablespace_name) || ' ' || quality_pill(f.quality), v_subtitle);
-
-        p('<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="'
-          || esc(f.tablespace_name) || ' growth chart">');
-        emit_y_axis(v_ymin, v_ymax, ' GiB');
-        emit_x_axis(v_xmin, v_xmax);
-        chart_axes_frame;
-        IF v_show_limit THEN
-          p('<line class="limit-line" x1="' || fmt_px(c_ml) || '" y1="' || fmt_px(scale_y(v_limit_gb, v_ymin, v_ymax))
-            || '" x2="' || fmt_px(c_cw - c_mr) || '" y2="' || fmt_px(scale_y(v_limit_gb, v_ymin, v_ymax)) || '"/>');
-        END IF;
-        emit_polyline(xs, ys, v_cnt, v_xmin, v_xmax, v_ymin, v_ymax, 'hist-line');
-        IF v_proj_y IS NOT NULL THEN
-          px1(1) := v_last_day_n;       py1(1) := ys(v_cnt);
-          px1(2) := v_last_day_n + 180; py1(2) := v_proj_y;
-          emit_polyline(px1, py1, 2, v_xmin, v_xmax, v_ymin, v_ymax, 'proj-line');
-        END IF;
-        IF v_esm_val IS NOT NULL THEN
-          p('<line class="esm-line" x1="' || fmt_px(scale_x(v_last_day_n + 30, v_xmin, v_xmax))
-            || '" y1="' || fmt_px(scale_y(v_esm_lo, v_ymin, v_ymax))
-            || '" x2="' || fmt_px(scale_x(v_last_day_n + 30, v_xmin, v_xmax))
-            || '" y2="' || fmt_px(scale_y(v_esm_hi, v_ymin, v_ymax)) || '"/>');
-          p('<circle class="esm-dot" cx="' || fmt_px(scale_x(v_last_day_n + 30, v_xmin, v_xmax))
-            || '" cy="' || fmt_px(scale_y(v_esm_val, v_ymin, v_ymax)) || '" r="2.6"/>');
-        END IF;
         FOR a IN (SELECT an.day_dt, d.used_bytes / 1073741824 AS gb
                   FROM   capa_tbspc_anom an
                   JOIN   capd_tbspc_daily d
@@ -2220,14 +2405,61 @@ BEGIN
                   WHERE  an.dbid = f.dbid AND an.con_dbid = f.con_dbid
                     AND  an.tablespace_name = f.tablespace_name
                     AND  an.anomaly_flag IS NOT NULL) LOOP
-          p('<circle class="anom-dot" cx="' || fmt_px(scale_x(a.day_dt - c_epoch, v_xmin, v_xmax))
-            || '" cy="' || fmt_px(scale_y(a.gb, v_ymin, v_ymax)) || '" r="3"/>');
+          v_nanom := v_nanom + 1; ax(v_nanom) := a.day_dt - c_epoch; ay(v_nanom) := a.gb;
         END LOOP;
-        p('</svg>');
-        p('</div>');
+        v_cross_x := NULL; v_cross_lbl := NULL;
+        IF v_show_limit AND f.quality = 'OK' AND f.days_to_full IS NOT NULL AND f.days_to_full <= v_horizon THEN
+          v_cross_x := v_last_day_n + f.days_to_full;
+          v_cross_lbl := 'full &asymp; ' || dfmt(NVL(f.last_day, SYSDATE) + f.days_to_full);
+        END IF;
+        chart_svg(esc(f.tablespace_name) || ' growth: history, projection with its 95 percent band, and the allocated limit',
+                  v_xmin, v_xmax, v_ymin, v_ymax, 'GiB', v_last_day_n,
+                  CASE WHEN v_show_limit THEN v_limit_gb END,
+                  CASE WHEN v_show_limit THEN 'ceiling ' || fmt_size_gb(v_limit_gb) END,
+                  NULL, NULL,
+                  CASE WHEN v_esm_val IS NOT NULL THEN v_last_day_n + 30 END, v_esm_val, v_esm_lo, v_esm_hi,
+                  NULL, NULL, NULL,
+                  v_cross_x, CASE WHEN v_show_limit THEN v_limit_gb END, v_cross_lbl);
+        IF v_limit_gb IS NOT NULL AND NOT v_show_limit THEN
+          p('<div class="chart-sub">ceiling hidden: ' || fmt_size_gb(v_limit_gb) || ' is off the chart scale</div>');
+        END IF;
       END IF;
+      p('</div>');  -- .chart-card
     END LOOP;
-    p('</div>');
+    p('</div>');  -- .chart-grid
+
+    -- Quiet strip: one row per tablespace not charted above.
+    FOR f IN (
+      SELECT r.dbid, r.con_dbid, r.db_pdb, r.tablespace_name, r.quality, r.days_to_full, r.cur_gb, r.limit_gb, r.slope_bpd
+      FROM   capr_tbspc_forecast r
+      WHERE  NOT (r.rank_chart <= top_n
+                  AND (   (r.limit_gb IS NOT NULL AND r.limit_gb > 0 AND 100 * r.cur_gb / r.limit_gb >= nf_warn)
+                       OR (r.quality = 'OK' AND r.days_to_full IS NOT NULL AND r.days_to_full <= 365)
+                       OR  r.quality IN ('LOW_CONFIDENCE', 'INSUFFICIENT_HISTORY')))
+      ORDER  BY CASE WHEN r.quality = 'OK' AND r.days_to_full IS NOT NULL THEN 0 ELSE 1 END, r.days_to_full, r.cur_gb DESC
+      FETCH FIRST 60 ROWS ONLY
+    ) LOOP
+      v_quiet := v_quiet + 1;
+      IF v_quiet = 1 THEN
+        p('<div class="quiet"><div class="qh">Quiet tablespaces: flat, or more than a year from their ceiling. '
+          || 'History only, drawn to each one''s own scale.</div>');
+      END IF;
+      xs.DELETE; ys.DELETE; v_cnt := 0;
+      FOR h IN (SELECT day_dt, used_bytes / 1073741824 AS gb FROM capd_tbspc_daily
+                WHERE dbid = f.dbid AND con_dbid = f.con_dbid AND tablespace_name = f.tablespace_name ORDER BY day_dt) LOOP
+        v_cnt := v_cnt + 1; xs(v_cnt) := h.day_dt - c_epoch; ys(v_cnt) := h.gb;
+      END LOOP;
+      v_pct := CASE WHEN f.limit_gb > 0 THEN 100 * f.cur_gb / f.limit_gb END;
+      p('<div class="qrow"><div>' || con_prefix(f.db_pdb) || esc(f.tablespace_name) || ' ' || quality_pill(f.quality) || '</div>');
+      IF v_cnt >= 2 THEN spark_svg; ELSE p('<div></div>'); END IF;
+      p('<div class="q">' || fmt_size_gb(f.cur_gb) || CASE WHEN f.limit_gb IS NOT NULL THEN ' / ' || fmt_size_gb(f.limit_gb) END || '</div>'
+        || '<div class="q">' || CASE WHEN v_pct IS NOT NULL THEN TO_CHAR(v_pct, 'FM990') || '%' ELSE '&ndash;' END || '</div>'
+        || '<div class="q qd">' || CASE WHEN f.quality = 'OK' AND f.days_to_full IS NOT NULL THEN 'full in ' || short_dur(f.days_to_full)
+                                        WHEN f.quality = 'FLAT' THEN 'flat'
+                                        WHEN f.quality = 'OK' THEN 'not filling'
+                                        ELSE '&ndash;' END || '</div></div>');
+    END LOOP;
+    IF v_quiet > 0 THEN p('</div>'); END IF;
   END IF;
 
   any_rows := FALSE;
@@ -2293,29 +2525,64 @@ BEGIN
   -- Section 3: tablespace growth anomalies
   ----------------------------------------------------------------------
   p('<section id="s3">');
-  p('<h2>3. Tablespace growth anomalies <span style="font-weight:400;color:var(--muted);font-size:12px">(last '
+  p('<h2>3. Unusual tablespace days <span style="font-weight:400;color:var(--muted);font-size:12px">(last '
       || anomaly_days || ' days)</span></h2>');
-  p('<p class="desc">Days when a tablespace grew (or shrank) much faster than its own normal pace. '
-      || 'FLAG when |rate - median_rate| exceeds max(k*MAD, 100MiB/day floor). '
-      || 'GAP = days since previous sample.</p>');
+  p('<p class="desc">Days when a tablespace grew or shrank much faster than its own normal pace. One strip per '
+      || 'series: red = grew, blue = shrank, bigger = further outside normal. The numbers behind every dot are in the fold.</p>');
+
+  SELECT MAX(day_dt) INTO v_win_hi FROM capd_tbspc_daily;
+  v_strip_n := 0;
+  IF v_win_hi IS NOT NULL THEN
+    v_win_lo := v_win_hi - anomaly_days;
+    v_xmin := v_win_lo - c_epoch; v_xmax := v_win_hi - c_epoch;
+    FOR ln IN (
+      SELECT con_dbid, tablespace_name, db_pdb, COUNT(*) AS n_all,
+             SUM(CASE WHEN anomaly_flag = 'HIGH' THEN 1 ELSE 0 END) AS n_hi,
+             SUM(CASE WHEN anomaly_flag = 'LOW'  THEN 1 ELSE 0 END) AS n_lo,
+             MAX(ABS(delta_mb)) AS max_delta, MAX(ABS(z)) AS max_z
+      FROM   capr_tbspc_anomalies
+      WHERE  days_ago < anomaly_days
+      GROUP  BY con_dbid, tablespace_name, db_pdb
+      ORDER  BY n_all DESC, max_z DESC, tablespace_name
+      FETCH FIRST 16 ROWS ONLY
+    ) LOOP
+      v_strip_n := v_strip_n + 1;
+      IF v_strip_n = 1 THEN p('<div class="strips">'); END IF;
+      p('<div class="strip"><div class="sl"><b>' || esc(ln.tablespace_name) || '</b>'
+        || CASE WHEN v_con_count > 1 THEN ' <span class="dim">' || esc(ln.db_pdb) || '</span>' END
+        || '<span>' || CASE WHEN ln.n_hi > 0 THEN TO_CHAR(ln.n_hi, 'FM990') || ' day' || CASE WHEN ln.n_hi = 1 THEN '' ELSE 's' END || ' up' END
+        || CASE WHEN ln.n_hi > 0 AND ln.n_lo > 0 THEN ' &middot; ' END
+        || CASE WHEN ln.n_lo > 0 THEN TO_CHAR(ln.n_lo, 'FM990') || ' day' || CASE WHEN ln.n_lo = 1 THEN '' ELSE 's' END || ' down' END
+        || ' &middot; biggest ' || fmt_size_gb(ln.max_delta / 1024) || '</span></div>');
+      strip_open(v_xmin, v_xmax);
+      FOR a IN (SELECT day_dt, day_str, delta_mb, rate_mb, med_mb, z, anomaly_flag
+                FROM capr_tbspc_anomalies
+                WHERE con_dbid = ln.con_dbid AND tablespace_name = ln.tablespace_name AND days_ago < anomaly_days) LOOP
+        v_tip := a.day_str || ': ' || CASE WHEN a.delta_mb >= 0 THEN 'grew ' ELSE 'shrank ' END
+                 || fmt_size_gb(ABS(a.delta_mb) / 1024) || ' (usual ' || fmt_size_gb(NVL(a.med_mb, 0) / 1024) || '/day), robust z '
+                 || TO_CHAR(a.z, 'FM99990.0');
+        p('<circle class="' || CASE WHEN a.anomaly_flag = 'HIGH' THEN 'sd-hi' ELSE 'sd-lo' END
+          || '" cx="' || fmt_px(lin(a.day_dt - c_epoch, v_xmin, v_xmax, 4, 596)) || '" cy="15" r="'
+          || fmt_px(3.5 + LEAST(4, ABS(NVL(a.z, 0)) / 6)) || '"><title>' || esc(v_tip) || '</title></circle>');
+      END LOOP;
+      p('</svg></div>');
+    END LOOP;
+    IF v_strip_n > 0 THEN
+      p('<div class="strip-axis"><div></div><div><span>' || dfmt(v_win_lo + 1) || '</span><span>'
+        || dfmt(v_win_lo + FLOOR(anomaly_days / 2)) || '</span><span>' || dfmt(v_win_hi) || '</span></div></div>');
+      p('</div>');  -- .strips
+    END IF;
+  END IF;
 
   any_rows := FALSE;
   FOR r IN (
-    SELECT db_pdb,
-           tablespace_name,
-           day_str AS day_dt,
-           gap,
-           delta_mb,
-           rate_mb,
-           med_mb,
-           thr_mb,
-           z,
-           anomaly_flag
+    SELECT db_pdb, tablespace_name, day_str AS day_dt, gap, delta_mb, rate_mb, med_mb, thr_mb, z, anomaly_flag
     FROM   capr_tbspc_anomalies
     WHERE  days_ago < anomaly_days
-    ORDER  BY days_ago, con_dbid, tablespace_name
+    ORDER  BY con_dbid, tablespace_name, days_ago
   ) LOOP
     IF NOT any_rows THEN
+      p('<details class="fold"><summary>The numbers behind every dot</summary><div class="fold-body">');
       p('<div class="tscroll">');
       p('<table class="tbl"><thead><tr>'
         || '<th>DB/PDB</th><th>Tablespace' || info_icon('CAPR column: TABLESPACE_NAME')
@@ -2329,7 +2596,7 @@ BEGIN
         || '</th><th>Flag' || info_icon('the direction of the flagged change for this day (CAPR column: ANOMALY_FLAG)') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
-    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.tablespace_name) || '</td><td>' || r.day_dt || '</td>'
+    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.tablespace_name) || '</td><td style="white-space:nowrap">' || r.day_dt || '</td>'
       || '<td class="num">' || nz(r.gap, 'FM990') || '</td>'
       || '<td class="num">' || nz(r.delta_mb, 'FM9999990.0') || '</td>'
       || '<td class="num">' || nz(r.rate_mb, 'FM9999990.0') || '</td>'
@@ -2337,13 +2604,13 @@ BEGIN
       || '<td class="num">' || nz(r.thr_mb, 'FM9999990.0') || '</td>'
       || '<td class="num' || (CASE WHEN ABS(NVL(r.z,0)) >= 3 THEN ' z-hi' ELSE '' END) || '">'
          || nz(r.z, 'FM99990.0') || '</td>'
-      || '<td class="sev-crit">' || esc(r.anomaly_flag) || '</td></tr>');
+      || '<td class="' || CASE WHEN r.anomaly_flag = 'HIGH' THEN 'sev-crit' ELSE 'sev-ok' END || '">' || esc(r.anomaly_flag) || '</td></tr>');
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
-    p('</div>');  -- .tscroll
+    p('</div></div></details>');
   ELSE
-    p('<div class="empty-note">No tablespace growth anomalies flagged in the selected window.</div>');
+    p('<div class="glance-ok">No unusual tablespace days in the last ' || TO_CHAR(anomaly_days, 'FM999990') || ' days.</div>');
   END IF;
   p('</section>');
 
@@ -2351,13 +2618,10 @@ BEGIN
   -- Section 4: CPU trend
   ----------------------------------------------------------------------
   p('<section id="s4">');
-  p('<h2>4. CPU trend (host busy% avg / p95 / peak window, DB CPU sec and % of cores)</h2>');
-  p('<p class="desc">How busy the CPU has been, and when it might run out of headroom. '
-      || 'BUSY_PCT is the daily average; BUSY_P95 / BUSY_PEAK are the busy hour (p95 of the day''s '
-      || 'snapshot intervals / peak-window busy%), which is what actually saturates. DB_CPU_PCT / DB_CPU_P95 '
-      || 'express this container''s DB CPU as a percent of host core capacity. '
-      || 'DAYS_SAT = projected days until the metric reaches ' || cpu_sat
-      || '% (every metric but DB_CPU_SEC).</p>');
+  p('<h2>4. CPU trend</h2>');
+  p('<p class="desc">How busy the host has been and when it runs out of headroom. The busy-hour p95 is what '
+      || 'saturates; each container''s DB CPU is shown as a share of the host''s cores, with any sustained level '
+      || 'shift shaded. The table has every metric, including the daily average and peak window.</p>');
 
   ----------------------------------------------------------------------
   -- Chart grid: one busy% card (history + saturation threshold + REGR
@@ -2382,117 +2646,141 @@ BEGIN
                  SELECT DISTINCT con_dbid FROM capd_dbtime_daily
                ) ORDER BY con_dbid) LOOP
 
-      -- ---- Busy% card ----
-      xs.DELETE; ys.DELETE; v_cnt := 0;
-      FOR h IN (SELECT day_dt, busy_pct FROM capd_cpu_daily
+      -- ---- Host busy% card: only where the container owns host OSSTAT ----
+      xs.DELETE; ys.DELETE; xs2.DELETE; ys2.DELETE; v_cnt := 0; v_cnt2 := 0; v_nband := 0; v_nanom := 0; v_has_proj := FALSE;
+      FOR h IN (SELECT day_dt, busy_pct, busy_p95 FROM capd_cpu_daily
                 WHERE con_dbid = cd.con_dbid ORDER BY day_dt) LOOP
-        v_cnt := v_cnt + 1;
-        xs(v_cnt) := h.day_dt - c_epoch;
-        ys(v_cnt) := h.busy_pct;
+        v_cnt := v_cnt + 1;  xs(v_cnt) := h.day_dt - c_epoch;  ys(v_cnt) := NVL(h.busy_p95, h.busy_pct);
+        v_cnt2 := v_cnt2 + 1; xs2(v_cnt2) := h.day_dt - c_epoch; ys2(v_cnt2) := h.busy_pct;
       END LOOP;
-
-      v_quality := NULL; v_slope := NULL;
-      FOR t IN (SELECT slope_per_day, quality FROM capr_cpu_trend
-                WHERE con_dbid = cd.con_dbid AND metric = 'BUSY_PCT'
-                ORDER BY dbid FETCH FIRST 1 ROW ONLY) LOOP
-        v_quality := t.quality;
-        v_slope   := t.slope_per_day;
-      END LOOP;
-
-      chart_open('Host CPU busy% (' || esc(db_label(NULL, cd.con_dbid)) || ')',
-                  'saturation threshold ' || TO_CHAR(cpu_sat, 'FM990') || '%');
-      IF v_cnt = 0 THEN
-        p('<div class="empty-note">No daily CPU history collected yet for this container.</div>');
-      ELSE
+      IF v_cnt > 0 THEN
+        v_quality := NULL; v_slope := NULL; v_dtf := NULL; v_n := NULL;
+        v_big := NULL; v_big_lbl := NULL; v_big_cls := NULL; v_accent := NULL;
+        FOR t IN (SELECT t.slope_per_day, t.quality, t.days_to_sat, t.sat_worst, t.sat_best, t.r2, t.cur_val,
+                         f.proj_30_lo, f.proj_30_hi, f.proj_90_lo, f.proj_90_hi
+                  FROM capr_cpu_trend t
+                  LEFT JOIN capf_cpu_trend f ON f.dbid = t.dbid AND f.con_dbid = t.con_dbid AND f.metric = t.metric
+                  WHERE t.con_dbid = cd.con_dbid AND t.metric = 'BUSY_P95'
+                  ORDER BY t.dbid FETCH FIRST 1 ROW ONLY) LOOP
+          v_quality := t.quality; v_slope := t.slope_per_day; v_dtf := t.days_to_sat; v_n := t.r2;
+          IF t.quality = 'OK' AND t.days_to_sat IS NOT NULL THEN
+            v_big := short_dur(t.days_to_sat);
+            v_big_lbl := 'to ' || TO_CHAR(cpu_sat, 'FM990') || '% &middot; '
+                         || CASE WHEN t.sat_worst IS NOT NULL THEN TO_CHAR(t.sat_worst, 'FM999990') || '&ndash;' || NVL(TO_CHAR(t.sat_best, 'FM999990'), 'never')
+                                 ELSE '&asymp; ' || dfmt(SYSDATE + t.days_to_sat) END;
+            v_big_cls := CASE WHEN t.days_to_sat <= dtf_crit THEN 'crit' WHEN t.days_to_sat <= dtf_warn THEN 'warn' ELSE 'ok' END;
+            v_accent  := CASE WHEN t.days_to_sat <= dtf_crit THEN 'crit' WHEN t.days_to_sat <= dtf_warn THEN 'warn' END;
+          END IF;
+          IF t.proj_30_lo IS NOT NULL AND t.proj_90_lo IS NOT NULL AND t.quality = 'OK' THEN
+            v_nband := 2;
+            v_half := (t.proj_30_hi - t.proj_30_lo) / 2;
+            bx(1) := xs(v_cnt) + 30; blo(1) := ys(v_cnt) + t.slope_per_day * 30 - v_half; bhi(1) := blo(1) + 2 * v_half;
+            v_half := (t.proj_90_hi - t.proj_90_lo) / 2;
+            bx(2) := xs(v_cnt) + 90; blo(2) := ys(v_cnt) + t.slope_per_day * 90 - v_half; bhi(2) := blo(2) + 2 * v_half;
+          END IF;
+        END LOOP;
+        card_open('Host CPU busy-hour p95 <span class="dim" style="font-weight:400">' || esc(db_label(NULL, cd.con_dbid)) || '</span> '
+                  || CASE WHEN v_quality IS NOT NULL THEN quality_pill(v_quality) END,
+                  'p95 of the day''s hourly intervals, what actually saturates &middot; faint line = daily average'
+                  || CASE WHEN v_n IS NOT NULL THEN ' &middot; R2 ' || TO_CHAR(v_n, 'FM0.00') END,
+                  v_big, v_big_lbl, v_big_cls, v_accent, NULL);
         v_xmin := xs(1); v_xmax := xs(v_cnt); v_last_day_n := xs(v_cnt); v_proj_y := NULL;
         IF v_quality = 'OK' AND v_slope IS NOT NULL THEN
           v_proj_y := ys(v_cnt) + v_slope * 90;
           v_xmax   := v_last_day_n + 90;
+          px1(1) := v_last_day_n; py1(1) := ys(v_cnt);
+          px1(2) := v_xmax;       py1(2) := v_proj_y;
+          v_has_proj := TRUE;
+        ELSE
+          v_nband := 0;
         END IF;
-        v_ymin := 0; v_ymax := ys(1);
-        FOR i IN 1 .. v_cnt LOOP
-          IF ys(i) > v_ymax THEN v_ymax := ys(i); END IF;
-        END LOOP;
+        v_ymin := 0; v_ymax := 100;
+        FOR i IN 1 .. v_cnt LOOP IF ys(i) > v_ymax THEN v_ymax := ys(i); END IF; END LOOP;
         IF v_proj_y IS NOT NULL AND v_proj_y > v_ymax THEN v_ymax := v_proj_y; END IF;
-        v_ymax := GREATEST(v_ymax, cpu_sat); -- keep the threshold line always in-range
-        IF (v_ymax - v_ymin) < 1 THEN v_ymax := v_ymin + 1; END IF;
-        v_ymax := v_ymax + (v_ymax - v_ymin) * 0.12;
-
-        p('<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="CPU busy percent chart for '
-          || esc(db_label(NULL, cd.con_dbid)) || '">');
-        emit_y_axis(v_ymin, v_ymax, '%');
-        emit_x_axis(v_xmin, v_xmax);
-        chart_axes_frame;
-        p('<line class="thresh-line" x1="' || fmt_px(c_ml) || '" y1="' || fmt_px(scale_y(cpu_sat, v_ymin, v_ymax))
-          || '" x2="' || fmt_px(c_cw - c_mr) || '" y2="' || fmt_px(scale_y(cpu_sat, v_ymin, v_ymax)) || '"/>');
-        p('<text class="thresh-label" x="' || fmt_px(c_cw - c_mr - 2) || '" y="'
-          || fmt_px(scale_y(cpu_sat, v_ymin, v_ymax) - 3) || '" text-anchor="end">sat '
-          || TO_CHAR(cpu_sat, 'FM990') || '%</text>');
-        emit_polyline(xs, ys, v_cnt, v_xmin, v_xmax, v_ymin, v_ymax, 'hist-line');
-        IF v_proj_y IS NOT NULL THEN
-          px1(1) := v_last_day_n;      py1(1) := ys(v_cnt);
-          px1(2) := v_last_day_n + 90; py1(2) := v_proj_y;
-          emit_polyline(px1, py1, 2, v_xmin, v_xmax, v_ymin, v_ymax, 'proj-line');
-        END IF;
-        FOR a IN (SELECT day_dt, busy_pct FROM capa_cpu_anom
-                  WHERE con_dbid = cd.con_dbid AND anomaly_flag IS NOT NULL) LOOP
-          p('<circle class="anom-dot" cx="' || fmt_px(scale_x(a.day_dt - c_epoch, v_xmin, v_xmax))
-            || '" cy="' || fmt_px(scale_y(a.busy_pct, v_ymin, v_ymax)) || '" r="3"/>');
+        FOR i IN 1 .. v_nband LOOP IF bhi(i) > v_ymax THEN v_ymax := bhi(i); END IF; END LOOP;
+        v_ymax := v_ymax * 1.06;
+        FOR a IN (SELECT day_dt, busy_pct FROM capa_cpu_anom WHERE con_dbid = cd.con_dbid AND anomaly_flag IS NOT NULL) LOOP
+          v_nanom := v_nanom + 1; ax(v_nanom) := a.day_dt - c_epoch; ay(v_nanom) := a.busy_pct;
         END LOOP;
-        p('</svg>');
+        v_cross_x := NULL; v_cross_lbl := NULL;
+        IF v_quality = 'OK' AND v_dtf IS NOT NULL AND v_dtf <= 90 THEN
+          v_cross_x := v_last_day_n + v_dtf;
+          v_cross_lbl := TO_CHAR(cpu_sat, 'FM990') || '% &asymp; ' || dfmt(SYSDATE + v_dtf);
+        END IF;
+        chart_svg('Host CPU busy-hour p95 for ' || esc(db_label(NULL, cd.con_dbid)) || ' with projection and saturation line',
+                  v_xmin, v_xmax, v_ymin, v_ymax, '%', v_last_day_n,
+                  NULL, NULL, cpu_sat, 'saturation ' || TO_CHAR(cpu_sat, 'FM990') || '%',
+                  NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                  v_cross_x, cpu_sat, v_cross_lbl);
+        p('</div>');
       END IF;
-      p('</div>');
 
-      -- ---- DB CPU sec/day card ----
-      xs.DELETE; ys.DELETE; v_cnt := 0;
-      FOR h IN (SELECT day_dt, db_cpu_sec FROM capd_dbtime_daily
-                WHERE con_dbid = cd.con_dbid ORDER BY day_dt) LOOP
-        v_cnt := v_cnt + 1;
-        xs(v_cnt) := h.day_dt - c_epoch;
-        ys(v_cnt) := h.db_cpu_sec;
+      -- ---- DB CPU as % of host cores: comparable to the busy% chart, and the
+      --      metric CAPA_CPU_SHIFT scores, so a sustained step is shaded here ----
+      xs.DELETE; ys.DELETE; xs2.DELETE; ys2.DELETE; v_cnt := 0; v_cnt2 := 0; v_nband := 0; v_nanom := 0; v_has_proj := FALSE;
+      FOR h IN (SELECT day_dt, db_cpu_pct FROM capd_dbtime_daily
+                WHERE con_dbid = cd.con_dbid AND db_cpu_pct IS NOT NULL ORDER BY day_dt) LOOP
+        v_cnt := v_cnt + 1; xs(v_cnt) := h.day_dt - c_epoch; ys(v_cnt) := h.db_cpu_pct;
       END LOOP;
-
-      v_quality := NULL; v_slope := NULL;
-      FOR t IN (SELECT slope_per_day, quality FROM capr_cpu_trend
-                WHERE con_dbid = cd.con_dbid AND metric = 'DB_CPU_SEC'
-                ORDER BY dbid FETCH FIRST 1 ROW ONLY) LOOP
-        v_quality := t.quality;
-        v_slope   := t.slope_per_day;
-      END LOOP;
-
-      chart_open('DB CPU sec/day (' || esc(db_label(NULL, cd.con_dbid)) || ')',
-                  'REGR trend only -- no fixed saturation ceiling');
-      IF v_cnt = 0 THEN
-        p('<div class="empty-note">No daily DB CPU history collected yet for this container.</div>');
-      ELSE
+      IF v_cnt > 0 THEN
+        v_quality := NULL; v_slope := NULL; v_dtf := NULL; v_n := NULL;
+        v_big := NULL; v_big_lbl := NULL; v_big_cls := NULL; v_accent := NULL;
+        v_shift_from := NULL; v_shift_to := NULL; v_shift_lbl := NULL;
+        FOR t IN (SELECT slope_per_day, quality, days_to_sat, r2 FROM capr_cpu_trend
+                  WHERE con_dbid = cd.con_dbid AND metric = 'DB_CPU_PCT'
+                  ORDER BY dbid FETCH FIRST 1 ROW ONLY) LOOP
+          v_quality := t.quality; v_slope := t.slope_per_day; v_dtf := t.days_to_sat; v_n := t.r2;
+        END LOOP;
+        FOR s IN (SELECT last_day, recent_days, shift_pct, shift_flag, sev FROM capr_cpu_shifts
+                  WHERE con_dbid = cd.con_dbid AND metric = 'DB_CPU_PCT' AND shift_flag IS NOT NULL
+                  ORDER BY rank_shift FETCH FIRST 1 ROW ONLY) LOOP
+          v_shift_from := (s.last_day - s.recent_days + 1) - c_epoch;
+          v_shift_to   := s.last_day - c_epoch;
+          v_shift_lbl  := CASE WHEN s.shift_pct >= 0 THEN '+' END || TO_CHAR(s.shift_pct, 'FM9990.0') || ' pts since '
+                          || dfmt(s.last_day - s.recent_days + 1);
+          v_big := CASE WHEN s.shift_pct >= 0 THEN '+' END || TO_CHAR(s.shift_pct, 'FM9990.0');
+          v_big_lbl := 'pts, sustained ' || LOWER(s.shift_flag);
+          v_big_cls := CASE WHEN s.sev = 'WARN' THEN 'warn' ELSE 'muted' END;
+          v_accent  := CASE WHEN s.sev = 'WARN' THEN 'warn' END;
+        END LOOP;
+        IF v_big IS NULL AND v_quality = 'OK' AND v_dtf IS NOT NULL AND v_dtf <= 365 THEN
+          v_big := short_dur(v_dtf); v_big_lbl := 'to ' || TO_CHAR(cpu_sat, 'FM990') || '% of cores';
+          v_big_cls := CASE WHEN v_dtf <= dtf_crit THEN 'crit' WHEN v_dtf <= dtf_warn THEN 'warn' ELSE 'ok' END;
+          v_accent  := CASE WHEN v_dtf <= dtf_crit THEN 'crit' WHEN v_dtf <= dtf_warn THEN 'warn' END;
+        END IF;
+        card_open('DB CPU, % of host cores <span class="dim" style="font-weight:400">' || esc(db_label(NULL, cd.con_dbid)) || '</span> '
+                  || CASE WHEN v_shift_lbl IS NOT NULL THEN '<span class="pill pill-warn">SHIFT</span> ' END
+                  || CASE WHEN v_quality IS NOT NULL THEN quality_pill(v_quality) END,
+                  'this container''s DB CPU seconds as a share of the host''s core capacity, daily'
+                  || CASE WHEN v_n IS NOT NULL THEN ' &middot; R2 ' || TO_CHAR(v_n, 'FM0.00') END
+                  || CASE WHEN v_shift_lbl IS NOT NULL AND v_quality = 'LOW_CONFIDENCE' THEN ' (the step breaks the straight-line fit)' END,
+                  v_big, v_big_lbl, v_big_cls, v_accent, NULL);
         v_xmin := xs(1); v_xmax := xs(v_cnt); v_last_day_n := xs(v_cnt); v_proj_y := NULL;
         IF v_quality = 'OK' AND v_slope IS NOT NULL THEN
           v_proj_y := ys(v_cnt) + v_slope * 90;
           v_xmax   := v_last_day_n + 90;
+          px1(1) := v_last_day_n; py1(1) := ys(v_cnt);
+          px1(2) := v_xmax;       py1(2) := v_proj_y;
+          v_has_proj := TRUE;
         END IF;
-        v_ymin := 0; v_ymax := ys(1);
-        FOR i IN 1 .. v_cnt LOOP
-          IF ys(i) > v_ymax THEN v_ymax := ys(i); END IF;
-          IF ys(i) < v_ymin THEN v_ymin := ys(i); END IF;
-        END LOOP;
+        v_ymin := 0; v_ymax := 0;
+        FOR i IN 1 .. v_cnt LOOP IF ys(i) > v_ymax THEN v_ymax := ys(i); END IF; END LOOP;
         IF v_proj_y IS NOT NULL AND v_proj_y > v_ymax THEN v_ymax := v_proj_y; END IF;
-        IF (v_ymax - v_ymin) < 1 THEN v_ymax := v_ymin + 1; END IF;
-        v_ymax := v_ymax + (v_ymax - v_ymin) * 0.08;
-
-        p('<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="DB CPU seconds per day chart for '
-          || esc(db_label(NULL, cd.con_dbid)) || '">');
-        emit_y_axis(v_ymin, v_ymax, ' s');
-        emit_x_axis(v_xmin, v_xmax);
-        chart_axes_frame;
-        emit_polyline(xs, ys, v_cnt, v_xmin, v_xmax, v_ymin, v_ymax, 'hist-line');
-        IF v_proj_y IS NOT NULL THEN
-          px1(1) := v_last_day_n;      py1(1) := ys(v_cnt);
-          px1(2) := v_last_day_n + 90; py1(2) := v_proj_y;
-          emit_polyline(px1, py1, 2, v_xmin, v_xmax, v_ymin, v_ymax, 'proj-line');
-        END IF;
-        p('</svg>');
+        -- keep the saturation line in view when the series is within reach of it
+        IF v_ymax >= cpu_sat * 0.35 THEN v_ymax := GREATEST(v_ymax, cpu_sat); END IF;
+        IF v_ymax < 1 THEN v_ymax := 1; END IF;
+        v_ymax := v_ymax * 1.08;
+        chart_svg('DB CPU as a percent of host cores for ' || esc(db_label(NULL, cd.con_dbid))
+                  || CASE WHEN v_shift_lbl IS NOT NULL THEN ', with the sustained level shift shaded' END,
+                  v_xmin, v_xmax, v_ymin, v_ymax, '%', v_last_day_n,
+                  NULL, NULL,
+                  CASE WHEN v_ymax >= cpu_sat THEN cpu_sat END,
+                  CASE WHEN v_ymax >= cpu_sat THEN 'saturation ' || TO_CHAR(cpu_sat, 'FM990') || '%' END,
+                  NULL, NULL, NULL, NULL,
+                  v_shift_from, v_shift_to, v_shift_lbl,
+                  NULL, NULL, NULL);
+        p('</div>');
       END IF;
-      p('</div>');
     END LOOP;
     p('</div>');
   END IF;
@@ -2536,9 +2824,10 @@ BEGIN
       || '<td class="num">' || nz(r.slope_day, 'FM9999990.0000') || '</td>'
       || '<td class="num">' || nz(r.r2, 'FM90.000') || '</td>'
       || '<td class="num' || (CASE WHEN r.days_sat IS NOT NULL AND r.days_sat <= dtf_warn THEN ' sev-warn' END)
-         || '">' || dtf_cell(r.days_sat, r.quality, 'FM99999990') || '</td>'
+         || '">' || dtf_cell(r.days_sat, r.quality, 'FM99999990', TRUE) || '</td>'
       || '<td class="num">'
       || CASE WHEN r.sat_worst IS NULL THEN '&ndash;'
+              WHEN r.sat_worst > 365 THEN '<span class="na">&gt; 1 year</span>'
               ELSE TO_CHAR(r.sat_worst, 'FM99999990') || '&ndash;'
                    || NVL(TO_CHAR(r.sat_best, 'FM99999990'), 'never') END || '</td>'
       || '<td>' || quality_pill(r.quality) || '</td></tr>');
@@ -2555,25 +2844,60 @@ BEGIN
   -- Section 5: CPU anomalies
   ----------------------------------------------------------------------
   p('<section id="s5">');
-  p('<h2>5. CPU busy% anomalies <span style="font-weight:400;color:var(--muted);font-size:12px">'
-      || 'vs same-weekday baseline, last ' || anomaly_days || ' days</span></h2>');
-  p('<p class="desc">Days when the CPU was unusually busy compared with the same weekday before. '
-      || 'FLAG when |busy% - median%| exceeds THRESHOLD (k*MAD, floored).</p>');
+  p('<h2>5. Unusual CPU days <span style="font-weight:400;color:var(--muted);font-size:12px">'
+      || 'vs the same weekday, last ' || anomaly_days || ' days</span></h2>');
+  p('<p class="desc">Days when the host was much busier (red) or quieter (blue) than it usually is on that weekday, '
+      || 'then the sustained level shifts a single-day test cannot see.</p>');
+
+  SELECT MAX(day_dt) INTO v_win_hi FROM capd_cpu_daily;
+  v_strip_n := 0;
+  IF v_win_hi IS NOT NULL THEN
+    v_win_lo := v_win_hi - anomaly_days;
+    v_xmin := v_win_lo - c_epoch; v_xmax := v_win_hi - c_epoch;
+    FOR ln IN (
+      SELECT con_dbid, db_pdb, COUNT(*) AS n_all,
+             SUM(CASE WHEN anomaly_flag = 'HIGH' THEN 1 ELSE 0 END) AS n_hi,
+             SUM(CASE WHEN anomaly_flag = 'LOW'  THEN 1 ELSE 0 END) AS n_lo,
+             MAX(busy_pct) AS max_busy
+      FROM   capr_cpu_anomalies
+      WHERE  days_ago < anomaly_days
+      GROUP  BY con_dbid, db_pdb
+      ORDER  BY n_all DESC, con_dbid
+    ) LOOP
+      v_strip_n := v_strip_n + 1;
+      IF v_strip_n = 1 THEN p('<div class="strips">'); END IF;
+      p('<div class="strip"><div class="sl"><b>Host CPU</b>' || CASE WHEN v_con_count > 1 THEN ' <span class="dim">' || esc(ln.db_pdb) || '</span>' END
+        || '<span>' || CASE WHEN ln.n_hi > 0 THEN TO_CHAR(ln.n_hi, 'FM990') || ' busier' END
+        || CASE WHEN ln.n_hi > 0 AND ln.n_lo > 0 THEN ' &middot; ' END
+        || CASE WHEN ln.n_lo > 0 THEN TO_CHAR(ln.n_lo, 'FM990') || ' quieter' END
+        || ' &middot; busiest ' || TO_CHAR(ln.max_busy, 'FM990') || '%</span></div>');
+      strip_open(v_xmin, v_xmax);
+      FOR a IN (SELECT day_dt, day_str, busy_pct, median_pct, z, anomaly_flag FROM capr_cpu_anomalies
+                WHERE con_dbid = ln.con_dbid AND days_ago < anomaly_days) LOOP
+        v_tip := a.day_str || ': ' || TO_CHAR(a.busy_pct, 'FM990') || '% busy vs the usual '
+                 || TO_CHAR(a.median_pct, 'FM990') || '% for that weekday, robust z ' || TO_CHAR(a.z, 'FM99990.0');
+        p('<circle class="' || CASE WHEN a.anomaly_flag = 'HIGH' THEN 'sd-hi' ELSE 'sd-lo' END
+          || '" cx="' || fmt_px(lin(a.day_dt - c_epoch, v_xmin, v_xmax, 4, 596)) || '" cy="15" r="'
+          || fmt_px(3.5 + LEAST(4, ABS(NVL(a.z, 0)) / 3)) || '"><title>' || esc(v_tip) || '</title></circle>');
+      END LOOP;
+      p('</svg></div>');
+    END LOOP;
+    IF v_strip_n > 0 THEN
+      p('<div class="strip-axis"><div></div><div><span>' || dfmt(v_win_lo + 1) || '</span><span>'
+        || dfmt(v_win_lo + FLOOR(anomaly_days / 2)) || '</span><span>' || dfmt(v_win_hi) || '</span></div></div>');
+      p('</div>');
+    END IF;
+  END IF;
 
   any_rows := FALSE;
   FOR r IN (
-    SELECT db_pdb,
-           day_str AS day_dt,
-           busy_pct,
-           median_pct,
-           threshold_pct,
-           z,
-           anomaly_flag
+    SELECT db_pdb, day_str AS day_dt, busy_pct, median_pct, threshold_pct, z, anomaly_flag
     FROM   capr_cpu_anomalies
     WHERE  days_ago < anomaly_days
     ORDER  BY days_ago, con_dbid
   ) LOOP
     IF NOT any_rows THEN
+      p('<details class="fold"><summary>The numbers behind every dot</summary><div class="fold-body">');
       p('<div class="tscroll">');
       p('<table class="tbl"><thead><tr>'
         || '<th>DB/PDB</th><th>Day' || info_icon('CAPR column: DAY_DT')
@@ -2584,19 +2908,19 @@ BEGIN
         || '</th><th>Flag' || info_icon('CAPR column: ANOMALY_FLAG') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
-    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || r.day_dt || '</td>'
+    p('<tr><td>' || esc(r.db_pdb) || '</td><td style="white-space:nowrap">' || r.day_dt || '</td>'
       || '<td class="num">' || nz(r.busy_pct, 'FM9990.00') || '</td>'
       || '<td class="num">' || nz(r.median_pct, 'FM9990.00') || '</td>'
       || '<td class="num">' || nz(r.threshold_pct, 'FM9990.00') || '</td>'
       || '<td class="num' || (CASE WHEN ABS(NVL(r.z,0)) >= 3 THEN ' z-hi' ELSE '' END) || '">'
          || nz(r.z, 'FM99990.0') || '</td>'
-      || '<td class="sev-crit">' || esc(r.anomaly_flag) || '</td></tr>');
+      || '<td class="' || CASE WHEN r.anomaly_flag = 'HIGH' THEN 'sev-crit' ELSE 'sev-ok' END || '">' || esc(r.anomaly_flag) || '</td></tr>');
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
-    p('</div>');  -- .tscroll
+    p('</div></div></details>');
   ELSE
-    p('<div class="empty-note">No anomalies flagged in the selected window.</div>');
+    p('<div class="glance-ok">No unusual CPU days in the last ' || TO_CHAR(anomaly_days, 'FM999990') || ' days.</div>');
   END IF;
 
   -- 5b: level shifts (M10.3). A different question from 5a -- not "was one
@@ -2654,7 +2978,7 @@ BEGIN
   -- 06_esm_compare.sql / 06_esm_skip.sql)
   ----------------------------------------------------------------------
   p('<section id="s6">');
-  p('<h2>6. Tier 2 (ESM) vs Tier 1 (REGR) '
+  p('<h2>6. Tier 2 vs Tier 1 at +30 days '
       || info_icon('Tier 1 fits a straight line through recent history; Tier 2 is an Oracle ML model that also learns weekly patterns -- trust Tier 2 for the next 30 days when both exist, Tier 1 for further out')
       || '</h2>');
 
@@ -2664,147 +2988,64 @@ BEGIN
         || 'Run <code>EXEC cap_forecast_ml.train_all</code> then re-run the report (or set '
         || 'show_esm=&#39;Y&#39; to force the (empty) table).</p>');
   ELSE
-    p('<p class="desc">A second opinion on the short-term forecast from a machine-learning model. '
-        || esm_ok || ' OML ESM model(s) trained (OK). If 0: run '
-        || '<code>EXEC cap_forecast_ml.train_all</code>. ESM reaches +30 only (19c hard horizon '
-        || 'cap) and only for fresh models; +90/180/365 are REGR-only. ESM_MODEL names the '
-        || 'variant behind each ESM column: HOLT = EXSM_HOLT, ADDW = EXSM_ADDWINTERS with a '
-        || '7-day season.</p>');
+    p('<p class="desc">A second opinion on the next 30 days from an Oracle ML model (ESM), beside the straight-line '
+        || 'forecast (REGR), with the holdout backtest that says which engine was right over the last '
+        || 'few weeks. ' || esm_ok || ' OML ESM model(s) trained. ESM reaches +30 only on 19c; the +90 / +180 / +365 '
+        || 'numbers in section 2 are REGR-only. HOLT = EXSM_HOLT, ADDW = EXSM_ADDWINTERS with a 7-day season.</p>');
 
-    -- 6a carries the SAME M7.4 bound as section 2 (inherited by
-    -- CAPR_ESM_COMPARE from CAPR_TBSPC_FORECAST), so both sections list the
-    -- same tablespaces. 6b's CPU rows are never bounded.
-    p('<h3 style="font-size:13px;margin:16px 0 6px">6a. Tablespaces (GiB) '
-      || '<span style="font-weight:400;color:var(--muted);font-size:12px">(the same '
-      || v_ts_shown || ' of ' || v_ts_all || ' as section 2)</span></h3>');
     any_rows := FALSE;
     FOR r IN (
-      SELECT db_pdb, series_key, horizon_days AS h,
-             regr_gb   AS regr,
-             esm_gb    AS esm,
-             esm_lo_gb AS esm_lo,
-             esm_hi_gb AS esm_hi,
-             esm_model
-      FROM   capr_esm_compare
-      WHERE  series_kind = 'TBSPC'
-        AND  is_reportable = 'Y'
-        AND  rank_report <= top_n
-      ORDER  BY rank_report, horizon_days
+      SELECT c.db_pdb, c.series_kind, c.series_key, c.con_dbid,
+             CASE WHEN c.series_kind = 'TBSPC' THEN c.regr_gb   ELSE c.regr   END AS regr,
+             CASE WHEN c.series_kind = 'TBSPC' THEN c.esm_gb    ELSE c.esm    END AS esm,
+             CASE WHEN c.series_kind = 'TBSPC' THEN c.esm_lo_gb ELSE c.esm_lo END AS esm_lo,
+             CASE WHEN c.series_kind = 'TBSPC' THEN c.esm_hi_gb ELSE c.esm_hi END AS esm_hi,
+             c.esm_model, c.rank_report,
+             b.regr_mape, b.esm_mape, b.better, b.esm_pick
+      FROM   capr_esm_compare c
+      LEFT   JOIN capr_backtest b
+        ON   b.dbid = c.dbid AND b.con_dbid = c.con_dbid AND b.series_kind = c.series_kind AND b.series_key = c.series_key
+      WHERE  c.horizon_days = 30
+        AND  (c.series_kind = 'CPU' OR (c.is_reportable = 'Y' AND c.rank_report <= top_n))
+        AND  (c.series_kind = 'TBSPC' OR c.series_key IN ('BUSY_PCT', 'BUSY_P95', 'DB_CPU_SEC', 'DB_CPU_PCT'))
+      ORDER  BY CASE c.series_kind WHEN 'TBSPC' THEN 0 ELSE 1 END, NVL(c.rank_report, 999), c.con_dbid, c.series_key
     ) LOOP
       IF NOT any_rows THEN
         p('<div class="tscroll">');
         p('<table class="tbl"><thead><tr>'
-          || '<th>DB/PDB</th><th>Tablespace' || info_icon('CAPR column: SERIES_KEY')
-          || '</th><th class="num">Horizon (days)' || info_icon('CAPR column: HORIZON_DAYS')
-          || '</th><th class="num">REGR (GiB)' || info_icon('CAPR column: REGR_GB')
-          || '</th><th class="num">ESM (GiB)' || info_icon('CAPR column: ESM_GB')
-          || '</th><th class="num">ESM low' || info_icon('CAPR column: ESM_LO_GB')
-          || '</th><th class="num">ESM high' || info_icon('CAPR column: ESM_HI_GB')
-          || '</th><th>ESM model' || info_icon('CAPR column: ESM_MODEL') || '</th></tr></thead><tbody>');
-        any_rows := TRUE;
-      END IF;
-      p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.series_key) || '</td>'
-        || '<td class="num">' || nz(r.h, 'FM9990') || '</td>'
-        || '<td class="num">' || nz(r.regr) || '</td>'
-        || '<td class="num">' || nz(r.esm) || '</td>'
-        || '<td class="num">' || nz(r.esm_lo) || '</td>'
-        || '<td class="num">' || nz(r.esm_hi) || '</td>'
-        || '<td>' || NVL(esc(r.esm_model), '&ndash;') || '</td></tr>');
-    END LOOP;
-    IF any_rows THEN
-      p('</tbody></table>');
-      p('</div>');  -- .tscroll
-    ELSE
-      p('<div class="empty-note">No tablespace ESM/REGR comparison rows found.</div>');
-    END IF;
-
-    p('<h3 style="font-size:13px;margin:16px 0 6px">6b. CPU (busy% / DB CPU sec)</h3>');
-    any_rows := FALSE;
-    FOR r IN (
-      SELECT db_pdb, series_key, horizon_days AS h, regr, esm, esm_lo, esm_hi,
-             esm_model
-      FROM   capr_esm_compare
-      WHERE  series_kind = 'CPU'
-      ORDER  BY con_dbid, series_key, horizon_days
-    ) LOOP
-      IF NOT any_rows THEN
-        p('<div class="tscroll">');
-        p('<table class="tbl"><thead><tr>'
-          || '<th>DB/PDB</th><th>Metric' || info_icon('CAPR column: SERIES_KEY')
-          || '</th><th class="num">Horizon (days)' || info_icon('CAPR column: HORIZON_DAYS')
-          || '</th><th class="num">REGR' || info_icon('CAPR column: REGR')
-          || '</th><th class="num">ESM' || info_icon('CAPR column: ESM')
-          || '</th><th class="num">ESM low' || info_icon('CAPR column: ESM_LO')
-          || '</th><th class="num">ESM high' || info_icon('CAPR column: ESM_HI')
-          || '</th><th>ESM model' || info_icon('CAPR column: ESM_MODEL') || '</th></tr></thead><tbody>');
-        any_rows := TRUE;
-      END IF;
-      p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.series_key) || '</td>'
-        || '<td class="num">' || nz(r.h, 'FM9990') || '</td>'
-        || '<td class="num">' || nz(r.regr, 'FM99999990.00') || '</td>'
-        || '<td class="num">' || nz(r.esm, 'FM99999990.00') || '</td>'
-        || '<td class="num">' || nz(r.esm_lo, 'FM99999990.00') || '</td>'
-        || '<td class="num">' || nz(r.esm_hi, 'FM99999990.00') || '</td>'
-        || '<td>' || NVL(esc(r.esm_model), '&ndash;') || '</td></tr>');
-    END LOOP;
-    IF any_rows THEN
-      p('</tbody></table>');
-      p('</div>');  -- .tscroll
-    ELSE
-      p('<div class="empty-note">No CPU ESM/REGR comparison rows found.</div>');
-    END IF;
-
-    ------------------------------------------------------------------
-    -- 6c. Backtest (M9.4): which engine was right over the held-out
-    -- window. Mirrors report/sections/06_esm_compare.sql exactly.
-    ------------------------------------------------------------------
-    p('<h3 style="font-size:13px;margin:16px 0 6px">6c. Backtest &mdash; which engine was right '
-      || info_icon('each engine forecast the recent held-out window from data before it; MAPE is the average percent miss vs what actually happened, BIAS above zero means it over-forecast. ESM column fills after EXEC cap_forecast_ml.train_backtest')
-      || '</h3>');
-    any_rows := FALSE;
-    FOR r IN (
-      SELECT db_pdb, series_kind, series_key, cutoff_day,
-             regr_mape, regr_bias, esm_mape, esm_bias, better, esm_pick
-      FROM   capr_backtest
-      ORDER  BY con_dbid, series_kind, series_key
-    ) LOOP
-      IF NOT any_rows THEN
-        p('<div class="tscroll">');
-        p('<table class="tbl"><thead><tr>'
-          || '<th>DB/PDB</th><th>Kind' || info_icon('CAPR column: SERIES_KIND')
-          || '</th><th>Series' || info_icon('CAPR column: SERIES_KEY')
-          || '</th><th>Cutoff' || info_icon('the last day the engine was allowed to see before forecasting (CAPR column: CUTOFF_DAY)')
-          || '</th><th class="num">REGR MAPE %' || info_icon('CAPR column: REGR_MAPE')
-          || '</th><th class="num">REGR bias %' || info_icon('CAPR column: REGR_BIAS')
-          || '</th><th class="num">ESM MAPE %' || info_icon('CAPR column: ESM_MAPE')
-          || '</th><th class="num">ESM bias %' || info_icon('CAPR column: ESM_BIAS')
-          || '</th><th>Better' || info_icon('CAPR column: BETTER')
-          || '</th><th>ESM pick '
-          || info_icon('which ESM variant this series was trained with and why: '
-                    || 'H = the EXSM_HOLT candidate''s holdout MAPE, W = the '
-                    || 'EXSM_ADDWINTERS(7) candidate''s. AUTO keeps the lower one '
-                    || '(knobs esm_tbspc_model / esm_select_by_backtest) (CAPR column: ESM_PICK)')
+          || '<th>Series' || info_icon('tablespaces in GiB (the same ones as section 2), CPU metrics in their own unit (CAPR column: SERIES_KEY)')
+          || '</th><th class="num">REGR +30' || info_icon('straight-line projection 30 days out (CAPR column: REGR_GB / REGR)')
+          || '</th><th class="num">ESM +30' || info_icon('the Oracle ML forecast 30 days out (CAPR column: ESM_GB / ESM)')
+          || '</th><th class="num">ESM 95% band' || info_icon('CAPR columns: ESM_LO, ESM_HI')
+          || '</th><th class="num">Gap' || info_icon('ESM minus REGR as a percent of REGR; a large gap means the two engines disagree about the near future')
+          || '</th><th>ESM model' || info_icon('HOLT = trend only; ADDW = trend plus a 7-day season (CAPR column: ESM_MODEL)')
+          || '</th><th class="num">Backtest MAPE, REGR / ESM' || info_icon('average percent miss of each engine over the held-out window before today; lower is better (CAPR columns: REGR_MAPE, ESM_MAPE)')
+          || '</th><th>Right last month' || info_icon('which engine had the lower backtest error, and which ESM variant AUTO picked and why (CAPR columns: BETTER, ESM_PICK)')
           || '</th></tr></thead><tbody>');
         any_rows := TRUE;
       END IF;
-      p('<tr><td>' || esc(r.db_pdb) || '</td>'
-        || '<td>' || esc(r.series_kind) || '</td><td>' || esc(r.series_key) || '</td>'
-        || '<td>' || r.cutoff_day || '</td>'
-        || '<td class="num">' || nz(r.regr_mape, 'FM99990.00') || '</td>'
-        || '<td class="num">' || nz(r.regr_bias, 'FMS99990.00') || '</td>'
-        || '<td class="num">' || nz(r.esm_mape, 'FM99990.00') || '</td>'
-        || '<td class="num">' || nz(r.esm_bias, 'FMS99990.00') || '</td>'
+      v_gap_pct := CASE WHEN r.regr IS NOT NULL AND r.esm IS NOT NULL AND r.regr <> 0 THEN 100 * (r.esm - r.regr) / ABS(r.regr) END;
+      p('<tr><td><b>' || esc(r.series_key) || '</b>' || CASE WHEN v_con_count > 1 OR r.series_kind = 'CPU' THEN ' <span class="dim">' || esc(r.db_pdb) || '</span>' END || '</td>'
+        || '<td class="num">' || nz(r.regr, CASE WHEN r.series_kind = 'TBSPC' THEN 'FM999999990.0' ELSE 'FM99999990.00' END) || '</td>'
+        || '<td class="num">' || CASE WHEN r.esm IS NULL THEN '<span class="na">no model</span>'
+                                      ELSE nz(r.esm, CASE WHEN r.series_kind = 'TBSPC' THEN 'FM999999990.0' ELSE 'FM99999990.00' END) END || '</td>'
+        || '<td class="num dim">' || CASE WHEN r.esm_lo IS NULL THEN '&ndash;'
+                                          ELSE nz(r.esm_lo, CASE WHEN r.series_kind = 'TBSPC' THEN 'FM999999990.0' ELSE 'FM99999990.00' END)
+                                               || ' &ndash; ' || nz(r.esm_hi, CASE WHEN r.series_kind = 'TBSPC' THEN 'FM999999990.0' ELSE 'FM99999990.00' END) END || '</td>'
+        || '<td class="num' || CASE WHEN ABS(v_gap_pct) >= 10 THEN ' gap-hi' END || '">'
+        || CASE WHEN v_gap_pct IS NULL THEN '&ndash;' ELSE CASE WHEN v_gap_pct >= 0 THEN '+' END || TO_CHAR(v_gap_pct, 'FM9990.0') || '%' END || '</td>'
+        || '<td>' || NVL(esc(r.esm_model), '&ndash;') || '</td>'
+        || '<td class="num">' || CASE WHEN r.regr_mape IS NULL THEN '&ndash;' ELSE nz(r.regr_mape, 'FM99990.00') END
+        || ' / ' || CASE WHEN r.esm_mape IS NULL THEN '&ndash;' ELSE nz(r.esm_mape, 'FM99990.00') END || '</td>'
         || '<td>' || CASE WHEN r.better IS NULL THEN '&ndash;'
-                          ELSE '<span class="pill pill-ok">' || r.better || '</span>' END
-        || '</td>'
-        || '<td>' || NVL(esc(r.esm_pick), '&ndash;') || '</td></tr>');
+                          ELSE '<span class="win' || CASE WHEN r.better = 'REGR' THEN ' r' END || '">' || r.better || '</span>' END
+        || CASE WHEN r.esm_pick IS NOT NULL THEN ' <span class="dim">' || esc(r.esm_pick) || '</span>' END || '</td></tr>');
     END LOOP;
     IF any_rows THEN
       p('</tbody></table>');
       p('</div>');  -- .tscroll
     ELSE
-      p('<div class="empty-note">No backtest rows yet (needs enough history before the holdout window; '
-        || 'ESM rows appear after <code>EXEC cap_forecast_ml.train_backtest</code>).</div>');
+      p('<div class="empty-note">No ESM/REGR comparison rows found.</div>');
     END IF;
   END IF;
   p('</section>');
@@ -2818,7 +3059,7 @@ BEGIN
   p('<h2>7. Fixed-ceiling series '
       || info_icon('peak processes and sessions against the init parameters, redo written per day, and total database size against the summed tablespace ceilings')
       || '</h2>');
-  p('<p class="desc">Series with a hard ceiling that is not a tablespace. '
+  p('<p class="desc">Series with a hard ceiling that is not a tablespace; a dash in Days to limit means no crossing at the current trend. '
       || 'PROCESSES / SESSIONS are the AWR peak-concurrency high-water marks against the '
       || 'init parameter (summed over RAC instances); DB_SIZE_GB is total permanent-tablespace '
       || 'usage against the sum of the same tablespaces&#39; ceilings; REDO_GB_DAY has no ceiling '
@@ -2841,7 +3082,7 @@ BEGIN
         || '</th><th class="num">Limit' || info_icon('CAPR column: CUR_LIMIT')
         || '</th><th class="num">Sat'
         || info_icon('the fraction of the limit treated as saturated -- the level Days to limit counts down to (CAPR column: SAT_VALUE)')
-        || '</th><th class="num">% of limit' || info_icon('CAPR column: PCT_OF_LIMIT')
+        || '</th><th>Fill' || info_icon('current value as a percent of the limit (CAPR column: PCT_OF_LIMIT)')
         || '</th><th class="num">Slope/day' || info_icon('CAPR column: SLOPE_PER_DAY')
         || '</th><th class="num">R2</th>'
         || '<th class="num">Days to limit' || info_icon('CAPR column: DAYS_TO_LIMIT')
@@ -2851,15 +3092,16 @@ BEGIN
         || '</th><th>Quality' || info_icon('CAPR column: QUALITY') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
-    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.series) || '</td>'
+    p('<tr' || row_cls(r.sev) || '><td>' || esc(r.db_pdb) || '</td><td><b>' || esc(r.series) || '</b></td>'
       || '<td>' || esc(r.unit) || '</td>'
       || '<td class="num">' || nz(r.cur_val) || '</td>'
       || '<td class="num">' || nz(r.cur_limit) || '</td>'
       || '<td class="num">' || nz(r.sat_value) || '</td>'
-      || '<td class="num">' || nz(r.pct_of_limit, 'FM9990.0') || '</td>'
+      || '<td>' || CASE WHEN r.pct_of_limit IS NULL THEN '&ndash;'
+                     ELSE bar(r.pct_of_limit, CASE r.sev WHEN 'CRIT' THEN 'crit' WHEN 'WARN' THEN 'warn' ELSE '' END) END || '</td>'
       || '<td class="num">' || nz(r.slope_per_day, 'FM999999990.0000') || '</td>'
-      || '<td class="num">' || nz(r.r2, 'FM90.999') || '</td>'
-      || '<td class="num">' || dtf_cell(r.days_to_limit, r.quality, 'FM99999990') || '</td>'
+      || '<td class="num">' || nz(r.r2, 'FM90.000') || '</td>'
+      || '<td class="num">' || CASE WHEN r.days_to_limit IS NULL THEN '&mdash;' ELSE TO_CHAR(r.days_to_limit, 'FM99999990') END || '</td>'
       || '<td class="num">' || nz(r.limit_worst, 'FM99999990') || '</td>'
       || '<td class="num">' || nz(r.limit_best, 'FM99999990') || '</td>'
       || '<td>' || sev_pill(r.sev) || '</td>'
@@ -2880,6 +3122,13 @@ BEGIN
   p('<footer>End of report -- read-only run, no database objects created or modified. '
       || 'Written to reports/' || cap_file || '</footer>');
   p('</div>');
+  -- Theme toggle: the only script in the document. It stamps data-theme on
+  -- the root (the CSS tokens above react to it) and remembers the choice in
+  -- localStorage; without it the page follows the OS preference.
+  p('<script>(function(){var r=document.documentElement,k="cap-theme";try{var t=localStorage.getItem(k);if(t){r.setAttribute("data-theme",t);}}catch(e){}'
+    || 'var b=document.getElementById("themeBtn");if(b){b.onclick=function(){var c=r.getAttribute("data-theme");'
+    || 'var d=c?c==="dark":window.matchMedia("(prefers-color-scheme: dark)").matches;var n=d?"light":"dark";'
+    || 'r.setAttribute("data-theme",n);try{localStorage.setItem(k,n);}catch(e){}};}})();</script>');
   p('</body></html>');
 END;
 /
