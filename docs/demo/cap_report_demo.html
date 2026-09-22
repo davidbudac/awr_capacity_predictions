@@ -1,0 +1,1013 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AWR Capacity Report - ECOMPRD</title>
+<style>
+:root{
+--bg:#f5f6f8; --panel:#ffffff; --text:#1b2430; --muted:#5b6675; --border:#dde2e8;
+--crit:#c0392b; --crit-bg:#fdecea; --warn:#b7791f; --warn-bg:#fef6e7;
+--ok:#1e7e46; --ok-bg:#eaf6ee; --flat-bg:#eef0f3; --flat-fg:#5b6675;
+--accent:#2b5fad; --bar-track:#e7eaef; --bar-fill:#2b5fad; --bar-crit:#c0392b; --bar-warn:#b7791f;
+}
+@media (prefers-color-scheme: dark){ :root{
+--bg:#12151a; --panel:#1a1e25; --text:#e6e9ee; --muted:#96a0ad; --border:#2b313b;
+--crit:#ff6b5e; --crit-bg:#3a201d; --warn:#e0b04c; --warn-bg:#3a2f18;
+--ok:#5fd489; --ok-bg:#173424; --flat-bg:#242830; --flat-fg:#96a0ad;
+--accent:#7aa2e8; --bar-track:#2a2f37; --bar-fill:#7aa2e8; --bar-crit:#ff6b5e; --bar-warn:#e0b04c;
+}}
+:root[data-theme="dark"]{
+--bg:#12151a; --panel:#1a1e25; --text:#e6e9ee; --muted:#96a0ad; --border:#2b313b;
+--crit:#ff6b5e; --crit-bg:#3a201d; --warn:#e0b04c; --warn-bg:#3a2f18;
+--ok:#5fd489; --ok-bg:#173424; --flat-bg:#242830; --flat-fg:#96a0ad;
+--accent:#7aa2e8; --bar-track:#2a2f37; --bar-fill:#7aa2e8; --bar-crit:#ff6b5e; --bar-warn:#e0b04c;
+}
+:root[data-theme="light"]{
+--bg:#f5f6f8; --panel:#ffffff; --text:#1b2430; --muted:#5b6675; --border:#dde2e8;
+--crit:#c0392b; --crit-bg:#fdecea; --warn:#b7791f; --warn-bg:#fef6e7;
+--ok:#1e7e46; --ok-bg:#eaf6ee; --flat-bg:#eef0f3; --flat-fg:#5b6675;
+--accent:#2b5fad; --bar-track:#e7eaef; --bar-fill:#2b5fad; --bar-crit:#c0392b; --bar-warn:#b7791f;
+}
+*{box-sizing:border-box} html,body{margin:0;padding:0}
+body{background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; font-size:14px; line-height:1.5;}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px 60px}
+nav.topnav{position:sticky; top:0; z-index:10; background:var(--panel); border-bottom:1px solid var(--border); padding:10px 20px; display:flex; gap:4px; flex-wrap:wrap; align-items:center;}
+nav.topnav a{color:var(--muted); text-decoration:none; font-size:12.5px; padding:6px 10px; border-radius:6px;}
+nav.topnav a:hover{background:var(--flat-bg); color:var(--text)}
+nav.topnav .brand{font-weight:700;color:var(--text);margin-right:12px;font-size:13px}
+.card{background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:18px 20px; margin:20px 0;}
+.header-card h1{margin:0 0 4px;font-size:22px}
+.header-card .sub{color:var(--muted);font-size:12.5px;margin-bottom:14px}
+.kv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px 24px}
+.kv-grid .kv dt{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.kv-grid .kv dd{margin:2px 0 0;font-size:13.5px;font-variant-numeric:tabular-nums}
+.note{margin-top:14px;padding:10px 12px;border-radius:8px;background:var(--flat-bg);color:var(--muted); font-size:12.5px;border-left:3px solid var(--warn);}
+section{scroll-margin-top:56px;margin:26px 0}
+section h2{font-size:17px;margin:0 0 4px;display:flex;align-items:center;gap:8px}
+section .desc{color:var(--muted);font-size:12.5px;margin:0 0 12px}
+table{width:100%;border-collapse:collapse;font-size:13px;background:var(--panel)}
+table.tbl{border:1px solid var(--border);border-radius:8px;overflow:visible}
+.tscroll{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
+.tscroll>table{min-width:100%}
+thead th{text-align:left;background:var(--flat-bg);color:var(--muted);font-weight:600; font-size:12px;letter-spacing:.03em;padding:8px 10px;border-bottom:1px solid var(--border);overflow:visible}
+table.tbl thead tr:first-child th:first-child{border-top-left-radius:8px}
+table.tbl thead tr:first-child th:last-child{border-top-right-radius:8px}
+table.tbl tbody tr:last-child td:first-child{border-bottom-left-radius:8px}
+table.tbl tbody tr:last-child td:last-child{border-bottom-right-radius:8px}
+tbody td{padding:7px 10px;border-bottom:1px solid var(--border);overflow:visible}
+tbody tr:last-child td{border-bottom:none}
+tbody tr:hover td{background:var(--flat-bg)}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+.pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600}
+.pill-ok{background:var(--ok-bg);color:var(--ok)}
+.pill-warn{background:var(--warn-bg);color:var(--warn)}
+.pill-crit{background:var(--crit-bg);color:var(--crit)}
+.pill-flat{background:var(--flat-bg);color:var(--flat-fg)}
+.sev-crit{color:var(--crit);font-weight:700}
+.sev-warn{color:var(--warn);font-weight:700}
+.sev-ok{color:var(--ok);font-weight:600}
+.bar-cell{display:flex;align-items:center;gap:8px;min-width:140px}
+.bar-track{flex:1;height:8px;border-radius:4px;background:var(--bar-track);overflow:hidden}
+.bar-fill{height:100%;border-radius:4px;background:var(--bar-fill)}
+.bar-fill.warn{background:var(--bar-warn)}
+.bar-fill.crit{background:var(--bar-crit)}
+.bar-pct{font-size:12px;color:var(--muted);width:38px;text-align:right;font-variant-numeric:tabular-nums}
+.z-hi{color:var(--crit);font-weight:700}
+.na{color:var(--muted);font-style:italic}
+.empty-note{color:var(--muted);font-style:italic;padding:12px;background:var(--flat-bg);border-radius:8px;font-size:12.5px}
+tr:target{outline:2px solid var(--warn)}
+.used-limit{display:flex;flex-direction:column;gap:3px;min-width:150px}
+.used-limit .ul-text{font-size:12px;color:var(--text);font-variant-numeric:tabular-nums}
+.diag{margin:10px 0 6px;border:1px solid var(--border);border-radius:10px;background:var(--panel);font-size:12.5px}
+.diag>summary{cursor:pointer;padding:10px 14px;font-weight:600;color:var(--text);list-style:none}
+.diag>summary::-webkit-details-marker{display:none}
+.diag>summary::before{content:"+ ";color:var(--muted);font-weight:700}
+.diag[open]>summary::before{content:"- "}
+.diag .diag-body{padding:0 14px 12px}
+.diag table.tbl{margin:0}
+footer{margin-top:40px;padding:16px 0;border-top:1px solid var(--border);color:var(--muted);font-size:12px;text-align:center}
+@media print{ nav.topnav{position:static} .card,table.tbl{break-inside:avoid} body{background:#fff;color:#000} .info .tip{display:none} }
+.info{position:relative;display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;margin-left:4px;border:1px solid var(--muted);border-radius:50%;color:var(--muted);font:italic 700 9px/1 Georgia,"Times New Roman",serif;text-transform:none;letter-spacing:0;cursor:help;vertical-align:middle;user-select:none}
+.info:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.info .tip{position:absolute;left:50%;top:calc(100% + 7px);transform:translateX(-50%);width:max-content;max-width:260px;background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,.20);padding:7px 10px;font:400 12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;text-transform:none;letter-spacing:normal;text-align:left;white-space:normal;display:none;pointer-events:none;z-index:60}
+.info:hover .tip,.info:focus .tip,.info:focus-visible .tip{display:block}
+.glossary{margin:18px 0 6px;border:1px solid var(--border);border-radius:10px;background:var(--panel);font-size:12.5px}
+.glossary>summary{cursor:pointer;padding:12px 16px;font-weight:600;color:var(--text);list-style:none}
+.glossary>summary::-webkit-details-marker{display:none}
+.glossary>summary::before{content:"+ ";color:var(--muted);font-weight:700}
+.glossary[open]>summary::before{content:"- "}
+.glossary .gl-body{padding:0 16px 14px}
+.glossary dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}
+.glossary dt{font-weight:700;color:var(--text);white-space:nowrap}
+.glossary dd{margin:0;color:var(--muted)}
+@media(max-width:640px){.glossary dl{grid-template-columns:1fr;gap:2px 0} .glossary dt{margin-top:6px}}
+.report-details{margin:14px 0 0;border:1px solid var(--border);border-radius:10px;background:var(--panel);font-size:12.5px}
+.report-details>summary{cursor:pointer;padding:12px 16px;font-weight:600;color:var(--text);list-style:none}
+.report-details>summary::-webkit-details-marker{display:none}
+.report-details>summary::before{content:"+ ";color:var(--muted);font-weight:700}
+.report-details[open]>summary::before{content:"- "}
+.report-details .rd-body{padding:4px 16px 14px}
+.chart-legend{display:flex;flex-wrap:wrap;gap:16px;font-size:11.5px;color:var(--muted);margin:10px 0 6px;align-items:center}
+.chart-legend .lg-item{display:inline-flex;align-items:center;gap:5px}
+.chart-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(420px,100%),1fr));gap:16px;margin:6px 0 20px}
+.chart-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px 14px 8px}
+.chart-card h4{margin:0 0 2px;font-size:13px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.chart-sub{color:var(--muted);font-size:12px;margin:0 0 6px}
+.chart-svg{width:100%;height:auto;display:block}
+.axis-line{stroke:var(--border);stroke-width:1}
+.grid-line{stroke:var(--border);stroke-width:1;stroke-dasharray:2 3;opacity:.6}
+.axis-label{fill:var(--muted);font-size:11px}
+.thresh-label{fill:var(--warn);font-size:11px}
+.hist-line{fill:none;stroke:var(--accent);stroke-width:1.8;stroke-linejoin:round}
+.hist-line-pt{fill:var(--accent)}
+.proj-line{fill:none;stroke:var(--accent);stroke-width:1.6;stroke-dasharray:5 4;opacity:.85}
+.proj-line-pt{fill:var(--accent)}
+.esm-line{stroke:var(--ok);stroke-width:1.4}
+.esm-dot{fill:var(--ok)}
+.limit-line{stroke:var(--crit);stroke-width:1.2;stroke-dasharray:3 3}
+.thresh-line{stroke:var(--warn);stroke-width:1.2;stroke-dasharray:3 3}
+.anom-dot{fill:var(--crit);stroke:var(--panel);stroke-width:0.6}
+.glance-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px;margin:10px 0 8px}
+.gcard{background:var(--panel);border:1px solid var(--border);border-left-width:4px;border-radius:10px;padding:14px 16px;display:flex;flex-direction:column;gap:5px}
+.gcard.g-crit{border-left-color:var(--crit)}
+.gcard.g-warn{border-left-color:var(--warn)}
+.gcard.g-ok{border-left-color:var(--ok)}
+.gcard .g-head{margin:0;font-size:14px;font-weight:700;line-height:1.35;display:flex;flex-wrap:wrap;align-items:baseline;gap:8px}
+.gcard .g-line{color:var(--muted);font-size:12.5px}
+.gcard .g-date{color:var(--text);font-size:12.5px;font-variant-numeric:tabular-nums}
+.glance-rollup{color:var(--muted);font-size:12.5px;margin:2px 0 16px;line-height:1.6}
+.glance-ok{background:var(--ok-bg);color:var(--ok);border:1px solid var(--ok);border-radius:10px;padding:14px 16px;font-size:13.5px;font-weight:600;margin:10px 0 6px}
+.glance-warn{background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn);border-radius:10px;padding:14px 16px;font-size:13.5px;margin:10px 0 6px}
+.glance-crit{background:var(--crit-bg);color:var(--crit);border:1px solid var(--crit);border-radius:10px;padding:14px 16px;font-size:13.5px;margin:10px 0 6px}
+.attn-lead{font-weight:700}
+.attn-list{margin:8px 0 0;padding-left:22px;font-weight:400;line-height:1.55}
+.attn-list li{margin:2px 0}
+.attn-note{margin-top:8px;font-weight:400;font-size:12.5px;opacity:.85}
+.glance-banner{margin:10px 0 8px}
+.glance-line-label{font-size:11px;font-weight:700;letter-spacing:.04em;color:var(--muted);margin:12px 0 4px}
+.glance-banner .glance-line-label:first-child{margin-top:0}
+.glance-cov{background:var(--flat-bg);color:var(--muted);border:1px solid var(--border);border-radius:10px;padding:12px 16px;font-size:13px}
+.evidence{margin-left:6px;font-size:12px;font-weight:600;color:var(--accent);text-decoration:none;white-space:nowrap}
+.evidence:hover,.evidence:focus{text-decoration:underline}
+.timeline-card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:14px 16px 10px;margin:6px 0 8px}
+.timeline-svg{width:100%;height:auto;display:block}
+.tl-baseline{stroke:var(--border);stroke-width:1}
+.tl-grid{stroke:var(--border);stroke-width:1;stroke-dasharray:2 3;opacity:.5}
+.tl-lane-label{fill:var(--muted);font-size:11px}
+.tl-axis-label{fill:var(--muted);font-size:11px}
+.hero-duo{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(430px,100%),1fr));gap:14px;margin:10px 0 8px}
+.g-hero{gap:6px}
+.g-hero .g-head{font-size:16px}
+.g-hero .hero-svg{width:100%;height:auto;display:block;margin-top:8px}
+</style>
+</head><body>
+<nav class="topnav">
+<span class="brand">AWR Capacity Report</span>
+<a href="#s0">At a glance</a>
+<a href="#s1">1. Days-to-full</a>
+<a href="#s2">2. Forecast</a>
+<a href="#s3">3. Tbspc anomalies</a>
+<a href="#s4">4. CPU trend</a>
+<a href="#s5">5. CPU anomalies</a>
+<a href="#s6">6. ESM vs REGR</a>
+<a href="#s7">7. Fixed-ceiling series</a>
+</nav>
+<div class="wrap">
+<div class="card header-card">
+<h1>AWR Capacity Predictions</h1>
+<div class="sub">capacity + anomaly report -- read-only</div>
+<dl class="kv-grid">
+<div class="kv"><dt>Database</dt><dd>ECOMPRD</dd></div>
+<div class="kv"><dt>Host</dt><dd>db-prod-01.example.com</dd></div>
+<div class="kv"><dt>Generated</dt><dd>2026-09-22 12:44:02 +00:00</dd></div>
+</dl>
+<details class="report-details">
+<summary>Report details &amp; methodology</summary>
+<div class="rd-body">
+<dl class="kv-grid">
+<div class="kv"><dt>Schema</dt><dd>CAPMON</dd></div>
+<div class="kv"><dt>Thresholds</dt><dd>days-to-full WARN&lt;=90 CRIT&lt;=30; CPU saturation 80%</dd></div>
+<div class="kv"><dt>Tier 2 models</dt><dd>24 OML ESM model(s) trained (OK)</dd></div>
+</dl>
+<div class="note">NOTE: forecasts degrade loudly on short AWR retention -- watch TRAIN_N and QUALITY. INSUFFICIENT_HISTORY means fewer than the configured minimum training days; raise DBMS_WORKLOAD_REPOSITORY retention for real trends.</div>
+</div>
+</details>
+</div>
+<section id="s0">
+<h2>At a glance</h2>
+<p class="desc">The short version, in plain language: what is most likely to need attention, and anything unusual lately. The detailed tables and charts follow below.</p>
+<div class="glance-banner">
+<div class="glance-line-label">Capacity</div>
+<div class="glance-crit"><span class="attn-lead">Needs attention:</span>
+<ul class="attn-list">
+<li>AUDIT_TRAIL could be full in about 17 days <a class="evidence" href="#dtf-3141592654_AUDIT_TRAIL">View evidence &rarr;</a></li>
+<li>CUSTOMER_DATA (ECOMPRD/SHOP_PDB) is 95.0% full right now <a class="evidence" href="#nf-3141592654_CUSTOMER_DATA">View evidence &rarr;</a></li>
+<li>AUDIT_TRAIL (ECOMPRD/SHOP_PDB) is 92.0% full right now <a class="evidence" href="#nf-3141592654_AUDIT_TRAIL">View evidence &rarr;</a></li>
+</ul>
+<div class="attn-note">14 unusual days in the last 30 days -- see the timeline below.</div>
+</div>
+<div class="glance-line-label">Forecast coverage</div>
+<div class="glance-cov">Forecast coverage: 7 of 9 tablespace series rated OK; 2 FLAT, 0 LOW_CONFIDENCE, 0 INSUFFICIENT_HISTORY. Host CPU (ECOMPRD): a reliable estimate is available.</div>
+</div>
+<div class="hero-duo">
+<div class="gcard g-hero g-ok" id="dbhero-3141592653">
+<h4 class="g-head">Whole database (ECOMPRD) &mdash; growing about 0.9 GiB per month <span class="pill pill-ok">high confidence</span><span class="info" tabindex="0" role="note" aria-label="based on how closely past growth follows a straight line" title="based on how closely past growth follows a straight line">i<span class="tip">based on how closely past growth follows a straight line</span></span></h4>
+<div class="g-line">now using 13.6 GiB, likely around 19.0 GiB by March 2027</div>
+<div class="g-line">at this pace, the total allocated limit of 36.0 GiB would be reached around October 2028</div>
+<svg viewBox="0 0 560 250" class="hero-svg" role="img" aria-label="Whole database total size chart">
+<line class="grid-line" x1="48.00" y1="224.00" x2="546.00" y2="224.00"/>
+<text class="axis-label" x="2" y="227.00">0 GiB</text>
+<line class="grid-line" x1="48.00" y1="171.50" x2="546.00" y2="171.50"/>
+<text class="axis-label" x="2" y="174.50">10 GiB</text>
+<line class="grid-line" x1="48.00" y1="119.00" x2="546.00" y2="119.00"/>
+<text class="axis-label" x="2" y="122.00">20 GiB</text>
+<line class="grid-line" x1="48.00" y1="66.50" x2="546.00" y2="66.50"/>
+<text class="axis-label" x="2" y="69.50">30 GiB</text>
+<line class="grid-line" x1="48.00" y1="14.00" x2="546.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">40 GiB</text>
+<text class="axis-label" x="48.00" y="244.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="244.00" text-anchor="middle">2026-10-07</text>
+<text class="axis-label" x="546.00" y="244.00" text-anchor="end">2027-03-21</text>
+<line class="axis-line" x1="48.00" y1="224.00" x2="546.00" y2="224.00"/>
+<line class="axis-line" x1="48.00" y1="14.00" x2="48.00" y2="224.00"/>
+<line class="limit-line" x1="48.00" y1="37.03" x2="546.00" y2="37.03"/>
+<polyline class="hist-line" points="
+48.00,176.58 49.51,176.43 51.02,176.27 52.53,176.12 54.04,175.96 55.55,175.80 57.05,175.65 58.56,175.49 60.07,175.34 61.58,175.18 63.09,175.03 64.60,174.87 66.11,174.71 67.62,174.56 69.13,174.40 70.64,174.25 72.15,174.09 73.65,173.93 75.16,173.78 76.67,173.62 78.18,173.47 79.69,173.31 81.20,173.16 82.71,173.00 84.22,172.84 85.73,172.69 87.24,172.53 88.75,172.38 90.25,172.22 91.76,172.07 93.27,171.91 94.78,171.75 96.29,171.60 97.80,171.44 99.31,171.29 100.82,171.13 102.33,170.97 103.84,170.82 105.35,170.66 106.85,170.51 108.36,170.35 109.87,170.20 111.38,170.04 112.89,169.88 114.40,169.73 115.91,169.57 117.42,169.42 118.93,169.26 120.44,169.10 121.95,168.95 123.45,168.79 124.96,168.64 126.47,168.48 127.98,168.33 129.49,168.17 131.00,168.01 132.51,167.86 134.02,167.70 135.53,167.55 137.04,167.39 138.55,167.24 140.05,167.08 141.56,166.92 143.07,166.77 144.58,166.61 146.09,166.46 147.60,166.30 149.11,166.14 150.62,165.99 152.13,165.83 153.64,165.68 155.15,165.52 156.65,165.37 158.16,165.21 159.67,165.05 161.18,164.90 162.69,164.74 164.20,164.59 165.71,164.43 167.22,164.27 168.73,164.12 170.24,163.96 171.75,163.81 173.25,163.65 174.76,163.50 176.27,163.34 177.78,163.18 179.29,163.03 180.80,162.87 182.31,162.72 183.82,162.56 185.33,162.41 186.84,162.25 188.35,162.09 189.85,161.94 191.36,161.78 192.87,161.63 194.38,161.47 195.89,161.31 197.40,161.16 198.91,161.00 200.42,160.85 201.93,160.69 203.44,160.54 204.95,160.38 206.45,160.22 207.96,160.07 209.47,159.91 210.98,159.76 212.49,159.60 214.00,159.44 215.51,159.29 217.02,159.13 218.53,158.98 220.04,158.82 221.55,158.67 223.05,158.51 224.56,158.35 226.07,158.20 227.58,158.04 229.09,157.89 230.60,157.73 232.11,157.58 233.62,157.42 235.13,157.26 236.64,157.11 238.15,156.95 239.65,156.80 241.16,156.64 242.67,156.48 244.18,156.33 245.69,156.17 247.20,156.02 248.71,155.86 250.22,155.71 251.73,155.55 253.24,155.39 254.75,155.24 256.25,155.08 257.76,154.93 259.27,154.77 260.78,154.61 262.29,154.46 263.80,154.30 265.31,154.15 266.82,153.99
+268.33,153.84 269.84,153.68 271.35,153.52 272.85,153.37 274.36,153.21
+"/>
+<polyline class="proj-line" points="
+274.36,153.21 546.00,125.17
+"/>
+</svg>
+</div>
+<div class="gcard g-hero g-ok" id="dbhero-3141592654">
+<h4 class="g-head">Whole database (ECOMPRD/SHOP_PDB) &mdash; growing about 102.5 GiB per month <span class="pill pill-ok">high confidence</span><span class="info" tabindex="0" role="note" aria-label="based on how closely past growth follows a straight line" title="based on how closely past growth follows a straight line">i<span class="tip">based on how closely past growth follows a straight line</span></span></h4>
+<div class="g-line">now using 1.20 TiB, likely around 1.75 TiB by March 2027</div>
+<div class="g-line">at this pace, the total allocated limit of 1.86 TiB would be reached around April 2027</div>
+<svg viewBox="0 0 560 250" class="hero-svg" role="img" aria-label="Whole database total size chart">
+<line class="grid-line" x1="48.00" y1="224.00" x2="546.00" y2="224.00"/>
+<text class="axis-label" x="2" y="227.00">0 GiB</text>
+<line class="grid-line" x1="48.00" y1="171.50" x2="546.00" y2="171.50"/>
+<text class="axis-label" x="2" y="174.50">535 GiB</text>
+<line class="grid-line" x1="48.00" y1="119.00" x2="546.00" y2="119.00"/>
+<text class="axis-label" x="2" y="122.00">1070 GiB</text>
+<line class="grid-line" x1="48.00" y1="66.50" x2="546.00" y2="66.50"/>
+<text class="axis-label" x="2" y="69.50">1606 GiB</text>
+<line class="grid-line" x1="48.00" y1="14.00" x2="546.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">2141 GiB</text>
+<text class="axis-label" x="48.00" y="244.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="244.00" text-anchor="middle">2026-10-07</text>
+<text class="axis-label" x="546.00" y="244.00" text-anchor="end">2027-03-21</text>
+<line class="axis-line" x1="48.00" y1="224.00" x2="546.00" y2="224.00"/>
+<line class="axis-line" x1="48.00" y1="14.00" x2="48.00" y2="224.00"/>
+<line class="limit-line" x1="48.00" y1="37.03" x2="546.00" y2="37.03"/>
+<polyline class="hist-line" points="
+48.00,154.99 49.51,154.48 51.02,153.90 52.53,153.32 54.04,152.77 55.55,152.20 57.05,151.62 58.56,151.12 60.07,150.58 61.58,150.03 63.09,149.49 64.60,148.96 66.11,155.74 67.62,155.21 69.13,154.71 70.64,154.20 72.15,153.65 73.65,153.05 75.16,152.50 76.67,151.94 78.18,151.41 79.69,150.90 81.20,150.38 82.71,149.83 84.22,149.28 85.73,148.71 87.24,148.13 88.75,147.55 90.25,147.01 91.76,146.51 93.27,145.98 94.78,145.40 96.29,144.84 97.80,144.28 99.31,143.72 100.82,143.18 102.33,142.66 103.84,142.08 105.35,141.48 106.85,140.92 108.36,140.38 109.87,139.81 111.38,146.66 112.89,146.13 114.40,145.55 115.91,144.99 117.42,144.42 118.93,143.85 120.44,143.32 121.95,142.81 123.45,142.28 124.96,141.72 126.47,141.18 127.98,140.64 129.49,140.09 131.00,139.53 132.51,138.98 134.02,138.45 135.53,137.89 137.04,137.31 138.55,136.75 140.05,136.16 141.56,135.57 143.07,135.06 144.58,134.56 146.09,134.00 147.60,133.46 149.11,132.91 150.62,132.37 152.13,131.83 153.64,131.30 155.15,130.77 156.65,137.55 158.16,137.01 159.67,136.47 161.18,135.89 162.69,135.33 164.20,134.82 165.71,134.31 167.22,133.77 168.73,133.22 170.24,132.65 171.75,132.08 173.25,131.52 174.76,130.98 176.27,130.48 177.78,129.90 179.29,129.33 180.80,128.79 182.31,128.23 183.82,127.68 185.33,127.17 186.84,126.64 188.35,126.07 189.85,125.52 191.36,124.96 192.87,124.41 194.38,123.82 195.89,123.29 197.40,122.77 198.91,122.22 200.42,121.69 201.93,128.49 203.44,127.91 204.95,127.36 206.45,126.87 207.96,126.37 209.47,125.83 210.98,125.24 212.49,124.67 214.00,124.09 215.51,123.51 217.02,123.03 218.53,122.50 220.04,121.93 221.55,121.37 223.05,120.80 224.56,120.24 226.07,119.59 227.58,118.99 229.09,118.40 230.60,117.75 232.11,117.09 233.62,116.46 235.13,115.81 236.64,115.18 238.15,114.54 239.65,113.96 241.16,113.33 242.67,112.70 244.18,112.10 245.69,111.47 247.20,118.17 248.71,117.60 250.22,116.98 251.73,116.34 253.24,115.70 254.75,115.05 256.25,114.40 257.76,113.74 259.27,113.13 260.78,112.52 262.29,111.88 263.80,111.20 265.31,106.83 266.82,106.21
+268.33,105.57 269.84,104.99 271.35,104.36 272.85,103.72 274.36,103.08
+"/>
+<polyline class="proj-line" points="
+274.36,103.08 546.00,42.75
+"/>
+</svg>
+</div>
+<div class="gcard g-hero g-ok">
+<h4 class="g-head">Host CPU (ECOMPRD) &mdash; reaches 80% busy in about 6 months <span class="pill pill-flat">good confidence</span><span class="info" tabindex="0" role="note" aria-label="based on how closely past growth follows a straight line" title="based on how closely past growth follows a straight line">i<span class="tip">based on how closely past growth follows a straight line</span></span></h4>
+<div class="g-date">around March 2027</div>
+<div class="g-line">now at 54.4% busy</div>
+<svg viewBox="0 0 560 250" class="hero-svg" role="img" aria-label="Host CPU busy percent chart">
+<line class="grid-line" x1="48.00" y1="224.00" x2="546.00" y2="224.00"/>
+<text class="axis-label" x="2" y="227.00">0%</text>
+<line class="grid-line" x1="48.00" y1="171.50" x2="546.00" y2="171.50"/>
+<text class="axis-label" x="2" y="174.50">27%</text>
+<line class="grid-line" x1="48.00" y1="119.00" x2="546.00" y2="119.00"/>
+<text class="axis-label" x="2" y="122.00">54%</text>
+<line class="grid-line" x1="48.00" y1="66.50" x2="546.00" y2="66.50"/>
+<text class="axis-label" x="2" y="69.50">81%</text>
+<line class="grid-line" x1="48.00" y1="14.00" x2="546.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">108%</text>
+<text class="axis-label" x="48.00" y="244.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="244.00" text-anchor="middle">2026-08-23</text>
+<text class="axis-label" x="546.00" y="244.00" text-anchor="end">2026-12-21</text>
+<line class="axis-line" x1="48.00" y1="224.00" x2="546.00" y2="224.00"/>
+<line class="axis-line" x1="48.00" y1="14.00" x2="48.00" y2="224.00"/>
+<line class="thresh-line" x1="48.00" y1="68.44" x2="546.00" y2="68.44"/>
+<text class="thresh-label" x="544.00" y="65.44" text-anchor="end">sat 80%</text>
+<polyline class="hist-line" points="
+48.00,159.28 50.08,159.34 52.15,154.09 54.23,156.51 56.30,155.16 58.37,154.50 60.45,156.30 62.53,160.35 64.60,158.75 66.68,155.41 68.75,155.08 70.82,154.10 72.90,153.95 74.98,153.58 77.05,157.31 79.13,156.59 81.20,152.48 83.27,153.12 85.35,152.12 87.43,152.49 89.50,152.56 91.58,156.94 93.65,156.78 95.72,151.48 97.80,151.08 99.88,150.99 101.95,151.08 104.03,150.85 106.10,155.46 108.18,155.80 110.25,150.31 112.33,149.79 114.40,149.53 116.48,149.27 118.55,147.61 120.63,153.21 122.70,153.85 124.78,148.46 126.85,148.83 128.93,148.43 131.00,147.56 133.08,147.78 135.15,153.08 137.23,153.16 139.30,148.37 141.38,146.82 143.45,147.13 145.53,146.97 147.60,145.48 149.68,150.98 151.75,152.34 153.83,144.88 155.90,145.21 157.98,146.16 160.05,145.78 162.13,141.96 164.20,149.93 166.28,149.44 168.35,143.64 170.43,144.01 172.50,144.40 174.58,143.84 176.65,144.46 178.73,149.35 180.80,148.99 182.88,142.81 184.95,141.51 187.03,143.59 189.10,142.41 191.18,141.63 193.25,147.38 195.33,147.02 197.40,141.29 199.48,141.10 201.55,140.93 203.63,140.60 205.70,141.50 207.78,146.21 209.85,146.25 211.93,140.01 214.00,139.21 216.08,138.76 218.15,138.26 220.23,138.32 222.30,144.53 224.38,144.70 226.45,138.77 228.53,138.44 230.60,138.22 232.68,138.48 234.75,137.21 236.83,143.80 238.90,143.00 240.98,136.75 243.05,136.81 245.13,136.52 247.20,136.86 249.28,136.62 251.35,141.31 253.43,142.32 255.50,135.44 257.58,134.73 259.65,135.46 261.73,135.17 263.80,136.21 265.88,141.20 267.95,141.51 270.03,133.49 272.10,133.82 274.18,132.61 276.25,134.28 278.33,133.36 280.40,138.40 282.48,140.24 284.55,132.45 286.63,132.14 288.70,133.00 290.78,131.83 292.85,132.77 294.93,139.10 297.00,136.99 299.08,130.87 301.15,130.36 303.23,130.89 305.30,131.01 307.38,131.71 309.45,137.36 311.53,137.45 313.60,130.03 315.68,129.72 317.75,130.43 319.83,129.23 321.90,128.59 323.98,135.09 326.05,135.38 328.13,127.47 330.20,127.79 332.28,128.42 334.35,120.11 336.43,119.39 338.50,126.34 340.58,126.20 342.65,88.28 344.73,118.91 346.80,119.17
+348.88,119.22 350.95,118.96 353.03,124.53 355.10,125.09 357.18,117.97 359.25,118.14
+"/>
+<polyline class="proj-line" points="
+359.25,118.14 546.00,92.69
+"/>
+<circle class="anom-dot" cx="342.65" cy="88.28" r="3"/>
+</svg>
+</div>
+</div>
+<h3 style="font-size:13px;margin:18px 0 6px">Unusual activity in the last 30 days</h3>
+<div class="timeline-card">
+<svg viewBox="0 0 1120 142" class="timeline-svg" role="img" aria-label="Anomaly timeline">
+<line class="tl-grid" x1="1102.00" y1="10.00" x2="1102.00" y2="118.00"/>
+<line class="tl-grid" x1="881.27" y1="10.00" x2="881.27" y2="118.00"/>
+<line class="tl-grid" x1="660.53" y1="10.00" x2="660.53" y2="118.00"/>
+<line class="tl-grid" x1="439.80" y1="10.00" x2="439.80" y2="118.00"/>
+<line class="tl-grid" x1="219.07" y1="10.00" x2="219.07" y2="118.00"/>
+<text class="tl-axis-label" x="156.00" y="132.00" text-anchor="start">2026-08-23</text>
+<text class="tl-axis-label" x="629.00" y="132.00" text-anchor="middle">2026-09-07</text>
+<text class="tl-axis-label" x="1102.00" y="132.00" text-anchor="end">2026-09-22</text>
+<line class="tl-baseline" x1="156.00" y1="25.00" x2="1102.00" y2="25.00"/>
+<text class="tl-lane-label" x="6" y="28.00">AUDIT_TRAIL</text>
+<circle class="anom-dot" cx="187.53" cy="25.00" r="3.4"><title>2026-08-24: grew 1.2 GiB in one day, about 3.4x its usual pace</title></circle>
+<circle class="anom-dot" cx="219.07" cy="25.00" r="3.4"><title>2026-08-25: grew 1.1 GiB in one day, about 3.1x its usual pace</title></circle>
+<circle class="anom-dot" cx="250.60" cy="25.00" r="3.4"><title>2026-08-26: grew 1.2 GiB in one day, about 3.2x its usual pace</title></circle>
+<circle class="anom-dot" cx="282.13" cy="25.00" r="3.4"><title>2026-08-27: grew 1.2 GiB in one day, about 3.3x its usual pace</title></circle>
+<circle class="anom-dot" cx="313.67" cy="25.00" r="3.4"><title>2026-08-28: grew 1.2 GiB in one day, about 3.3x its usual pace</title></circle>
+<circle class="anom-dot" cx="345.20" cy="25.00" r="3.4"><title>2026-08-29: grew 1.2 GiB in one day, about 3.2x its usual pace</title></circle>
+<circle class="anom-dot" cx="376.73" cy="25.00" r="3.4"><title>2026-08-30: grew 1.1 GiB in one day, about 2.9x its usual pace</title></circle>
+<circle class="anom-dot" cx="408.27" cy="25.00" r="3.4"><title>2026-08-31: grew 1.2 GiB in one day, about 3.1x its usual pace</title></circle>
+<circle class="anom-dot" cx="439.80" cy="25.00" r="3.4"><title>2026-09-01: grew 1.2 GiB in one day, about 3.1x its usual pace</title></circle>
+<circle class="anom-dot" cx="471.33" cy="25.00" r="3.4"><title>2026-09-02: grew 1.2 GiB in one day, about 3.1x its usual pace</title></circle>
+<circle class="anom-dot" cx="502.87" cy="25.00" r="3.4"><title>2026-09-03: grew 1.2 GiB in one day, about 3.0x its usual pace</title></circle>
+<line class="tl-baseline" x1="156.00" y1="51.00" x2="1102.00" y2="51.00"/>
+<text class="tl-lane-label" x="6" y="54.00">ANALYTICS_STAGE</text>
+<circle class="anom-dot" cx="912.80" cy="51.00" r="3.4"><title>2026-09-16: grew 39.1 GiB in one day, about 39x its usual pace</title></circle>
+<line class="tl-baseline" x1="156.00" y1="77.00" x2="1102.00" y2="77.00"/>
+<text class="tl-lane-label" x="6" y="80.00">Host CPU</text>
+<circle class="anom-dot" cx="849.73" cy="77.00" r="3.4"><title>2026-09-14: 70% busy vs the usual 47% for that weekday</title></circle>
+<line class="tl-baseline" x1="156.00" y1="103.00" x2="1102.00" y2="103.00"/>
+<text class="tl-lane-label" x="6" y="106.00">SESSION_STORE</text>
+<circle class="anom-dot" cx="534.40" cy="103.00" r="3.4"><title>2026-09-04: shrank 72.5 GiB in one day</title></circle>
+</svg>
+</div>
+<div class="glance-grid">
+<div class="gcard g-warn">
+<h4 class="g-head">CUSTOMER_DATA &mdash; 95.0% full right now<span class="info" tabindex="0" role="note" aria-label="how full it is today; this needs no forecast and is shown whatever the fit quality" title="how full it is today; this needs no forecast and is shown whatever the fit quality">i<span class="tip">how full it is today; this needs no forecast and is shown whatever the fit quality</span></span></h4>
+<div class="g-line">using 152.0 of 160.0 GiB today</div>
+</div>
+<div class="gcard g-warn">
+<h4 class="g-head">AUDIT_TRAIL &mdash; 92.0% full right now<span class="info" tabindex="0" role="note" aria-label="how full it is today; this needs no forecast and is shown whatever the fit quality" title="how full it is today; this needs no forecast and is shown whatever the fit quality">i<span class="tip">how full it is today; this needs no forecast and is shown whatever the fit quality</span></span></h4>
+<div class="g-line">using 119.6 of 130.0 GiB today</div>
+</div>
+<div class="gcard g-crit">
+<h4 class="g-head">AUDIT_TRAIL &mdash; full in about 17 days <span class="pill pill-ok">high confidence</span><span class="info" tabindex="0" role="note" aria-label="based on how closely past growth follows a straight line" title="based on how closely past growth follows a straight line">i<span class="tip">based on how closely past growth follows a straight line</span></span></h4>
+<div class="g-date">around October 2026</div>
+<div class="g-line">worst case: in about 16 days (October 2026)</div>
+<div class="g-line">using 119.6 of 130.0 GiB today</div>
+</div>
+<div class="gcard g-ok">
+<h4 class="g-head">SESSION_STORE &mdash; full in about 3 months <span class="pill pill-ok">high confidence</span><span class="info" tabindex="0" role="note" aria-label="based on how closely past growth follows a straight line" title="based on how closely past growth follows a straight line">i<span class="tip">based on how closely past growth follows a straight line</span></span></h4>
+<div class="g-date">around December 2026</div>
+<div class="g-line">using 65.0 of 300.0 GiB today</div>
+</div>
+<div class="gcard g-ok">
+<h4 class="g-head">ORDERS_DATA &mdash; full in about 3 months <span class="pill pill-ok">high confidence</span><span class="info" tabindex="0" role="note" aria-label="based on how closely past growth follows a straight line" title="based on how closely past growth follows a straight line">i<span class="tip">based on how closely past growth follows a straight line</span></span></h4>
+<div class="g-date">around January 2027</div>
+<div class="g-line">using 479.0 of 600.0 GiB today</div>
+</div>
+<div class="gcard g-ok">
+<h4 class="g-head">ANALYTICS_STAGE &mdash; full in about 6 months <span class="pill pill-ok">high confidence</span><span class="info" tabindex="0" role="note" aria-label="based on how closely past growth follows a straight line" title="based on how closely past growth follows a straight line">i<span class="tip">based on how closely past growth follows a straight line</span></span></h4>
+<div class="g-date">around March 2027</div>
+<div class="g-line">worst case: in about 5 months (February 2027)</div>
+<div class="g-line">using 202.0 of 400.0 GiB today</div>
+</div>
+<div class="gcard g-ok">
+<h4 class="g-head">ORDERS_IDX &mdash; full in about 6 months <span class="pill pill-ok">high confidence</span><span class="info" tabindex="0" role="note" aria-label="based on how closely past growth follows a straight line" title="based on how closely past growth follows a straight line">i<span class="tip">based on how closely past growth follows a straight line</span></span></h4>
+<div class="g-date">around March 2027</div>
+<div class="g-line">using 203.0 of 300.0 GiB today</div>
+</div>
+<div class="gcard g-ok">
+<h4 class="g-head">CUSTOMER_DATA &mdash; full in about 1.1 years <span class="pill pill-ok">high confidence</span><span class="info" tabindex="0" role="note" aria-label="based on how closely past growth follows a straight line" title="based on how closely past growth follows a straight line">i<span class="tip">based on how closely past growth follows a straight line</span></span></h4>
+<div class="g-date">around October 2027</div>
+<div class="g-line">worst case: in about 1.1 years (October 2027)</div>
+<div class="g-line">using 152.0 of 160.0 GiB today</div>
+</div>
+<div class="gcard g-ok">
+<h4 class="g-head">SYSAUX &mdash; full in about 1.8 years <span class="pill pill-ok">high confidence</span><span class="info" tabindex="0" role="note" aria-label="based on how closely past growth follows a straight line" title="based on how closely past growth follows a straight line">i<span class="tip">based on how closely past growth follows a straight line</span></span></h4>
+<div class="g-date">around July 2028</div>
+<div class="g-line">using 12.5 of 32.0 GiB today</div>
+</div>
+</div>
+<div class="glance-rollup">Not shown as predictions: 2 tablespaces aren't growing at all (FLAT).</div>
+<details class="glossary">
+<summary>New to these terms? Plain-English glossary</summary>
+<div class="gl-body"><dl>
+<dt>Forecast / projection</dt><dd>Where a number is heading, based on its recent trend.</dd>
+<dt>REGR (straight-line trend)</dt><dd>Fits a straight line through recent history and extends it forward.</dd>
+<dt>ESM</dt><dd>Oracle's machine-learning forecast; it also learns weekly patterns and is usually best for the next 30 days.</dd>
+<dt>R2</dt><dd>How closely growth follows a straight line: 1.00 is perfectly steady, near 0 is erratic.</dd>
+<dt>Quality: OK</dt><dd>Steady enough to forecast reliably.</dd>
+<dt>Quality: LOW_CONFIDENCE</dt><dd>Growth is too erratic for a dependable estimate.</dd>
+<dt>Quality: FLAT</dt><dd>Not growing at all.</dd>
+<dt>Quality: INSUFFICIENT_HISTORY</dt><dd>Not enough days of AWR history yet.</dd>
+<dt>Anomaly</dt><dd>A day that stands out sharply from what is normal for that series.</dd>
+<dt>Robust z-score</dt><dd>How far outside its normal range a day was; 3 or more is clearly unusual.</dd>
+<dt>MAD</dt><dd>Median absolute deviation -- a spike-resistant way of measuring "normal".</dd>
+<dt>Days-to-full</dt><dd>Estimated days until a tablespace reaches its allocated limit.</dd>
+<dt>Saturation</dt><dd>The busy percent at which the CPU is treated as maxed out.</dd>
+</dl></div>
+</details>
+</section>
+<section id="s1">
+<h2>1. Tablespaces by days-to-full <span class="pill pill-crit">CRIT&le;30</span> <span class="pill pill-warn">WARN&le;90</span></h2>
+<p class="desc">The tablespaces most likely to run out of space soonest, any fit quality (trust the estimate per Quality; only OK is reliable); top 10. The prediction-band bounds and ACCEL move to the Diagnostics table right below this one.</p>
+<div class="tscroll">
+<table class="tbl"><thead><tr><th>DB/PDB<span class="info" tabindex="0" role="note" aria-label="which database or container this row belongs to, relevant when one report covers a fleet (CAPR column: DB_PDB)" title="which database or container this row belongs to, relevant when one report covers a fleet (CAPR column: DB_PDB)">i<span class="tip">which database or container this row belongs to, relevant when one report covers a fleet (CAPR column: DB_PDB)</span></span></th><th>Tablespace<span class="info" tabindex="0" role="note" aria-label="CAPR column: TABLESPACE_NAME" title="CAPR column: TABLESPACE_NAME">i<span class="tip">CAPR column: TABLESPACE_NAME</span></span></th><th>Used / limit<span class="info" tabindex="0" role="note" aria-label="how much is used against its allocated limit today (CAPR columns: CUR_GB, LIMIT_GB, PCT_USED)" title="how much is used against its allocated limit today (CAPR columns: CUR_GB, LIMIT_GB, PCT_USED)">i<span class="tip">how much is used against its allocated limit today (CAPR columns: CUR_GB, LIMIT_GB, PCT_USED)</span></span></th><th class="num">Growth (MiB/day)<span class="info" tabindex="0" role="note" aria-label="the average mebibytes (MiB) this tablespace grows per day (CAPR column: SLOPE_MB)" title="the average mebibytes (MiB) this tablespace grows per day (CAPR column: SLOPE_MB)">i<span class="tip">the average mebibytes (MiB) this tablespace grows per day (CAPR column: SLOPE_MB)</span></span></th><th class="num">Days to full<span class="info" tabindex="0" role="note" aria-label="estimated days until it reaches its allocated limit at the current rate (CAPR column: DAYS_TO_FULL)" title="estimated days until it reaches its allocated limit at the current rate (CAPR column: DAYS_TO_FULL)">i<span class="tip">estimated days until it reaches its allocated limit at the current rate (CAPR column: DAYS_TO_FULL)</span></span></th><th>Severity<span class="info" tabindex="0" role="note" aria-label="how urgent this is: CRIT is within the critical window, WARN within the warning window (CAPR column: SEV_DTF)" title="how urgent this is: CRIT is within the critical window, WARN within the warning window (CAPR column: SEV_DTF)">i<span class="tip">how urgent this is: CRIT is within the critical window, WARN within the warning window (CAPR column: SEV_DTF)</span></span></th><th>Quality<span class="info" tabindex="0" role="note" aria-label="reliability of the estimate -- only OK is a dependable forecast (CAPR column: QUALITY)" title="reliability of the estimate -- only OK is a dependable forecast (CAPR column: QUALITY)">i<span class="tip">reliability of the estimate -- only OK is a dependable forecast (CAPR column: QUALITY)</span></span></th></tr></thead><tbody>
+<tr id="dtf-3141592654_AUDIT_TRAIL"><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td><div class="used-limit"><div class="ul-text">119.60 / 130.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill crit" style="width:92.0%"></div></div><span class="bar-pct">92%</span></div></div></td><td class="num">613.664</td><td class="num">17</td><td><span class="sev-crit">CRIT</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr id="dtf-3141592654_SESSION_STORE"><td>ECOMPRD/SHOP_PDB</td><td>SESSION_STORE</td><td><div class="used-limit"><div class="ul-text">65.00 / 300.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:21.7%"></div></div><span class="bar-pct">22%</span></div></div></td><td class="num">2560.000</td><td class="num">94</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr id="dtf-3141592654_ORDERS_DATA"><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_DATA</td><td><div class="used-limit"><div class="ul-text">479.04 / 600.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:79.8%"></div></div><span class="bar-pct">80%</span></div></div></td><td class="num">1208.636</td><td class="num">102</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr id="dtf-3141592654_ANALYTICS_STAGE"><td>ECOMPRD/SHOP_PDB</td><td>ANALYTICS_STAGE</td><td><div class="used-limit"><div class="ul-text">202.02 / 400.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:50.5%"></div></div><span class="bar-pct">51%</span></div></div></td><td class="num">1206.476</td><td class="num">168</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr id="dtf-3141592654_ORDERS_IDX"><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_IDX</td><td><div class="used-limit"><div class="ul-text">203.00 / 300.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:67.7%"></div></div><span class="bar-pct">68%</span></div></div></td><td class="num">561.719</td><td class="num">176</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr id="dtf-3141592654_CUSTOMER_DATA"><td>ECOMPRD/SHOP_PDB</td><td>CUSTOMER_DATA</td><td><div class="used-limit"><div class="ul-text">152.02 / 160.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:95.0%"></div></div><span class="bar-pct">95%</span></div></div></td><td class="num">20.480</td><td class="num">399</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr id="dtf-3141592653_SYSAUX"><td>ECOMPRD</td><td>SYSAUX</td><td><div class="used-limit"><div class="ul-text">12.53 / 32.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:39.2%"></div></div><span class="bar-pct">39%</span></div></div></td><td class="num">30.720</td><td class="num">648</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+</tbody></table>
+</div>
+<details class="diag">
+<summary>Diagnostics (3 more columns)</summary>
+<div class="diag-body">
+<p class="desc">ACCEL&gt;1.5 = growth accelerating. Fill low / Fill high bracket Days to full with its statistical uncertainty range: earliest and latest credible fill day. A blank Fill high means the range includes "not growing", so it may never fill.</p>
+<div class="tscroll">
+<table class="tbl"><thead><tr><th>DB/PDB</th><th>Tablespace<span class="info" tabindex="0" role="note" aria-label="CAPR column: TABLESPACE_NAME" title="CAPR column: TABLESPACE_NAME">i<span class="tip">CAPR column: TABLESPACE_NAME</span></span></th><th class="num">Fill low<span class="info" tabindex="0" role="note" aria-label="earliest credible fill day, the low end of the growth-rate uncertainty range (CAPR column: DTF_WORST)" title="earliest credible fill day, the low end of the growth-rate uncertainty range (CAPR column: DTF_WORST)">i<span class="tip">earliest credible fill day, the low end of the growth-rate uncertainty range (CAPR column: DTF_WORST)</span></span></th><th class="num">Fill high<span class="info" tabindex="0" role="note" aria-label="latest credible fill day; blank means the range includes not growing at all, i.e. it may never fill (CAPR column: DTF_BEST)" title="latest credible fill day; blank means the range includes not growing at all, i.e. it may never fill (CAPR column: DTF_BEST)">i<span class="tip">latest credible fill day; blank means the range includes not growing at all, i.e. it may never fill (CAPR column: DTF_BEST)</span></span></th><th class="num">Accel.<span class="info" tabindex="0" role="note" aria-label="above 1.5 means growth is speeding up (CAPR column: ACCEL)" title="above 1.5 means growth is speeding up (CAPR column: ACCEL)">i<span class="tip">above 1.5 means growth is speeding up (CAPR column: ACCEL)</span></span></th></tr></thead><tbody>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td class="num">16</td><td class="num">18</td><td class="num">1.92</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>SESSION_STORE</td><td class="num">94</td><td class="num">94</td><td class="num">1.00</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_DATA</td><td class="num">102</td><td class="num">102</td><td class="num">1.03</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ANALYTICS_STAGE</td><td class="num">158</td><td class="num">179</td><td class="num">2.15</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_IDX</td><td class="num">176</td><td class="num">177</td><td class="num">0.99</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>CUSTOMER_DATA</td><td class="num">398</td><td class="num">399</td><td class="num">1.00</td></tr>
+<tr><td>ECOMPRD</td><td>SYSAUX</td><td class="num">648</td><td class="num">649</td><td class="num">1.00</td></tr>
+</tbody></table>
+</div>
+</div>
+</details>
+<h3 style="font-size:13px;margin:16px 0 6px">Near-full now <span class="pill pill-crit">CRIT&ge;97%</span> <span class="pill pill-warn">WARN&ge;90%</span> <span class="info" tabindex="0" role="note" aria-label="how full each tablespace is today, regardless of whether its growth can be forecast" title="how full each tablespace is today, regardless of whether its growth can be forecast">i<span class="tip">how full each tablespace is today, regardless of whether its growth can be forecast</span></span></h3>
+<div class="tscroll">
+<table class="tbl"><thead><tr><th>DB/PDB</th><th>Tablespace<span class="info" tabindex="0" role="note" aria-label="CAPR column: TABLESPACE_NAME" title="CAPR column: TABLESPACE_NAME">i<span class="tip">CAPR column: TABLESPACE_NAME</span></span></th><th>Used / limit<span class="info" tabindex="0" role="note" aria-label="how much is used against its allocated limit today (CAPR columns: CUR_GB, LIMIT_GB, PCT_USED)" title="how much is used against its allocated limit today (CAPR columns: CUR_GB, LIMIT_GB, PCT_USED)">i<span class="tip">how much is used against its allocated limit today (CAPR columns: CUR_GB, LIMIT_GB, PCT_USED)</span></span></th><th class="num">Days to full<span class="info" tabindex="0" role="note" aria-label="shown when a usable trend exists; a blank cell explains why there is none (CAPR column: DAYS_TO_FULL)" title="shown when a usable trend exists; a blank cell explains why there is none (CAPR column: DAYS_TO_FULL)">i<span class="tip">shown when a usable trend exists; a blank cell explains why there is none (CAPR column: DAYS_TO_FULL)</span></span></th><th>Severity<span class="info" tabindex="0" role="note" aria-label="graded on percent used, not on the forecast (CAPR column: SEV_NEARFULL)" title="graded on percent used, not on the forecast (CAPR column: SEV_NEARFULL)">i<span class="tip">graded on percent used, not on the forecast (CAPR column: SEV_NEARFULL)</span></span></th><th>Quality<span class="info" tabindex="0" role="note" aria-label="the reliability of the trend, for context only -- it does not gate this table (CAPR column: QUALITY)" title="the reliability of the trend, for context only -- it does not gate this table (CAPR column: QUALITY)">i<span class="tip">the reliability of the trend, for context only -- it does not gate this table (CAPR column: QUALITY)</span></span></th></tr></thead><tbody>
+<tr id="nf-3141592654_CUSTOMER_DATA"><td>ECOMPRD/SHOP_PDB</td><td>CUSTOMER_DATA</td><td><div class="used-limit"><div class="ul-text">152.02 / 160.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill warn" style="width:95.0%"></div></div><span class="bar-pct">95%</span></div></div></td><td class="num">399</td><td><span class="sev-warn">WARN</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr id="nf-3141592654_AUDIT_TRAIL"><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td><div class="used-limit"><div class="ul-text">119.60 / 130.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill warn" style="width:92.0%"></div></div><span class="bar-pct">92%</span></div></div></td><td class="num">17</td><td><span class="sev-warn">WARN</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr id="nf-3141592654_ORDERS_DATA"><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_DATA</td><td><div class="used-limit"><div class="ul-text">479.04 / 600.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:79.8%"></div></div><span class="bar-pct">80%</span></div></div></td><td class="num">102</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr id="nf-3141592654_PRODUCT_CATALOG"><td>ECOMPRD/SHOP_PDB</td><td>PRODUCT_CATALOG</td><td><div class="used-limit"><div class="ul-text">12.00 / 16.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:75.0%"></div></div><span class="bar-pct">75%</span></div></div></td><td class="num"><span class="na">no crossing</span></td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-flat" title="not growing at all">FLAT</span></td></tr>
+<tr id="nf-3141592654_ORDERS_IDX"><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_IDX</td><td><div class="used-limit"><div class="ul-text">203.00 / 300.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:67.7%"></div></div><span class="bar-pct">68%</span></div></div></td><td class="num">176</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr id="nf-3141592654_ANALYTICS_STAGE"><td>ECOMPRD/SHOP_PDB</td><td>ANALYTICS_STAGE</td><td><div class="used-limit"><div class="ul-text">202.02 / 400.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:50.5%"></div></div><span class="bar-pct">51%</span></div></div></td><td class="num">168</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr id="nf-3141592653_SYSAUX"><td>ECOMPRD</td><td>SYSAUX</td><td><div class="used-limit"><div class="ul-text">12.53 / 32.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:39.2%"></div></div><span class="bar-pct">39%</span></div></div></td><td class="num">648</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr id="nf-3141592653_SYSTEM"><td>ECOMPRD</td><td>SYSTEM</td><td><div class="used-limit"><div class="ul-text">1.10 / 4.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:27.5%"></div></div><span class="bar-pct">28%</span></div></div></td><td class="num"><span class="na">no crossing</span></td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-flat" title="not growing at all">FLAT</span></td></tr>
+<tr id="nf-3141592654_SESSION_STORE"><td>ECOMPRD/SHOP_PDB</td><td>SESSION_STORE</td><td><div class="used-limit"><div class="ul-text">65.00 / 300.00 GiB</div><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:21.7%"></div></div><span class="bar-pct">22%</span></div></div></td><td class="num">94</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+</tbody></table>
+</div>
+</section>
+<section id="s2">
+<h2>2. Tablespace forecast (GiB) <span style="font-weight:400;color:var(--muted);font-size:12px">(9 of 9: growing, near-full, or &ge; 1 GiB, top 10)</span></h2>
+<p class="desc">Where each tablespace is headed in size over the next six months. current / +30 / +90 / +180, plus ESM +30 (Tier 2, 19c hard-capped at +30). Small, flat, half-empty tablespaces are left out (knob report_min_gb); CAPR_TBSPC_FORECAST still has every row.</p>
+<div class="chart-legend">
+<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="hist-line" x1="1" y1="5" x2="19" y2="5"/></svg> History</span>
+<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="proj-line" x1="1" y1="5" x2="19" y2="5"/></svg> Projection (REGR)</span>
+<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="esm-line" x1="10" y1="1" x2="10" y2="9"/><circle class="esm-dot" cx="10" cy="5" r="2"/></svg> ESM +30 (95% CI)</span>
+<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="limit-line" x1="1" y1="5" x2="19" y2="5"/></svg> Limit</span>
+<span class="lg-item"><svg width="20" height="10" class="lg-ico"><line class="thresh-line" x1="1" y1="5" x2="19" y2="5"/></svg> Threshold</span>
+<span class="lg-item"><svg width="20" height="10" class="lg-ico"><circle class="anom-dot" cx="10" cy="5" r="3"/></svg> Anomaly</span>
+</div>
+<div class="chart-grid">
+<div class="chart-card">
+<h4>AUDIT_TRAIL <span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></h4>
+<div class="chart-sub">cur 119.60 GiB | limit 130.00 GiB</div>
+<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="AUDIT_TRAIL growth chart">
+<line class="grid-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<text class="axis-label" x="2" y="205.00">0 GiB</text>
+<line class="grid-line" x1="46.00" y1="155.00" x2="548.00" y2="155.00"/>
+<text class="axis-label" x="2" y="158.00">61 GiB</text>
+<line class="grid-line" x1="46.00" y1="108.00" x2="548.00" y2="108.00"/>
+<text class="axis-label" x="2" y="111.00">123 GiB</text>
+<line class="grid-line" x1="46.00" y1="61.00" x2="548.00" y2="61.00"/>
+<text class="axis-label" x="2" y="64.00">184 GiB</text>
+<line class="grid-line" x1="46.00" y1="14.00" x2="548.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">246 GiB</text>
+<text class="axis-label" x="46.00" y="224.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="224.00" text-anchor="middle">2026-10-07</text>
+<text class="axis-label" x="548.00" y="224.00" text-anchor="end">2027-03-21</text>
+<line class="axis-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<line class="axis-line" x1="46.00" y1="14.00" x2="46.00" y2="202.00"/>
+<line class="limit-line" x1="46.00" y1="102.52" x2="548.00" y2="102.52"/>
+<polyline class="hist-line" points="
+46.00,171.13 47.52,170.87 49.04,170.59 50.56,170.30 52.08,170.02 53.61,169.76 55.13,169.51 56.65,169.20 58.17,168.97 59.69,168.73 61.21,168.43 62.73,168.20 64.25,167.91 65.78,167.62 67.30,167.37 68.82,167.11 70.34,166.88 71.86,166.58 73.38,166.32 74.90,166.04 76.42,165.77 77.95,165.48 79.47,165.17 80.99,164.87 82.51,164.61 84.03,164.33 85.55,164.10 87.07,163.86 88.59,163.56 90.12,163.26 91.64,163.02 93.16,162.74 94.68,162.49 96.20,162.21 97.72,161.95 99.24,161.65 100.76,161.43 102.28,161.14 103.81,160.84 105.33,160.59 106.85,160.36 108.37,160.12 109.89,159.83 111.41,159.52 112.93,159.26 114.45,159.00 115.98,158.73 117.50,158.44 119.02,158.15 120.54,157.85 122.06,157.54 123.58,157.25 125.10,156.99 126.62,156.72 128.15,156.41 129.67,156.15 131.19,155.90 132.71,155.65 134.23,155.34 135.75,155.11 137.27,154.85 138.79,154.54 140.32,154.25 141.84,154.01 143.36,153.77 144.88,153.49 146.40,153.18 147.92,152.89 149.44,152.64 150.96,152.35 152.48,152.06 154.01,151.75 155.53,151.46 157.05,151.20 158.57,150.96 160.09,150.72 161.61,150.44 163.13,150.15 164.65,149.91 166.18,149.65 167.70,149.40 169.22,149.17 170.74,148.88 172.26,148.58 173.78,148.32 175.30,148.08 176.82,147.83 178.35,147.60 179.87,147.36 181.39,147.05 182.91,146.77 184.43,146.46 185.95,146.21 187.47,145.91 188.99,145.67 190.52,145.41 192.04,145.12 193.56,144.84 195.08,144.58 196.60,144.28 198.12,144.05 199.64,143.74 201.16,143.52 202.68,143.26 204.21,143.01 205.73,142.77 207.25,142.53 208.77,142.25 210.29,142.00 211.81,141.76 213.33,141.48 214.85,141.21 216.38,140.98 217.90,140.70 219.42,140.40 220.94,140.11 222.46,139.84 223.98,139.59 225.50,138.70 227.02,137.83 228.55,136.98 230.07,136.06 231.59,135.21 233.11,134.32 234.63,133.41 236.15,132.49 237.67,131.61 239.19,130.77 240.72,129.89 242.24,128.99 243.76,128.10 245.28,127.21 246.80,126.29 248.32,125.39 249.84,124.50 251.36,123.60 252.88,122.76 254.41,121.86 255.93,120.95 257.45,120.10 258.97,119.25 260.49,118.37 262.01,117.51 263.53,116.65 265.05,115.75 266.58,114.92
+268.10,114.07 269.62,113.18 271.14,112.27 272.66,111.40 274.18,110.48
+"/>
+<polyline class="proj-line" points="
+274.18,110.48 548.00,27.93
+"/>
+<line class="esm-line" x1="319.82" y1="92.52" x2="319.82" y2="73.71"/>
+<circle class="esm-dot" cx="319.82" cy="83.11" r="2.6"/>
+<circle class="anom-dot" cx="225.50" cy="138.70" r="3"/>
+<circle class="anom-dot" cx="227.02" cy="137.83" r="3"/>
+<circle class="anom-dot" cx="228.55" cy="136.98" r="3"/>
+<circle class="anom-dot" cx="230.07" cy="136.06" r="3"/>
+<circle class="anom-dot" cx="231.59" cy="135.21" r="3"/>
+<circle class="anom-dot" cx="233.11" cy="134.32" r="3"/>
+<circle class="anom-dot" cx="234.63" cy="133.41" r="3"/>
+<circle class="anom-dot" cx="236.15" cy="132.49" r="3"/>
+<circle class="anom-dot" cx="237.67" cy="131.61" r="3"/>
+<circle class="anom-dot" cx="239.19" cy="130.77" r="3"/>
+<circle class="anom-dot" cx="240.72" cy="129.89" r="3"/>
+<circle class="anom-dot" cx="242.24" cy="128.99" r="3"/>
+<circle class="anom-dot" cx="243.76" cy="128.10" r="3"/>
+<circle class="anom-dot" cx="245.28" cy="127.21" r="3"/>
+</svg>
+</div>
+<div class="chart-card">
+<h4>SESSION_STORE <span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></h4>
+<div class="chart-sub">cur 65.00 GiB | limit 300.00 GiB</div>
+<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="SESSION_STORE growth chart">
+<line class="grid-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<text class="axis-label" x="2" y="205.00">-93 GiB</text>
+<line class="grid-line" x1="46.00" y1="155.00" x2="548.00" y2="155.00"/>
+<text class="axis-label" x="2" y="158.00">72 GiB</text>
+<line class="grid-line" x1="46.00" y1="108.00" x2="548.00" y2="108.00"/>
+<text class="axis-label" x="2" y="111.00">236 GiB</text>
+<line class="grid-line" x1="46.00" y1="61.00" x2="548.00" y2="61.00"/>
+<text class="axis-label" x="2" y="64.00">400 GiB</text>
+<line class="grid-line" x1="46.00" y1="14.00" x2="548.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">564 GiB</text>
+<text class="axis-label" x="46.00" y="224.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="224.00" text-anchor="middle">2026-10-07</text>
+<text class="axis-label" x="548.00" y="224.00" text-anchor="end">2027-03-21</text>
+<line class="axis-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<line class="axis-line" x1="46.00" y1="14.00" x2="46.00" y2="202.00"/>
+<line class="limit-line" x1="46.00" y1="89.53" x2="548.00" y2="89.53"/>
+<polyline class="hist-line" points="
+46.00,156.87 47.52,156.15 49.04,155.44 50.56,154.72 52.08,154.00 53.61,153.29 55.13,152.57 56.65,151.85 58.17,151.14 59.69,150.42 61.21,149.70 62.73,148.99 64.25,169.76 65.78,169.05 67.30,168.33 68.82,167.61 70.34,166.90 71.86,166.18 73.38,165.46 74.90,164.75 76.42,164.03 77.95,163.31 79.47,162.60 80.99,161.88 82.51,161.17 84.03,160.45 85.55,159.73 87.07,159.02 88.59,158.30 90.12,157.58 91.64,156.87 93.16,156.15 94.68,155.44 96.20,154.72 97.72,154.00 99.24,153.29 100.76,152.57 102.28,151.85 103.81,151.14 105.33,150.42 106.85,149.70 108.37,148.99 109.89,169.76 111.41,169.05 112.93,168.33 114.45,167.61 115.98,166.90 117.50,166.18 119.02,165.46 120.54,164.75 122.06,164.03 123.58,163.31 125.10,162.60 126.62,161.88 128.15,161.17 129.67,160.45 131.19,159.73 132.71,159.02 134.23,158.30 135.75,157.58 137.27,156.87 138.79,156.15 140.32,155.44 141.84,154.72 143.36,154.00 144.88,153.29 146.40,152.57 147.92,151.85 149.44,151.14 150.96,150.42 152.48,149.70 154.01,148.99 155.53,169.76 157.05,169.05 158.57,168.33 160.09,167.61 161.61,166.90 163.13,166.18 164.65,165.46 166.18,164.75 167.70,164.03 169.22,163.31 170.74,162.60 172.26,161.88 173.78,161.17 175.30,160.45 176.82,159.73 178.35,159.02 179.87,158.30 181.39,157.58 182.91,156.87 184.43,156.15 185.95,155.44 187.47,154.72 188.99,154.00 190.52,153.29 192.04,152.57 193.56,151.85 195.08,151.14 196.60,150.42 198.12,149.70 199.64,148.99 201.16,169.76 202.68,169.05 204.21,168.33 205.73,167.61 207.25,166.90 208.77,166.18 210.29,165.46 211.81,164.75 213.33,164.03 214.85,163.31 216.38,162.60 217.90,161.88 219.42,161.17 220.94,160.45 222.46,159.73 223.98,159.02 225.50,158.30 227.02,157.58 228.55,156.87 230.07,156.15 231.59,155.44 233.11,154.72 234.63,154.00 236.15,153.29 237.67,152.57 239.19,151.85 240.72,151.14 242.24,150.42 243.76,149.70 245.28,148.99 246.80,169.76 248.32,169.05 249.84,168.33 251.36,167.61 252.88,166.90 254.41,166.18 255.93,165.46 257.45,164.75 258.97,164.03 260.49,163.31 262.01,162.60 263.53,161.88 265.05,161.17 266.58,160.45
+268.10,159.73 269.62,159.02 271.14,158.30 272.66,157.58 274.18,156.87
+"/>
+<polyline class="proj-line" points="
+274.18,156.87 548.00,27.93
+"/>
+<line class="esm-line" x1="319.82" y1="202.00" x2="319.82" y2="119.08"/>
+<circle class="esm-dot" cx="319.82" cy="160.54" r="2.6"/>
+<circle class="anom-dot" cx="64.25" cy="169.76" r="3"/>
+<circle class="anom-dot" cx="109.89" cy="169.76" r="3"/>
+<circle class="anom-dot" cx="155.53" cy="169.76" r="3"/>
+<circle class="anom-dot" cx="201.16" cy="169.76" r="3"/>
+<circle class="anom-dot" cx="246.80" cy="169.76" r="3"/>
+</svg>
+</div>
+<div class="chart-card">
+<h4>ORDERS_DATA <span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></h4>
+<div class="chart-sub">cur 479.04 GiB | limit 600.00 GiB</div>
+<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="ORDERS_DATA growth chart">
+<line class="grid-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<text class="axis-label" x="2" y="205.00">0 GiB</text>
+<line class="grid-line" x1="46.00" y1="155.00" x2="548.00" y2="155.00"/>
+<text class="axis-label" x="2" y="158.00">187 GiB</text>
+<line class="grid-line" x1="46.00" y1="108.00" x2="548.00" y2="108.00"/>
+<text class="axis-label" x="2" y="111.00">373 GiB</text>
+<line class="grid-line" x1="46.00" y1="61.00" x2="548.00" y2="61.00"/>
+<text class="axis-label" x="2" y="64.00">560 GiB</text>
+<line class="grid-line" x1="46.00" y1="14.00" x2="548.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">747 GiB</text>
+<text class="axis-label" x="46.00" y="224.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="224.00" text-anchor="middle">2026-10-07</text>
+<text class="axis-label" x="548.00" y="224.00" text-anchor="end">2027-03-21</text>
+<line class="axis-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<line class="axis-line" x1="46.00" y1="14.00" x2="46.00" y2="202.00"/>
+<line class="limit-line" x1="46.00" y1="50.96" x2="548.00" y2="50.96"/>
+<polyline class="hist-line" points="
+46.00,126.30 47.52,126.13 49.04,125.78 50.56,125.44 52.08,125.09 53.61,124.73 55.13,124.35 56.65,124.15 58.17,123.86 59.69,123.56 61.21,123.28 62.73,122.98 64.25,122.63 65.78,122.36 67.30,122.15 68.82,121.97 70.34,121.64 71.86,121.25 73.38,120.93 74.90,120.58 76.42,120.30 77.95,120.13 79.47,119.95 80.99,119.66 82.51,119.34 84.03,118.98 85.55,118.62 87.07,118.25 88.59,117.97 90.12,117.78 91.64,117.50 93.16,117.14 94.68,116.77 96.20,116.46 97.72,116.15 99.24,115.90 100.76,115.64 102.28,115.27 103.81,114.88 105.33,114.54 106.85,114.23 108.37,113.88 109.89,113.72 111.41,113.49 112.93,113.12 114.45,112.79 115.98,112.42 117.50,112.05 119.02,111.78 120.54,111.58 122.06,111.36 123.58,111.04 125.10,110.73 126.62,110.44 128.15,110.14 129.67,109.82 131.19,109.54 132.71,109.32 134.23,108.99 135.75,108.63 137.27,108.30 138.79,107.94 140.32,107.56 141.84,107.36 143.36,107.19 144.88,106.81 146.40,106.53 147.92,106.22 149.44,105.90 150.96,105.60 152.48,105.32 154.01,105.13 155.53,104.79 157.05,104.50 158.57,104.21 160.09,103.85 161.61,103.48 163.13,103.28 164.65,103.03 166.18,102.76 167.70,102.46 169.22,102.09 170.74,101.71 172.26,101.35 173.78,101.10 175.30,100.89 176.82,100.55 178.35,100.17 179.87,99.85 181.39,99.55 182.91,99.25 184.43,99.08 185.95,98.82 187.47,98.43 188.99,98.09 190.52,97.77 192.04,97.50 193.56,97.16 195.08,96.93 196.60,96.76 198.12,96.43 199.64,96.16 201.16,95.85 202.68,95.51 204.21,95.23 205.73,95.04 207.25,94.85 208.77,94.58 210.29,94.22 211.81,93.85 213.33,93.50 214.85,93.17 216.38,93.01 217.90,92.73 219.42,92.39 220.94,92.06 222.46,91.73 223.98,91.44 225.50,91.10 227.02,90.84 228.55,90.63 230.07,90.28 231.59,89.91 233.11,89.58 234.63,89.23 236.15,88.96 237.67,88.67 239.19,88.46 240.72,88.18 242.24,87.91 243.76,87.63 245.28,87.31 246.80,86.95 248.32,86.75 249.84,86.53 251.36,86.16 252.88,85.82 254.41,85.45 255.93,85.09 257.45,84.72 258.97,84.45 260.49,84.25 262.01,83.90 263.53,83.52 265.05,83.21 266.58,82.91 268.10,82.53 269.62,82.33 271.14,82.06 272.66,81.71
+274.18,81.41
+"/>
+<polyline class="proj-line" points="
+274.18,81.41 548.00,27.93
+"/>
+<line class="esm-line" x1="319.82" y1="72.72" x2="319.82" y2="71.86"/>
+<circle class="esm-dot" cx="319.82" cy="72.29" r="2.6"/>
+</svg>
+</div>
+<div class="chart-card">
+<h4>ANALYTICS_STAGE <span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></h4>
+<div class="chart-sub">cur 202.02 GiB | limit 400.00 GiB</div>
+<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="ANALYTICS_STAGE growth chart">
+<line class="grid-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<text class="axis-label" x="2" y="205.00">0 GiB</text>
+<line class="grid-line" x1="46.00" y1="155.00" x2="548.00" y2="155.00"/>
+<text class="axis-label" x="2" y="158.00">112 GiB</text>
+<line class="grid-line" x1="46.00" y1="108.00" x2="548.00" y2="108.00"/>
+<text class="axis-label" x="2" y="111.00">225 GiB</text>
+<line class="grid-line" x1="46.00" y1="61.00" x2="548.00" y2="61.00"/>
+<text class="axis-label" x="2" y="64.00">337 GiB</text>
+<line class="grid-line" x1="46.00" y1="14.00" x2="548.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">449 GiB</text>
+<text class="axis-label" x="46.00" y="224.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="224.00" text-anchor="middle">2026-10-07</text>
+<text class="axis-label" x="548.00" y="224.00" text-anchor="end">2027-03-21</text>
+<line class="axis-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<line class="axis-line" x1="46.00" y1="14.00" x2="46.00" y2="202.00"/>
+<line class="limit-line" x1="46.00" y1="34.62" x2="548.00" y2="34.62"/>
+<polyline class="hist-line" points="
+46.00,195.34 47.52,194.90 49.04,194.49 50.56,194.01 52.08,193.63 53.61,193.20 55.13,192.79 56.65,192.42 58.17,192.02 59.69,191.59 61.21,191.21 62.73,190.82 64.25,190.37 65.78,189.96 67.30,189.60 68.82,189.14 70.34,188.73 71.86,188.28 73.38,187.90 74.90,187.46 76.42,187.09 77.95,186.66 79.47,186.20 80.99,185.78 82.51,185.40 84.03,184.97 85.55,184.53 87.07,184.11 88.59,183.67 90.12,183.29 91.64,182.89 93.16,182.45 94.68,182.09 96.20,181.68 97.72,181.22 99.24,180.79 100.76,180.41 102.28,179.99 103.81,179.56 105.33,179.19 106.85,178.82 108.37,178.40 109.89,177.99 111.41,177.55 112.93,177.14 114.45,176.75 115.98,176.38 117.50,176.00 119.02,175.61 120.54,175.22 122.06,174.80 123.58,174.43 125.10,174.07 126.62,173.70 128.15,173.30 129.67,172.90 131.19,172.43 132.71,171.96 134.23,171.59 135.75,171.15 137.27,170.77 138.79,170.29 140.32,169.88 141.84,169.49 143.36,169.11 144.88,168.74 146.40,168.35 147.92,167.94 149.44,167.57 150.96,167.20 152.48,166.80 154.01,166.37 155.53,165.90 157.05,165.49 158.57,165.07 160.09,164.60 161.61,164.22 163.13,163.83 164.65,163.46 166.18,163.00 167.70,162.65 169.22,162.24 170.74,161.86 172.26,161.47 173.78,161.02 175.30,160.66 176.82,160.19 178.35,159.81 179.87,159.41 181.39,158.96 182.91,158.52 184.43,158.10 185.95,157.70 187.47,157.32 188.99,156.94 190.52,156.51 192.04,156.03 193.56,155.56 195.08,155.12 196.60,154.66 198.12,154.26 199.64,153.89 201.16,153.42 202.68,152.96 204.21,152.53 205.73,152.15 207.25,151.78 208.77,151.36 210.29,150.91 211.81,150.53 213.33,150.09 214.85,149.63 216.38,149.27 217.90,148.84 219.42,148.44 220.94,148.05 222.46,147.65 223.98,147.17 225.50,146.74 227.02,146.37 228.55,145.95 230.07,145.57 231.59,145.09 233.11,144.68 234.63,144.30 236.15,143.85 237.67,143.40 239.19,142.99 240.72,142.51 242.24,142.04 243.76,141.67 245.28,141.29 246.80,140.91 248.32,140.55 249.84,140.08 251.36,139.70 252.88,139.27 254.41,138.88 255.93,138.48 257.45,138.02 258.97,137.63 260.49,137.17 262.01,136.73 263.53,136.26 265.05,119.92 266.58,119.47
+268.10,119.08 269.62,118.71 271.14,118.27 272.66,117.88 274.18,117.47
+"/>
+<polyline class="proj-line" points="
+274.18,117.47 548.00,28.72
+"/>
+<line class="esm-line" x1="319.82" y1="119.13" x2="319.82" y2="90.85"/>
+<circle class="esm-dot" cx="319.82" cy="104.99" r="2.6"/>
+<circle class="anom-dot" cx="265.05" cy="119.92" r="3"/>
+</svg>
+</div>
+<div class="chart-card">
+<h4>ORDERS_IDX <span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></h4>
+<div class="chart-sub">cur 203.00 GiB | limit 300.00 GiB</div>
+<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="ORDERS_IDX growth chart">
+<line class="grid-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<text class="axis-label" x="2" y="205.00">0 GiB</text>
+<line class="grid-line" x1="46.00" y1="155.00" x2="548.00" y2="155.00"/>
+<text class="axis-label" x="2" y="158.00">84 GiB</text>
+<line class="grid-line" x1="46.00" y1="108.00" x2="548.00" y2="108.00"/>
+<text class="axis-label" x="2" y="111.00">168 GiB</text>
+<line class="grid-line" x1="46.00" y1="61.00" x2="548.00" y2="61.00"/>
+<text class="axis-label" x="2" y="64.00">253 GiB</text>
+<line class="grid-line" x1="46.00" y1="14.00" x2="548.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">337 GiB</text>
+<text class="axis-label" x="46.00" y="224.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="224.00" text-anchor="middle">2026-10-07</text>
+<text class="axis-label" x="548.00" y="224.00" text-anchor="end">2027-03-21</text>
+<line class="axis-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<line class="axis-line" x1="46.00" y1="14.00" x2="46.00" y2="202.00"/>
+<line class="limit-line" x1="46.00" y1="34.62" x2="548.00" y2="34.62"/>
+<polyline class="hist-line" points="
+46.00,134.77 47.52,134.43 49.04,134.07 50.56,133.76 52.08,133.49 53.61,133.21 55.13,132.90 56.65,132.63 58.17,132.33 59.69,132.03 61.21,131.71 62.73,131.46 64.25,131.17 65.78,130.89 67.30,130.61 68.82,130.32 70.34,130.03 71.86,129.71 73.38,129.41 74.90,129.15 76.42,128.84 77.95,128.55 79.47,128.24 80.99,127.90 82.51,127.62 84.03,127.36 85.55,127.02 87.07,126.67 88.59,126.40 90.12,126.14 91.64,125.85 93.16,125.58 94.68,125.26 96.20,124.94 97.72,124.63 99.24,124.30 100.76,124.02 102.28,123.69 103.81,123.37 105.33,123.02 106.85,122.67 108.37,122.32 109.89,122.00 111.41,121.70 112.93,121.37 114.45,121.03 115.98,120.71 117.50,120.40 119.02,120.14 120.54,119.82 122.06,119.50 123.58,119.14 125.10,118.82 126.62,118.50 128.15,118.17 129.67,117.86 131.19,117.54 132.71,117.24 134.23,116.89 135.75,116.56 137.27,116.22 138.79,115.88 140.32,115.54 141.84,115.19 143.36,114.84 144.88,114.56 146.40,114.27 147.92,113.99 149.44,113.72 150.96,113.45 152.48,113.17 154.01,112.83 155.53,112.52 157.05,112.21 158.57,111.95 160.09,111.66 161.61,111.40 163.13,111.07 164.65,110.81 166.18,110.54 167.70,110.19 169.22,109.86 170.74,109.57 172.26,109.31 173.78,109.00 175.30,108.68 176.82,108.34 178.35,108.05 179.87,107.78 181.39,107.53 182.91,107.24 184.43,106.91 185.95,106.61 187.47,106.31 188.99,106.05 190.52,105.74 192.04,105.43 193.56,105.11 195.08,104.77 196.60,104.46 198.12,104.18 199.64,103.87 201.16,103.57 202.68,103.23 204.21,102.90 205.73,102.63 207.25,102.29 208.77,101.95 210.29,101.59 211.81,101.24 213.33,100.91 214.85,100.60 216.38,100.29 217.90,100.02 219.42,99.70 220.94,99.39 222.46,99.05 223.98,98.70 225.50,98.38 227.02,98.11 228.55,97.79 230.07,97.45 231.59,97.20 233.11,96.91 234.63,96.58 236.15,96.27 237.67,95.94 239.19,95.68 240.72,95.39 242.24,95.12 243.76,94.84 245.28,94.52 246.80,94.16 248.32,93.91 249.84,93.58 251.36,93.31 252.88,93.05 254.41,92.70 255.93,92.41 257.45,92.10 258.97,91.79 260.49,91.45 262.01,91.17 263.53,90.83 265.05,90.52 266.58,90.25 268.10,89.99 269.62,89.68
+271.14,89.38 272.66,89.05 274.18,88.74
+"/>
+<polyline class="proj-line" points="
+274.18,88.74 548.00,33.65
+"/>
+<line class="esm-line" x1="319.82" y1="80.43" x2="319.82" y2="78.83"/>
+<circle class="esm-dot" cx="319.82" cy="79.63" r="2.6"/>
+</svg>
+</div>
+<div class="chart-card">
+<h4>CUSTOMER_DATA <span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></h4>
+<div class="chart-sub">cur 152.02 GiB | limit 160.00 GiB</div>
+<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="CUSTOMER_DATA growth chart">
+<line class="grid-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<text class="axis-label" x="2" y="205.00">0 GiB</text>
+<line class="grid-line" x1="46.00" y1="155.00" x2="548.00" y2="155.00"/>
+<text class="axis-label" x="2" y="158.00">45 GiB</text>
+<line class="grid-line" x1="46.00" y1="108.00" x2="548.00" y2="108.00"/>
+<text class="axis-label" x="2" y="111.00">90 GiB</text>
+<line class="grid-line" x1="46.00" y1="61.00" x2="548.00" y2="61.00"/>
+<text class="axis-label" x="2" y="64.00">135 GiB</text>
+<line class="grid-line" x1="46.00" y1="14.00" x2="548.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">180 GiB</text>
+<text class="axis-label" x="46.00" y="224.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="224.00" text-anchor="middle">2026-10-07</text>
+<text class="axis-label" x="548.00" y="224.00" text-anchor="end">2027-03-21</text>
+<line class="axis-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<line class="axis-line" x1="46.00" y1="14.00" x2="46.00" y2="202.00"/>
+<line class="limit-line" x1="46.00" y1="34.62" x2="548.00" y2="34.62"/>
+<polyline class="hist-line" points="
+46.00,46.11 47.52,46.09 49.04,46.07 50.56,46.04 52.08,46.02 53.61,46.00 55.13,45.98 56.65,45.96 58.17,45.94 59.69,45.92 61.21,45.90 62.73,45.88 64.25,45.86 65.78,45.84 67.30,45.81 68.82,45.79 70.34,45.77 71.86,45.75 73.38,45.73 74.90,45.71 76.42,45.69 77.95,45.67 79.47,45.65 80.99,45.63 82.51,45.61 84.03,45.58 85.55,45.56 87.07,45.54 88.59,45.52 90.12,45.50 91.64,45.48 93.16,45.46 94.68,45.44 96.20,45.42 97.72,45.40 99.24,45.38 100.76,45.35 102.28,45.33 103.81,45.31 105.33,45.29 106.85,45.27 108.37,45.25 109.89,45.23 111.41,45.21 112.93,45.19 114.45,45.17 115.98,45.15 117.50,45.12 119.02,45.10 120.54,45.08 122.06,45.06 123.58,45.04 125.10,45.02 126.62,45.00 128.15,44.98 129.67,44.96 131.19,44.94 132.71,44.91 134.23,44.89 135.75,44.87 137.27,44.85 138.79,44.83 140.32,44.81 141.84,44.79 143.36,44.77 144.88,44.75 146.40,44.73 147.92,44.71 149.44,44.68 150.96,44.66 152.48,44.64 154.01,44.62 155.53,44.60 157.05,44.58 158.57,44.56 160.09,44.54 161.61,44.52 163.13,44.50 164.65,44.48 166.18,44.45 167.70,44.43 169.22,44.41 170.74,44.39 172.26,44.37 173.78,44.35 175.30,44.33 176.82,44.31 178.35,44.29 179.87,44.27 181.39,44.25 182.91,44.22 184.43,44.20 185.95,44.18 187.47,44.16 188.99,44.14 190.52,44.12 192.04,44.10 193.56,44.08 195.08,44.06 196.60,44.04 198.12,44.02 199.64,43.99 201.16,43.97 202.68,43.95 204.21,43.93 205.73,43.91 207.25,43.89 208.77,43.87 210.29,43.85 211.81,43.83 213.33,43.81 214.85,43.79 216.38,43.76 217.90,43.74 219.42,43.72 220.94,43.70 222.46,43.68 223.98,43.66 225.50,43.64 227.02,43.62 228.55,43.60 230.07,43.58 231.59,43.55 233.11,43.53 234.63,43.51 236.15,43.49 237.67,43.47 239.19,43.45 240.72,43.43 242.24,43.41 243.76,43.39 245.28,43.37 246.80,43.35 248.32,43.32 249.84,43.30 251.36,43.28 252.88,43.26 254.41,43.24 255.93,43.22 257.45,43.20 258.97,43.18 260.49,43.16 262.01,43.14 263.53,43.12 265.05,43.09 266.58,43.07 268.10,43.05 269.62,43.03 271.14,43.01 272.66,42.99 274.18,42.97
+"/>
+<polyline class="proj-line" points="
+274.18,42.97 548.00,39.20
+"/>
+<line class="esm-line" x1="319.82" y1="42.34" x2="319.82" y2="42.34"/>
+<circle class="esm-dot" cx="319.82" cy="42.34" r="2.6"/>
+</svg>
+</div>
+<div class="chart-card">
+<h4>SYSAUX <span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></h4>
+<div class="chart-sub">cur 12.53 GiB | limit 32.00 GiB</div>
+<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="SYSAUX growth chart">
+<line class="grid-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<text class="axis-label" x="2" y="205.00">0.0 GiB</text>
+<line class="grid-line" x1="46.00" y1="155.00" x2="548.00" y2="155.00"/>
+<text class="axis-label" x="2" y="158.00">9.0 GiB</text>
+<line class="grid-line" x1="46.00" y1="108.00" x2="548.00" y2="108.00"/>
+<text class="axis-label" x="2" y="111.00">18.0 GiB</text>
+<line class="grid-line" x1="46.00" y1="61.00" x2="548.00" y2="61.00"/>
+<text class="axis-label" x="2" y="64.00">27.0 GiB</text>
+<line class="grid-line" x1="46.00" y1="14.00" x2="548.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">35.9 GiB</text>
+<text class="axis-label" x="46.00" y="224.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="224.00" text-anchor="middle">2026-10-07</text>
+<text class="axis-label" x="548.00" y="224.00" text-anchor="end">2027-03-21</text>
+<line class="axis-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<line class="axis-line" x1="46.00" y1="14.00" x2="46.00" y2="202.00"/>
+<line class="limit-line" x1="46.00" y1="34.62" x2="548.00" y2="34.62"/>
+<polyline class="hist-line" points="
+46.00,160.00 47.52,159.84 49.04,159.68 50.56,159.53 52.08,159.37 53.61,159.21 55.13,159.06 56.65,158.90 58.17,158.74 59.69,158.59 61.21,158.43 62.73,158.27 64.25,158.12 65.78,157.96 67.30,157.80 68.82,157.64 70.34,157.49 71.86,157.33 73.38,157.17 74.90,157.02 76.42,156.86 77.95,156.70 79.47,156.55 80.99,156.39 82.51,156.23 84.03,156.08 85.55,155.92 87.07,155.76 88.59,155.60 90.12,155.45 91.64,155.29 93.16,155.13 94.68,154.98 96.20,154.82 97.72,154.66 99.24,154.51 100.76,154.35 102.28,154.19 103.81,154.04 105.33,153.88 106.85,153.72 108.37,153.56 109.89,153.41 111.41,153.25 112.93,153.09 114.45,152.94 115.98,152.78 117.50,152.62 119.02,152.47 120.54,152.31 122.06,152.15 123.58,152.00 125.10,151.84 126.62,151.68 128.15,151.52 129.67,151.37 131.19,151.21 132.71,151.05 134.23,150.90 135.75,150.74 137.27,150.58 138.79,150.43 140.32,150.27 141.84,150.11 143.36,149.96 144.88,149.80 146.40,149.64 147.92,149.48 149.44,149.33 150.96,149.17 152.48,149.01 154.01,148.86 155.53,148.70 157.05,148.54 158.57,148.39 160.09,148.23 161.61,148.07 163.13,147.92 164.65,147.76 166.18,147.60 167.70,147.44 169.22,147.29 170.74,147.13 172.26,146.97 173.78,146.82 175.30,146.66 176.82,146.50 178.35,146.35 179.87,146.19 181.39,146.03 182.91,145.88 184.43,145.72 185.95,145.56 187.47,145.41 188.99,145.25 190.52,145.09 192.04,144.93 193.56,144.78 195.08,144.62 196.60,144.46 198.12,144.31 199.64,144.15 201.16,143.99 202.68,143.84 204.21,143.68 205.73,143.52 207.25,143.37 208.77,143.21 210.29,143.05 211.81,142.89 213.33,142.74 214.85,142.58 216.38,142.42 217.90,142.27 219.42,142.11 220.94,141.95 222.46,141.80 223.98,141.64 225.50,141.48 227.02,141.33 228.55,141.17 230.07,141.01 231.59,140.85 233.11,140.70 234.63,140.54 236.15,140.38 237.67,140.23 239.19,140.07 240.72,139.91 242.24,139.76 243.76,139.60 245.28,139.44 246.80,139.29 248.32,139.13 249.84,138.97 251.36,138.81 252.88,138.66 254.41,138.50 255.93,138.34 257.45,138.19 258.97,138.03 260.49,137.87 262.01,137.72 263.53,137.56 265.05,137.40 266.58,137.25
+268.10,137.09 269.62,136.93 271.14,136.77 272.66,136.62 274.18,136.46
+"/>
+<polyline class="proj-line" points="
+274.18,136.46 548.00,108.22
+"/>
+<line class="esm-line" x1="319.82" y1="131.75" x2="319.82" y2="131.75"/>
+<circle class="esm-dot" cx="319.82" cy="131.75" r="2.6"/>
+</svg>
+</div>
+<div class="chart-card">
+<h4>PRODUCT_CATALOG <span class="pill pill-flat" title="not growing at all">FLAT</span></h4>
+<div class="chart-sub">cur 12.00 GiB | limit 16.00 GiB</div>
+<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="PRODUCT_CATALOG growth chart">
+<line class="grid-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<text class="axis-label" x="2" y="205.00">0.0 GiB</text>
+<line class="grid-line" x1="46.00" y1="155.00" x2="548.00" y2="155.00"/>
+<text class="axis-label" x="2" y="158.00">4.5 GiB</text>
+<line class="grid-line" x1="46.00" y1="108.00" x2="548.00" y2="108.00"/>
+<text class="axis-label" x="2" y="111.00">9.0 GiB</text>
+<line class="grid-line" x1="46.00" y1="61.00" x2="548.00" y2="61.00"/>
+<text class="axis-label" x="2" y="64.00">13.5 GiB</text>
+<line class="grid-line" x1="46.00" y1="14.00" x2="548.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">18.0 GiB</text>
+<text class="axis-label" x="46.00" y="224.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="224.00" text-anchor="middle">2026-07-09</text>
+<text class="axis-label" x="548.00" y="224.00" text-anchor="end">2026-09-22</text>
+<line class="axis-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<line class="axis-line" x1="46.00" y1="14.00" x2="46.00" y2="202.00"/>
+<line class="limit-line" x1="46.00" y1="34.62" x2="548.00" y2="34.62"/>
+<polyline class="hist-line" points="
+46.00,76.47 49.35,76.47 52.69,76.47 56.04,76.47 59.39,76.47 62.73,76.47 66.08,76.47 69.43,76.47 72.77,76.47 76.12,76.47 79.47,76.47 82.81,76.47 86.16,76.47 89.51,76.47 92.85,76.47 96.20,76.47 99.55,76.47 102.89,76.47 106.24,76.47 109.59,76.47 112.93,76.47 116.28,76.47 119.63,76.47 122.97,76.47 126.32,76.47 129.67,76.47 133.01,76.47 136.36,76.47 139.71,76.47 143.05,76.47 146.40,76.47 149.75,76.47 153.09,76.47 156.44,76.47 159.79,76.47 163.13,76.47 166.48,76.47 169.83,76.47 173.17,76.47 176.52,76.47 179.87,76.47 183.21,76.47 186.56,76.47 189.91,76.47 193.25,76.47 196.60,76.47 199.95,76.47 203.29,76.47 206.64,76.47 209.99,76.47 213.33,76.47 216.68,76.47 220.03,76.47 223.37,76.47 226.72,76.47 230.07,76.47 233.41,76.47 236.76,76.47 240.11,76.47 243.45,76.47 246.80,76.47 250.15,76.47 253.49,76.47 256.84,76.47 260.19,76.47 263.53,76.47 266.88,76.47 270.23,76.47 273.57,76.47 276.92,76.47 280.27,76.47 283.61,76.47 286.96,76.47 290.31,76.47 293.65,76.47 297.00,76.47 300.35,76.47 303.69,76.47 307.04,76.47 310.39,76.47 313.73,76.47 317.08,76.47 320.43,76.47 323.77,76.47 327.12,76.47 330.47,76.47 333.81,76.47 337.16,76.47 340.51,76.47 343.85,76.47 347.20,76.47 350.55,76.47 353.89,76.47 357.24,76.47 360.59,76.47 363.93,76.47 367.28,76.47 370.63,76.47 373.97,76.47 377.32,76.47 380.67,76.47 384.01,76.47 387.36,76.47 390.71,76.47 394.05,76.47 397.40,76.47 400.75,76.47 404.09,76.47 407.44,76.47 410.79,76.47 414.13,76.47 417.48,76.47 420.83,76.47 424.17,76.47 427.52,76.47 430.87,76.47 434.21,76.47 437.56,76.47 440.91,76.47 444.25,76.47 447.60,76.47 450.95,76.47 454.29,76.47 457.64,76.47 460.99,76.47 464.33,76.47 467.68,76.47 471.03,76.47 474.37,76.47 477.72,76.47 481.07,76.47 484.41,76.47 487.76,76.47 491.11,76.47 494.45,76.47 497.80,76.47 501.15,76.47 504.49,76.47 507.84,76.47 511.19,76.47 514.53,76.47 517.88,76.47 521.23,76.47 524.57,76.47 527.92,76.47 531.27,76.47 534.61,76.47 537.96,76.47 541.31,76.47 544.65,76.47 548.00,76.47
+"/>
+</svg>
+</div>
+<div class="chart-card">
+<h4>SYSTEM <span class="pill pill-flat" title="not growing at all">FLAT</span></h4>
+<div class="chart-sub">cur 1.10 GiB | limit 4.00 GiB</div>
+<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="SYSTEM growth chart">
+<line class="grid-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<text class="axis-label" x="2" y="205.00">0.0 GiB</text>
+<line class="grid-line" x1="46.00" y1="155.00" x2="548.00" y2="155.00"/>
+<text class="axis-label" x="2" y="158.00">1.1 GiB</text>
+<line class="grid-line" x1="46.00" y1="108.00" x2="548.00" y2="108.00"/>
+<text class="axis-label" x="2" y="111.00">2.2 GiB</text>
+<line class="grid-line" x1="46.00" y1="61.00" x2="548.00" y2="61.00"/>
+<text class="axis-label" x="2" y="64.00">3.4 GiB</text>
+<line class="grid-line" x1="46.00" y1="14.00" x2="548.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">4.5 GiB</text>
+<text class="axis-label" x="46.00" y="224.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="224.00" text-anchor="middle">2026-07-09</text>
+<text class="axis-label" x="548.00" y="224.00" text-anchor="end">2026-09-22</text>
+<line class="axis-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<line class="axis-line" x1="46.00" y1="14.00" x2="46.00" y2="202.00"/>
+<line class="limit-line" x1="46.00" y1="34.62" x2="548.00" y2="34.62"/>
+<polyline class="hist-line" points="
+46.00,155.97 49.35,155.97 52.69,155.97 56.04,155.97 59.39,155.97 62.73,155.97 66.08,155.97 69.43,155.97 72.77,155.97 76.12,155.97 79.47,155.97 82.81,155.97 86.16,155.97 89.51,155.97 92.85,155.97 96.20,155.97 99.55,155.97 102.89,155.97 106.24,155.97 109.59,155.97 112.93,155.97 116.28,155.97 119.63,155.97 122.97,155.97 126.32,155.97 129.67,155.97 133.01,155.97 136.36,155.97 139.71,155.97 143.05,155.97 146.40,155.97 149.75,155.97 153.09,155.97 156.44,155.97 159.79,155.97 163.13,155.97 166.48,155.97 169.83,155.97 173.17,155.97 176.52,155.97 179.87,155.97 183.21,155.97 186.56,155.97 189.91,155.97 193.25,155.97 196.60,155.97 199.95,155.97 203.29,155.97 206.64,155.97 209.99,155.97 213.33,155.97 216.68,155.97 220.03,155.97 223.37,155.97 226.72,155.97 230.07,155.97 233.41,155.97 236.76,155.97 240.11,155.97 243.45,155.97 246.80,155.97 250.15,155.97 253.49,155.97 256.84,155.97 260.19,155.97 263.53,155.97 266.88,155.97 270.23,155.97 273.57,155.97 276.92,155.97 280.27,155.97 283.61,155.97 286.96,155.97 290.31,155.97 293.65,155.97 297.00,155.97 300.35,155.97 303.69,155.97 307.04,155.97 310.39,155.97 313.73,155.97 317.08,155.97 320.43,155.97 323.77,155.97 327.12,155.97 330.47,155.97 333.81,155.97 337.16,155.97 340.51,155.97 343.85,155.97 347.20,155.97 350.55,155.97 353.89,155.97 357.24,155.97 360.59,155.97 363.93,155.97 367.28,155.97 370.63,155.97 373.97,155.97 377.32,155.97 380.67,155.97 384.01,155.97 387.36,155.97 390.71,155.97 394.05,155.97 397.40,155.97 400.75,155.97 404.09,155.97 407.44,155.97 410.79,155.97 414.13,155.97 417.48,155.97 420.83,155.97 424.17,155.97 427.52,155.97 430.87,155.97 434.21,155.97 437.56,155.97 440.91,155.97 444.25,155.97 447.60,155.97 450.95,155.97 454.29,155.97 457.64,155.97 460.99,155.97 464.33,155.97 467.68,155.97 471.03,155.97 474.37,155.97 477.72,155.97 481.07,155.97 484.41,155.97 487.76,155.97 491.11,155.97 494.45,155.97 497.80,155.97 501.15,155.97 504.49,155.97 507.84,155.97 511.19,155.97 514.53,155.97 517.88,155.97 521.23,155.97 524.57,155.97 527.92,155.97
+531.27,155.97 534.61,155.97 537.96,155.97 541.31,155.97 544.65,155.97 548.00,155.97
+"/>
+</svg>
+</div>
+</div>
+<div class="tscroll">
+<table class="tbl"><thead><tr><th>DB/PDB</th><th>Tablespace<span class="info" tabindex="0" role="note" aria-label="CAPR column: TABLESPACE_NAME" title="CAPR column: TABLESPACE_NAME">i<span class="tip">CAPR column: TABLESPACE_NAME</span></span></th><th class="num">Train days<span class="info" tabindex="0" role="note" aria-label="how many days of history the estimate is based on -- more is better (CAPR column: TRAIN_N)" title="how many days of history the estimate is based on -- more is better (CAPR column: TRAIN_N)">i<span class="tip">how many days of history the estimate is based on -- more is better (CAPR column: TRAIN_N)</span></span></th><th class="num">Current (GiB)<span class="info" tabindex="0" role="note" aria-label="CAPR column: CUR_GB" title="CAPR column: CUR_GB">i<span class="tip">CAPR column: CUR_GB</span></span></th><th class="num">+30d (GiB)<span class="info" tabindex="0" role="note" aria-label="CAPR column: P30" title="CAPR column: P30">i<span class="tip">CAPR column: P30</span></span></th><th class="num">+90d (GiB)<span class="info" tabindex="0" role="note" aria-label="CAPR column: P90" title="CAPR column: P90">i<span class="tip">CAPR column: P90</span></span></th><th class="num">+180d (GiB)<span class="info" tabindex="0" role="note" aria-label="CAPR column: P180" title="CAPR column: P180">i<span class="tip">CAPR column: P180</span></span></th><th class="num">180d low<span class="info" tabindex="0" role="note" aria-label="CAPR column: P180_LO" title="CAPR column: P180_LO">i<span class="tip">CAPR column: P180_LO</span></span></th><th class="num">180d high<span class="info" tabindex="0" role="note" aria-label="95% prediction band on the +180-day projection; the actual value should land between low and high 95 times out of 100 if growth stays like the recent past (CAPR column: P180_HI)" title="95% prediction band on the +180-day projection; the actual value should land between low and high 95 times out of 100 if growth stays like the recent past (CAPR column: P180_HI)">i<span class="tip">95% prediction band on the +180-day projection; the actual value should land between low and high 95 times out of 100 if growth stays like the recent past (CAPR column: P180_HI)</span></span></th><th class="num">R2<span class="info" tabindex="0" role="note" aria-label="how closely growth follows a straight line: 1.00 = perfectly steady, near 0 = erratic" title="how closely growth follows a straight line: 1.00 = perfectly steady, near 0 = erratic">i<span class="tip">how closely growth follows a straight line: 1.00 = perfectly steady, near 0 = erratic</span></span></th><th>Quality<span class="info" tabindex="0" role="note" aria-label="our own reliability grade for this estimate -- hover the colored labels below (CAPR column: QUALITY)" title="our own reliability grade for this estimate -- hover the colored labels below (CAPR column: QUALITY)">i<span class="tip">our own reliability grade for this estimate -- hover the colored labels below (CAPR column: QUALITY)</span></span></th><th class="num">ESM +30 (GiB)<span class="info" tabindex="0" role="note" aria-label="a second, machine-learning estimate of the size 30 days from now -- usually the most accurate short-term number when present (CAPR column: ESM30)" title="a second, machine-learning estimate of the size 30 days from now -- usually the most accurate short-term number when present (CAPR column: ESM30)">i<span class="tip">a second, machine-learning estimate of the size 30 days from now -- usually the most accurate short-term number when present (CAPR column: ESM30)</span></span></th></tr></thead><tbody>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_DATA</td><td class="num">90</td><td class="num">479.04</td><td class="num">513.81</td><td class="num">584.63</td><td class="num">690.86</td><td class="num">689.78</td><td class="num">691.94</td><td class="num">1.000</td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td><td class="num">515.26</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_IDX</td><td class="num">90</td><td class="num">203.00</td><td class="num">219.49</td><td class="num">252.40</td><td class="num">301.77</td><td class="num">301.31</td><td class="num">302.23</td><td class="num">1.000</td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td><td class="num">219.33</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ANALYTICS_STAGE</td><td class="num">90</td><td class="num">202.02</td><td class="num">210.30</td><td class="num">280.99</td><td class="num">387.03</td><td class="num">362.27</td><td class="num">411.78</td><td class="num">0.919</td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td><td class="num">231.84</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>CUSTOMER_DATA</td><td class="num">90</td><td class="num">152.02</td><td class="num">152.62</td><td class="num">153.82</td><td class="num">155.62</td><td class="num">155.62</td><td class="num">155.62</td><td class="num">1.000</td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td><td class="num">152.62</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td class="num">90</td><td class="num">119.60</td><td class="num">127.25</td><td class="num">163.20</td><td class="num">217.14</td><td class="num">204.25</td><td class="num">230.03</td><td class="num">0.916</td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td><td class="num">155.35</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>SESSION_STORE</td><td class="num">19</td><td class="num">65.00</td><td class="num">140.00</td><td class="num">290.00</td><td class="num">515.00</td><td class="num">515.00</td><td class="num">515.00</td><td class="num">1.000</td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td><td class="num">52.18</td></tr>
+<tr><td>ECOMPRD</td><td>SYSAUX</td><td class="num">90</td><td class="num">12.53</td><td class="num">13.43</td><td class="num">15.23</td><td class="num">17.93</td><td class="num">17.93</td><td class="num">17.93</td><td class="num">1.000</td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td><td class="num">13.43</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>PRODUCT_CATALOG</td><td class="num">90</td><td class="num">12.00</td><td class="num">12.00</td><td class="num">12.00</td><td class="num">12.00</td><td class="num">12.00</td><td class="num">12.00</td><td class="num">1.000</td><td><span class="pill pill-flat" title="not growing at all">FLAT</span></td><td class="num"><span class="na">no model</span></td></tr>
+<tr><td>ECOMPRD</td><td>SYSTEM</td><td class="num">90</td><td class="num">1.10</td><td class="num">1.10</td><td class="num">1.10</td><td class="num">1.10</td><td class="num">1.10</td><td class="num">1.10</td><td class="num">1.000</td><td><span class="pill pill-flat" title="not growing at all">FLAT</span></td><td class="num"><span class="na">no model</span></td></tr>
+</tbody></table>
+</div>
+</section>
+<section id="s3">
+<h2>3. Tablespace growth anomalies <span style="font-weight:400;color:var(--muted);font-size:12px">(last 30 days)</span></h2>
+<p class="desc">Days when a tablespace grew (or shrank) much faster than its own normal pace. FLAG when |rate - median_rate| exceeds max(k*MAD, 100MiB/day floor). GAP = days since previous sample.</p>
+<div class="tscroll">
+<table class="tbl"><thead><tr><th>DB/PDB</th><th>Tablespace<span class="info" tabindex="0" role="note" aria-label="CAPR column: TABLESPACE_NAME" title="CAPR column: TABLESPACE_NAME">i<span class="tip">CAPR column: TABLESPACE_NAME</span></span></th><th>Day<span class="info" tabindex="0" role="note" aria-label="CAPR column: DAY_DT" title="CAPR column: DAY_DT">i<span class="tip">CAPR column: DAY_DT</span></span></th><th class="num">Gap<span class="info" tabindex="0" role="note" aria-label="days since the previous sample -- a big gap can inflate a one-day change (CAPR column: GAP)" title="days since the previous sample -- a big gap can inflate a one-day change (CAPR column: GAP)">i<span class="tip">days since the previous sample -- a big gap can inflate a one-day change (CAPR column: GAP)</span></span></th><th class="num">Delta (MiB)<span class="info" tabindex="0" role="note" aria-label="CAPR column: DELTA_MB" title="CAPR column: DELTA_MB">i<span class="tip">CAPR column: DELTA_MB</span></span></th><th class="num">Rate (MiB/day)<span class="info" tabindex="0" role="note" aria-label="how fast it grew that day, in mebibytes (MiB) per day (CAPR column: RATE_MB)" title="how fast it grew that day, in mebibytes (MiB) per day (CAPR column: RATE_MB)">i<span class="tip">how fast it grew that day, in mebibytes (MiB) per day (CAPR column: RATE_MB)</span></span></th><th class="num">Median (MiB/day)<span class="info" tabindex="0" role="note" aria-label="its usual daily growth rate over the recent baseline window (CAPR column: MED_MB)" title="its usual daily growth rate over the recent baseline window (CAPR column: MED_MB)">i<span class="tip">its usual daily growth rate over the recent baseline window (CAPR column: MED_MB)</span></span></th><th class="num">Threshold (MiB/day)<span class="info" tabindex="0" role="note" aria-label="how far from usual a day must be before it is flagged (CAPR column: THR_MB)" title="how far from usual a day must be before it is flagged (CAPR column: THR_MB)">i<span class="tip">how far from usual a day must be before it is flagged (CAPR column: THR_MB)</span></span></th><th class="num">Robust z<span class="info" tabindex="0" role="note" aria-label="how far outside its normal range this day was -- 3 or more is clearly unusual (CAPR column: Z)" title="how far outside its normal range this day was -- 3 or more is clearly unusual (CAPR column: Z)">i<span class="tip">how far outside its normal range this day was -- 3 or more is clearly unusual (CAPR column: Z)</span></span></th><th>Flag<span class="info" tabindex="0" role="note" aria-label="the direction of the flagged change for this day (CAPR column: ANOMALY_FLAG)" title="the direction of the flagged change for this day (CAPR column: ANOMALY_FLAG)">i<span class="tip">the direction of the flagged change for this day (CAPR column: ANOMALY_FLAG)</span></span></th></tr></thead><tbody>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ANALYTICS_STAGE</td><td>2026-09-16</td><td class="num">1</td><td class="num">40003.2</td><td class="num">40003.2</td><td class="num">1016.8</td><td class="num">395.3</td><td class="num z-hi">295.9</td><td class="sev-crit">HIGH</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>SESSION_STORE</td><td>2026-09-04</td><td class="num">1</td><td class="num">-74240.0</td><td class="num">-74240.0</td><td class="num">2560.0</td><td class="num">100.0</td><td class="num">&ndash;</td><td class="sev-crit">LOW</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td>2026-09-03</td><td class="num">1</td><td class="num">1193.7</td><td class="num">1193.7</td><td class="num">396.5</td><td class="num">393.9</td><td class="num z-hi">6.1</td><td class="sev-crit">HIGH</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td>2026-09-02</td><td class="num">1</td><td class="num">1191.3</td><td class="num">1191.3</td><td class="num">388.2</td><td class="num">356.6</td><td class="num z-hi">6.8</td><td class="sev-crit">HIGH</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td>2026-09-01</td><td class="num">1</td><td class="num">1204.5</td><td class="num">1204.5</td><td class="num">388.2</td><td class="num">314.1</td><td class="num z-hi">7.8</td><td class="sev-crit">HIGH</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td>2026-08-31</td><td class="num">1</td><td class="num">1179.1</td><td class="num">1179.1</td><td class="num">379.9</td><td class="num">277.3</td><td class="num z-hi">8.6</td><td class="sev-crit">HIGH</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td>2026-08-30</td><td class="num">1</td><td class="num">1117.3</td><td class="num">1117.3</td><td class="num">379.9</td><td class="num">246.5</td><td class="num z-hi">9.0</td><td class="sev-crit">HIGH</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td>2026-08-29</td><td class="num">1</td><td class="num">1179.9</td><td class="num">1179.9</td><td class="num">374.1</td><td class="num">214.1</td><td class="num z-hi">11.3</td><td class="sev-crit">HIGH</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td>2026-08-28</td><td class="num">1</td><td class="num">1237.8</td><td class="num">1237.8</td><td class="num">373.9</td><td class="num">206.6</td><td class="num z-hi">12.5</td><td class="sev-crit">HIGH</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td>2026-08-27</td><td class="num">1</td><td class="num">1216.9</td><td class="num">1216.9</td><td class="num">373.9</td><td class="num">197.4</td><td class="num z-hi">12.8</td><td class="sev-crit">HIGH</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td>2026-08-26</td><td class="num">1</td><td class="num">1187.9</td><td class="num">1187.9</td><td class="num">368.9</td><td class="num">169.9</td><td class="num z-hi">14.5</td><td class="sev-crit">HIGH</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td>2026-08-25</td><td class="num">1</td><td class="num">1131.1</td><td class="num">1131.1</td><td class="num">363.8</td><td class="num">155.1</td><td class="num z-hi">14.8</td><td class="sev-crit">HIGH</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td>2026-08-24</td><td class="num">1</td><td class="num">1232.9</td><td class="num">1232.9</td><td class="num">363.8</td><td class="num">147.2</td><td class="num z-hi">17.7</td><td class="sev-crit">HIGH</td></tr>
+</tbody></table>
+</div>
+</section>
+<section id="s4">
+<h2>4. CPU trend (host busy% avg / p95 / peak window, DB CPU sec and % of cores)</h2>
+<p class="desc">How busy the CPU has been, and when it might run out of headroom. BUSY_PCT is the daily average; BUSY_P95 / BUSY_PEAK are the busy hour (p95 of the day's snapshot intervals / peak-window busy%), which is what actually saturates. DB_CPU_PCT / DB_CPU_P95 express this container's DB CPU as a percent of host core capacity. DAYS_SAT = projected days until the metric reaches 80% (every metric but DB_CPU_SEC).</p>
+<div class="chart-grid">
+<div class="chart-card">
+<h4>Host CPU busy% (ECOMPRD)</h4>
+<div class="chart-sub">saturation threshold 80%</div>
+<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="CPU busy percent chart for ECOMPRD">
+<line class="grid-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<text class="axis-label" x="2" y="205.00">0%</text>
+<line class="grid-line" x1="46.00" y1="155.00" x2="548.00" y2="155.00"/>
+<text class="axis-label" x="2" y="158.00">22%</text>
+<line class="grid-line" x1="46.00" y1="108.00" x2="548.00" y2="108.00"/>
+<text class="axis-label" x="2" y="111.00">45%</text>
+<line class="grid-line" x1="46.00" y1="61.00" x2="548.00" y2="61.00"/>
+<text class="axis-label" x="2" y="64.00">67%</text>
+<line class="grid-line" x1="46.00" y1="14.00" x2="548.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">90%</text>
+<text class="axis-label" x="46.00" y="224.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="224.00" text-anchor="middle">2026-08-23</text>
+<text class="axis-label" x="548.00" y="224.00" text-anchor="end">2026-12-21</text>
+<line class="axis-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<line class="axis-line" x1="46.00" y1="14.00" x2="46.00" y2="202.00"/>
+<line class="thresh-line" x1="46.00" y1="34.14" x2="548.00" y2="34.14"/>
+<text class="thresh-label" x="546.00" y="31.14" text-anchor="end">sat 80%</text>
+<polyline class="hist-line" points="
+46.00,132.16 48.09,132.23 50.18,126.56 52.28,129.18 54.37,127.72 56.46,127.00 58.55,128.95 60.64,133.32 62.73,131.59 64.83,127.99 66.92,127.63 69.01,126.57 71.10,126.41 73.19,126.01 75.28,130.04 77.38,129.26 79.47,124.83 81.56,125.52 83.65,124.43 85.74,124.84 87.83,124.91 89.93,129.64 92.02,129.47 94.11,123.74 96.20,123.32 98.29,123.21 100.38,123.31 102.48,123.07 104.57,128.03 106.66,128.41 108.75,122.48 110.84,121.92 112.93,121.64 115.03,121.36 117.12,119.57 119.21,125.61 121.30,126.31 123.39,120.48 125.48,120.88 127.58,120.46 129.67,119.52 131.76,119.75 133.85,125.47 135.94,125.56 138.03,120.39 140.13,118.71 142.22,119.05 144.31,118.88 146.40,117.27 148.49,123.21 150.58,124.67 152.68,116.63 154.77,116.98 156.86,118.01 158.95,117.59 161.04,113.47 163.13,122.07 165.23,121.55 167.32,115.29 169.41,115.68 171.50,116.10 173.59,115.50 175.68,116.17 177.78,121.44 179.87,121.06 181.96,114.39 184.05,112.98 186.14,115.23 188.23,113.96 190.33,113.11 192.42,119.32 194.51,118.93 196.60,112.75 198.69,112.54 200.78,112.36 202.88,112.00 204.97,112.98 207.06,118.06 209.15,118.10 211.24,111.37 213.33,110.51 215.43,110.02 217.52,109.48 219.61,109.55 221.70,116.25 223.79,116.43 225.88,110.03 227.98,109.67 230.07,109.44 232.16,109.72 234.25,108.35 236.34,115.46 238.43,114.59 240.53,107.85 242.62,107.92 244.71,107.61 246.80,107.97 248.89,107.71 250.98,112.77 253.08,113.86 255.17,106.44 257.26,105.67 259.35,106.46 261.44,106.14 263.53,107.27 265.63,112.65 267.72,112.99 269.81,104.33 271.90,104.69 273.99,103.38 276.08,105.18 278.18,104.19 280.27,109.63 282.36,111.62 284.45,103.21 286.54,102.87 288.63,103.80 290.73,102.55 292.82,103.55 294.91,110.38 297.00,108.11 299.09,101.51 301.18,100.95 303.28,101.52 305.37,101.66 307.46,102.41 309.55,108.51 311.64,108.61 313.73,100.60 315.83,100.27 317.92,101.03 320.01,99.73 322.10,99.05 324.19,106.06 326.28,106.37 328.38,97.83 330.47,98.18 332.56,98.87 334.65,89.89 336.74,89.12 338.83,96.62 340.93,96.47 343.02,55.55 345.11,88.60 347.20,88.87 349.29,88.93
+351.38,88.66 353.48,94.66 355.57,95.27 357.66,87.58 359.75,87.77
+"/>
+<polyline class="proj-line" points="
+359.75,87.77 548.00,60.30
+"/>
+<circle class="anom-dot" cx="343.02" cy="55.55" r="3"/>
+</svg>
+</div>
+<div class="chart-card">
+<h4>DB CPU sec/day (ECOMPRD)</h4>
+<div class="chart-sub">REGR trend only -- no fixed saturation ceiling</div>
+<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="DB CPU seconds per day chart for ECOMPRD">
+<line class="grid-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<text class="axis-label" x="2" y="205.00">0 s</text>
+<line class="grid-line" x1="46.00" y1="155.00" x2="548.00" y2="155.00"/>
+<text class="axis-label" x="2" y="158.00">7815 s</text>
+<line class="grid-line" x1="46.00" y1="108.00" x2="548.00" y2="108.00"/>
+<text class="axis-label" x="2" y="111.00">15631 s</text>
+<line class="grid-line" x1="46.00" y1="61.00" x2="548.00" y2="61.00"/>
+<text class="axis-label" x="2" y="64.00">23446 s</text>
+<line class="grid-line" x1="46.00" y1="14.00" x2="548.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">31262 s</text>
+<text class="axis-label" x="46.00" y="224.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="224.00" text-anchor="middle">2026-08-23</text>
+<text class="axis-label" x="548.00" y="224.00" text-anchor="end">2026-12-21</text>
+<line class="axis-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<line class="axis-line" x1="46.00" y1="14.00" x2="46.00" y2="202.00"/>
+<polyline class="hist-line" points="
+46.00,122.44 48.09,119.07 50.18,112.33 52.28,115.44 54.37,113.71 56.46,112.86 58.55,115.16 60.64,120.36 62.73,118.31 64.83,114.03 66.92,113.61 69.01,112.34 71.10,112.15 73.19,111.67 75.28,116.47 77.38,115.53 79.47,110.27 81.56,111.09 83.65,109.80 85.74,110.28 87.83,110.36 89.93,115.99 92.02,115.79 94.11,108.98 96.20,108.47 98.29,108.35 100.38,108.47 102.48,108.18 104.57,114.08 106.66,114.53 108.75,107.48 110.84,106.81 112.93,106.49 115.03,106.14 117.12,104.02 119.21,111.20 121.30,112.03 123.39,105.11 125.48,105.58 127.58,105.07 129.67,103.96 131.76,104.24 133.85,111.03 135.94,111.14 138.03,105.00 140.13,103.00 142.22,103.40 144.31,103.20 146.40,101.29 148.49,108.34 150.58,110.09 152.68,100.52 154.77,100.95 156.86,102.16 158.95,101.67 161.04,123.08 163.13,106.99 165.23,106.37 167.32,98.93 169.41,99.40 171.50,99.90 173.59,99.18 175.68,99.98 177.78,106.25 179.87,105.79 181.96,97.86 184.05,96.19 186.14,98.87 188.23,97.35 190.33,96.35 192.42,103.72 194.51,103.26 196.60,95.91 198.69,95.66 200.78,95.45 202.88,95.03 204.97,96.18 207.06,102.22 209.15,102.27 211.24,94.27 213.33,93.25 215.43,92.67 217.52,92.02 219.61,92.11 221.70,100.07 223.79,100.29 225.88,92.68 227.98,92.25 230.07,91.98 232.16,92.31 234.25,90.68 236.34,99.14 238.43,98.10 240.53,90.09 242.62,90.17 244.71,89.80 246.80,90.23 248.89,89.92 250.98,95.94 253.08,97.24 255.17,88.41 257.26,87.49 259.35,88.43 261.44,88.06 263.53,89.40 265.63,95.79 267.72,96.20 269.81,85.90 271.90,86.33 273.99,84.78 276.08,86.92 278.18,85.74 280.27,92.21 282.36,94.57 284.45,84.58 286.54,84.17 288.63,85.28 290.73,83.78 292.82,84.98 294.91,93.10 297.00,90.39 299.09,82.55 301.18,81.89 303.28,82.57 305.37,82.73 307.46,83.62 309.55,90.88 311.64,90.99 313.73,81.47 315.83,81.08 317.92,81.98 320.01,80.44 322.10,79.62 324.19,87.96 326.28,88.33 328.38,78.18 330.47,78.60 332.56,79.41 334.65,68.75 336.74,67.82 338.83,76.74 340.93,76.56 343.02,27.93 345.11,67.21 347.20,67.53 349.29,67.60 351.38,67.28 353.48,74.42 355.57,75.13 357.66,66.00 359.75,66.22
+"/>
+<polyline class="proj-line" points="
+359.75,66.22 548.00,33.58
+"/>
+</svg>
+</div>
+<div class="chart-card">
+<h4>Host CPU busy% (ECOMPRD/SHOP_PDB)</h4>
+<div class="chart-sub">saturation threshold 80%</div>
+<div class="empty-note">No daily CPU history collected yet for this container.</div>
+</div>
+<div class="chart-card">
+<h4>DB CPU sec/day (ECOMPRD/SHOP_PDB)</h4>
+<div class="chart-sub">REGR trend only -- no fixed saturation ceiling</div>
+<svg viewBox="0 0 560 230" class="chart-svg" role="img" aria-label="DB CPU seconds per day chart for ECOMPRD/SHOP_PDB">
+<line class="grid-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<text class="axis-label" x="2" y="205.00">0 s</text>
+<line class="grid-line" x1="46.00" y1="155.00" x2="548.00" y2="155.00"/>
+<text class="axis-label" x="2" y="158.00">221437 s</text>
+<line class="grid-line" x1="46.00" y1="108.00" x2="548.00" y2="108.00"/>
+<text class="axis-label" x="2" y="111.00">442874 s</text>
+<line class="grid-line" x1="46.00" y1="61.00" x2="548.00" y2="61.00"/>
+<text class="axis-label" x="2" y="64.00">664311 s</text>
+<line class="grid-line" x1="46.00" y1="14.00" x2="548.00" y2="14.00"/>
+<text class="axis-label" x="2" y="17.00">885748 s</text>
+<text class="axis-label" x="46.00" y="224.00" text-anchor="start">2026-04-25</text>
+<text class="axis-label" x="297.00" y="224.00" text-anchor="middle">2026-07-09</text>
+<text class="axis-label" x="548.00" y="224.00" text-anchor="end">2026-09-22</text>
+<line class="axis-line" x1="46.00" y1="202.00" x2="548.00" y2="202.00"/>
+<line class="axis-line" x1="46.00" y1="14.00" x2="46.00" y2="202.00"/>
+<polyline class="hist-line" points="
+46.00,155.20 49.35,153.22 52.69,149.25 56.04,151.08 59.39,150.06 62.73,149.56 66.08,150.92 69.43,153.98 72.77,152.77 76.12,150.25 79.47,150.00 82.81,149.26 86.16,149.14 89.51,148.87 92.85,151.69 96.20,151.14 99.55,148.04 102.89,148.52 106.24,147.77 109.59,148.05 112.93,148.10 116.28,151.40 119.63,151.29 122.97,147.28 126.32,146.98 129.67,146.91 133.01,146.98 136.36,146.81 139.71,150.28 143.05,150.54 146.40,146.40 149.75,146.01 153.09,145.82 156.44,145.61 159.79,144.37 163.13,148.59 166.48,149.08 169.83,145.00 173.17,145.28 176.52,144.98 179.87,144.33 183.21,144.49 186.56,148.49 189.91,148.55 193.25,144.94 196.60,143.76 199.95,144.00 203.29,143.88 206.64,142.76 209.99,146.91 213.33,147.93 216.68,142.31 220.03,142.56 223.37,143.27 226.72,142.98 230.07,155.58 233.41,146.11 236.76,145.75 240.11,141.37 243.45,141.65 246.80,141.94 250.15,141.52 253.49,141.99 256.84,145.67 260.19,145.41 263.53,140.74 266.88,139.76 270.23,141.33 273.57,140.44 276.92,139.85 280.27,144.19 283.61,143.92 286.96,139.59 290.31,139.45 293.65,139.33 297.00,139.07 300.35,139.75 303.69,143.31 307.04,143.33 310.39,138.63 313.73,138.03 317.08,137.69 320.43,137.31 323.77,137.36 327.12,142.04 330.47,142.17 333.81,137.70 337.16,137.44 340.51,137.28 343.85,137.47 347.20,136.52 350.55,141.49 353.89,140.88 357.24,136.17 360.59,136.22 363.93,136.00 367.28,136.25 370.63,136.07 373.97,139.61 377.32,140.37 380.67,135.18 384.01,134.64 387.36,135.20 390.71,134.98 394.05,135.76 397.40,139.53 400.75,139.76 404.09,133.71 407.44,133.96 410.79,133.05 414.13,134.30 417.48,133.61 420.83,137.42 424.17,138.80 427.52,132.93 430.87,132.69 434.21,133.34 437.56,132.46 440.91,133.17 444.25,137.94 447.60,136.35 450.95,131.74 454.29,131.35 457.64,131.75 460.99,131.84 464.33,132.37 467.68,136.63 471.03,136.70 474.37,131.10 477.72,130.87 481.07,131.40 484.41,130.50 487.76,130.01 491.11,134.92 494.45,135.14 497.80,129.17 501.15,129.41 504.49,129.89 507.84,68.75 511.19,67.82 514.53,76.74 517.88,76.56 521.23,27.93 524.57,67.21 527.92,67.53
+531.27,67.60 534.61,67.28 537.96,74.42 541.31,75.13 544.65,66.00 548.00,66.22
+"/>
+</svg>
+</div>
+</div>
+<div class="tscroll">
+<table class="tbl"><thead><tr><th>DB/PDB</th><th>Metric<span class="info" tabindex="0" role="note" aria-label="CAPR column: METRIC" title="CAPR column: METRIC">i<span class="tip">CAPR column: METRIC</span></span></th><th class="num">Train days<span class="info" tabindex="0" role="note" aria-label="CAPR column: TRAIN_N" title="CAPR column: TRAIN_N">i<span class="tip">CAPR column: TRAIN_N</span></span></th><th>Fill<span class="info" tabindex="0" role="note" aria-label="CAPR column: CUR_VAL" title="CAPR column: CUR_VAL">i<span class="tip">CAPR column: CUR_VAL</span></span></th><th class="num">Current<span class="info" tabindex="0" role="note" aria-label="CAPR column: CUR_VAL" title="CAPR column: CUR_VAL">i<span class="tip">CAPR column: CUR_VAL</span></span></th><th class="num">Slope/day<span class="info" tabindex="0" role="note" aria-label="how much this metric moves per day on average (CAPR column: SLOPE_DAY)" title="how much this metric moves per day on average (CAPR column: SLOPE_DAY)">i<span class="tip">how much this metric moves per day on average (CAPR column: SLOPE_DAY)</span></span></th><th class="num">R2</th><th class="num">Days to saturation<span class="info" tabindex="0" role="note" aria-label="estimated days until this metric reaches the saturation threshold (none for DB_CPU_SEC, which has no ceiling) (CAPR column: DAYS_SAT)" title="estimated days until this metric reaches the saturation threshold (none for DB_CPU_SEC, which has no ceiling) (CAPR column: DAYS_SAT)">i<span class="tip">estimated days until this metric reaches the saturation threshold (none for DB_CPU_SEC, which has no ceiling) (CAPR column: DAYS_SAT)</span></span></th><th class="num">Range<span class="info" tabindex="0" role="note" aria-label="worst-to-best case days-to-saturation from the statistical uncertainty of the trend; never = it may not saturate at the slow end (CAPR columns: SAT_WORST, SAT_BEST)" title="worst-to-best case days-to-saturation from the statistical uncertainty of the trend; never = it may not saturate at the slow end (CAPR columns: SAT_WORST, SAT_BEST)">i<span class="tip">worst-to-best case days-to-saturation from the statistical uncertainty of the trend; never = it may not saturate at the slow end (CAPR columns: SAT_WORST, SAT_BEST)</span></span></th><th>Quality<span class="info" tabindex="0" role="note" aria-label="CAPR column: QUALITY" title="CAPR column: QUALITY">i<span class="tip">CAPR column: QUALITY</span></span></th></tr></thead><tbody>
+<tr><td>ECOMPRD</td><td>BUSY_P95</td><td class="num">90</td><td><div class="bar-cell"><div class="bar-track"><div class="bar-fill warn" style="width:70.2%"></div></div><span class="bar-pct">70%</span></div></td><td class="num">70.22</td><td class="num">0.1984</td><td class="num">0.621</td><td class="num sev-warn">49</td><td class="num">42&ndash;59</td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr><td>ECOMPRD</td><td>BUSY_PCT</td><td class="num">90</td><td><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:54.4%"></div></div><span class="bar-pct">54%</span></div></td><td class="num">54.44</td><td class="num">0.1454</td><td class="num">0.663</td><td class="num">175</td><td class="num">152&ndash;206</td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr><td>ECOMPRD</td><td>BUSY_PEAK</td><td class="num">90</td><td><div class="bar-cell"><div class="bar-track"><div class="bar-fill warn" style="width:67.1%"></div></div><span class="bar-pct">67%</span></div></td><td class="num">67.08</td><td class="num">0.1987</td><td class="num">0.609</td><td class="num sev-warn">65</td><td class="num">55&ndash;78</td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr><td>ECOMPRD</td><td>DB_CPU_P95</td><td class="num">90</td><td><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:2.1%"></div></div><span class="bar-pct">2%</span></div></td><td class="num">2.11</td><td class="num">0.0060</td><td class="num">0.621</td><td class="num">13087</td><td class="num">11227&ndash;15684</td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr><td>ECOMPRD</td><td>DB_CPU_PCT</td><td class="num">90</td><td><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:1.6%"></div></div><span class="bar-pct">2%</span></div></td><td class="num">1.63</td><td class="num">0.0044</td><td class="num">0.663</td><td class="num">17959</td><td class="num">15603&ndash;21153</td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr><td>ECOMPRD</td><td>DB_CPU_SEC</td><td class="num">90</td><td>&ndash;</td><td class="num">22577.85</td><td class="num">60.3198</td><td class="num">0.663</td><td class="num"><span class="na">no crossing</span></td><td class="num">&ndash;</td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>DB_CPU_P95</td><td class="num">90</td><td><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:59.7%"></div></div><span class="bar-pct">60%</span></div></td><td class="num">59.69</td><td class="num">0.3014</td><td class="num">0.478</td><td class="num sev-warn">67</td><td class="num">55&ndash;86</td><td><span class="pill pill-warn" title="growth is too erratic for a dependable estimate">LOW_CONFIDENCE</span></td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>DB_CPU_PCT</td><td class="num">90</td><td><div class="bar-cell"><div class="bar-track"><div class="bar-fill " style="width:46.3%"></div></div><span class="bar-pct">46%</span></div></td><td class="num">46.28</td><td class="num">0.2289</td><td class="num">0.476</td><td class="num">147</td><td class="num">120&ndash;189</td><td><span class="pill pill-warn" title="growth is too erratic for a dependable estimate">LOW_CONFIDENCE</span></td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>DB_CPU_SEC</td><td class="num">90</td><td>&ndash;</td><td class="num">639705.76</td><td class="num">3164.1938</td><td class="num">0.476</td><td class="num"><span class="na">no crossing</span></td><td class="num">&ndash;</td><td><span class="pill pill-warn" title="growth is too erratic for a dependable estimate">LOW_CONFIDENCE</span></td></tr>
+</tbody></table>
+</div>
+</section>
+<section id="s5">
+<h2>5. CPU busy% anomalies <span style="font-weight:400;color:var(--muted);font-size:12px">vs same-weekday baseline, last 30 days</span></h2>
+<p class="desc">Days when the CPU was unusually busy compared with the same weekday before. FLAG when |busy% - median%| exceeds THRESHOLD (k*MAD, floored).</p>
+<div class="tscroll">
+<table class="tbl"><thead><tr><th>DB/PDB</th><th>Day<span class="info" tabindex="0" role="note" aria-label="CAPR column: DAY_DT" title="CAPR column: DAY_DT">i<span class="tip">CAPR column: DAY_DT</span></span></th><th class="num">Busy %<span class="info" tabindex="0" role="note" aria-label="CAPR column: BUSY_PCT" title="CAPR column: BUSY_PCT">i<span class="tip">CAPR column: BUSY_PCT</span></span></th><th class="num">Median %<span class="info" tabindex="0" role="note" aria-label="the usual busy percent for that same weekday (CAPR column: MEDIAN_PCT)" title="the usual busy percent for that same weekday (CAPR column: MEDIAN_PCT)">i<span class="tip">the usual busy percent for that same weekday (CAPR column: MEDIAN_PCT)</span></span></th><th class="num">Threshold %<span class="info" tabindex="0" role="note" aria-label="how far from usual a day must be before it is flagged (CAPR column: THRESHOLD_PCT)" title="how far from usual a day must be before it is flagged (CAPR column: THRESHOLD_PCT)">i<span class="tip">how far from usual a day must be before it is flagged (CAPR column: THRESHOLD_PCT)</span></span></th><th class="num">Robust z<span class="info" tabindex="0" role="note" aria-label="how far outside its normal range this day was -- 3 or more is clearly unusual (CAPR column: Z)" title="how far outside its normal range this day was -- 3 or more is clearly unusual (CAPR column: Z)">i<span class="tip">how far outside its normal range this day was -- 3 or more is clearly unusual (CAPR column: Z)</span></span></th><th>Flag<span class="info" tabindex="0" role="note" aria-label="CAPR column: ANOMALY_FLAG" title="CAPR column: ANOMALY_FLAG">i<span class="tip">CAPR column: ANOMALY_FLAG</span></span></th></tr></thead><tbody>
+<tr><td>ECOMPRD</td><td>2026-09-14</td><td class="num">69.80</td><td class="num">46.82</td><td class="num">9.00</td><td class="num z-hi">7.7</td><td class="sev-crit">HIGH</td></tr>
+</tbody></table>
+</div>
+<h3 style="font-size:13px;margin:16px 0 6px">Level shifts <span class="info" tabindex="0" role="note" aria-label="a sustained step in the level a series runs at -- the thing a single-day outlier test structurally cannot see" title="a sustained step in the level a series runs at -- the thing a single-day outlier test structurally cannot see">i<span class="tip">a sustained step in the level a series runs at -- the thing a single-day outlier test structurally cannot see</span></span></h3>
+<p class="desc">A sustained step, not a one-day spike: the median of the recent window against the median of the baseline window before it. Flagged only when the gap exceeds the threshold in percentage points AND every day of the recent window stays on the same side of the baseline median plus its MAD sigma.</p>
+<div class="tscroll">
+<table class="tbl"><thead><tr><th>DB/PDB</th><th>Metric<span class="info" tabindex="0" role="note" aria-label="CAPR column: METRIC" title="CAPR column: METRIC">i<span class="tip">CAPR column: METRIC</span></span></th><th>Windows<span class="info" tabindex="0" role="note" aria-label="recent window vs the baseline window before it (CAPR columns: RECENT_DAYS, BASE_DAYS)" title="recent window vs the baseline window before it (CAPR columns: RECENT_DAYS, BASE_DAYS)">i<span class="tip">recent window vs the baseline window before it (CAPR columns: RECENT_DAYS, BASE_DAYS)</span></span></th><th class="num">Recent %<span class="info" tabindex="0" role="note" aria-label="median over the recent window (CAPR column: RECENT_MED)" title="median over the recent window (CAPR column: RECENT_MED)">i<span class="tip">median over the recent window (CAPR column: RECENT_MED)</span></span></th><th class="num">Base %<span class="info" tabindex="0" role="note" aria-label="median over the baseline window just before it (CAPR column: BASE_MED)" title="median over the baseline window just before it (CAPR column: BASE_MED)">i<span class="tip">median over the baseline window just before it (CAPR column: BASE_MED)</span></span></th><th class="num">Shift (pts)<span class="info" tabindex="0" role="note" aria-label="recent median minus baseline median, in percentage points (CAPR column: SHIFT_PCT)" title="recent median minus baseline median, in percentage points (CAPR column: SHIFT_PCT)">i<span class="tip">recent median minus baseline median, in percentage points (CAPR column: SHIFT_PCT)</span></span></th><th class="num">Threshold<span class="info" tabindex="0" role="note" aria-label="CAPR column: THRESHOLD_PCT" title="CAPR column: THRESHOLD_PCT">i<span class="tip">CAPR column: THRESHOLD_PCT</span></span></th><th class="num">N of M<span class="info" tabindex="0" role="note" aria-label="how many days of the recent window are past the baseline median plus its MAD sigma -- all of them, for a flag (CAPR columns: N_ABOVE, N_BELOW, N_RECENT)" title="how many days of the recent window are past the baseline median plus its MAD sigma -- all of them, for a flag (CAPR columns: N_ABOVE, N_BELOW, N_RECENT)">i<span class="tip">how many days of the recent window are past the baseline median plus its MAD sigma -- all of them, for a flag (CAPR columns: N_ABOVE, N_BELOW, N_RECENT)</span></span></th><th>Flag<span class="info" tabindex="0" role="note" aria-label="CAPR column: SHIFT_FLAG" title="CAPR column: SHIFT_FLAG">i<span class="tip">CAPR column: SHIFT_FLAG</span></span></th></tr></thead><tbody>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>DB_CPU_PCT</td><td>7 vs 28 d</td><td class="num">45.8</td><td class="num">24.1</td><td class="num">+21.8</td><td class="num">15.0</td><td class="num">7/7</td><td class="sev-warn">UP</td></tr>
+</tbody></table>
+</div>
+</section>
+<section id="s6">
+<h2>6. Tier 2 (ESM) vs Tier 1 (REGR) <span class="info" tabindex="0" role="note" aria-label="Tier 1 fits a straight line through recent history; Tier 2 is an Oracle ML model that also learns weekly patterns -- trust Tier 2 for the next 30 days when both exist, Tier 1 for further out" title="Tier 1 fits a straight line through recent history; Tier 2 is an Oracle ML model that also learns weekly patterns -- trust Tier 2 for the next 30 days when both exist, Tier 1 for further out">i<span class="tip">Tier 1 fits a straight line through recent history; Tier 2 is an Oracle ML model that also learns weekly patterns -- trust Tier 2 for the next 30 days when both exist, Tier 1 for further out</span></span></h2>
+<p class="desc">A second opinion on the short-term forecast from a machine-learning model. 24 OML ESM model(s) trained (OK). If 0: run <code>EXEC cap_forecast_ml.train_all</code>. ESM reaches +30 only (19c hard horizon cap) and only for fresh models; +90/180/365 are REGR-only. ESM_MODEL names the variant behind each ESM column: HOLT = EXSM_HOLT, ADDW = EXSM_ADDWINTERS with a 7-day season.</p>
+<h3 style="font-size:13px;margin:16px 0 6px">6a. Tablespaces (GiB) <span style="font-weight:400;color:var(--muted);font-size:12px">(the same 9 of 9 as section 2)</span></h3>
+<div class="tscroll">
+<table class="tbl"><thead><tr><th>DB/PDB</th><th>Tablespace<span class="info" tabindex="0" role="note" aria-label="CAPR column: SERIES_KEY" title="CAPR column: SERIES_KEY">i<span class="tip">CAPR column: SERIES_KEY</span></span></th><th class="num">Horizon (days)<span class="info" tabindex="0" role="note" aria-label="CAPR column: HORIZON_DAYS" title="CAPR column: HORIZON_DAYS">i<span class="tip">CAPR column: HORIZON_DAYS</span></span></th><th class="num">REGR (GiB)<span class="info" tabindex="0" role="note" aria-label="CAPR column: REGR_GB" title="CAPR column: REGR_GB">i<span class="tip">CAPR column: REGR_GB</span></span></th><th class="num">ESM (GiB)<span class="info" tabindex="0" role="note" aria-label="CAPR column: ESM_GB" title="CAPR column: ESM_GB">i<span class="tip">CAPR column: ESM_GB</span></span></th><th class="num">ESM low<span class="info" tabindex="0" role="note" aria-label="CAPR column: ESM_LO_GB" title="CAPR column: ESM_LO_GB">i<span class="tip">CAPR column: ESM_LO_GB</span></span></th><th class="num">ESM high<span class="info" tabindex="0" role="note" aria-label="CAPR column: ESM_HI_GB" title="CAPR column: ESM_HI_GB">i<span class="tip">CAPR column: ESM_HI_GB</span></span></th><th>ESM model<span class="info" tabindex="0" role="note" aria-label="CAPR column: ESM_MODEL" title="CAPR column: ESM_MODEL">i<span class="tip">CAPR column: ESM_MODEL</span></span></th></tr></thead><tbody>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_DATA</td><td class="num">30</td><td class="num">513.81</td><td class="num">515.26</td><td class="num">513.55</td><td class="num">516.98</td><td>ADDW</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_DATA</td><td class="num">90</td><td class="num">584.63</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_DATA</td><td class="num">180</td><td class="num">690.86</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_DATA</td><td class="num">365</td><td class="num">909.22</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_IDX</td><td class="num">30</td><td class="num">219.49</td><td class="num">219.33</td><td class="num">217.90</td><td class="num">220.77</td><td>ADDW</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_IDX</td><td class="num">90</td><td class="num">252.40</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_IDX</td><td class="num">180</td><td class="num">301.77</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ORDERS_IDX</td><td class="num">365</td><td class="num">403.25</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ANALYTICS_STAGE</td><td class="num">30</td><td class="num">210.30</td><td class="num">231.84</td><td class="num">198.05</td><td class="num">265.62</td><td>HOLT</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ANALYTICS_STAGE</td><td class="num">90</td><td class="num">280.99</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ANALYTICS_STAGE</td><td class="num">180</td><td class="num">387.03</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>ANALYTICS_STAGE</td><td class="num">365</td><td class="num">604.99</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>CUSTOMER_DATA</td><td class="num">30</td><td class="num">152.62</td><td class="num">152.62</td><td class="num">152.62</td><td class="num">152.62</td><td>HOLT</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>CUSTOMER_DATA</td><td class="num">90</td><td class="num">153.82</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>CUSTOMER_DATA</td><td class="num">180</td><td class="num">155.62</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>CUSTOMER_DATA</td><td class="num">365</td><td class="num">159.32</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td class="num">30</td><td class="num">127.25</td><td class="num">155.35</td><td class="num">143.06</td><td class="num">167.64</td><td>HOLT</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td class="num">90</td><td class="num">163.20</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td class="num">180</td><td class="num">217.14</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>AUDIT_TRAIL</td><td class="num">365</td><td class="num">328.01</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>SESSION_STORE</td><td class="num">30</td><td class="num">140.00</td><td class="num">52.18</td><td class="num">-92.51</td><td class="num">196.88</td><td>ADDW</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>SESSION_STORE</td><td class="num">90</td><td class="num">290.00</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>SESSION_STORE</td><td class="num">180</td><td class="num">515.00</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>SESSION_STORE</td><td class="num">365</td><td class="num">977.50</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>SYSAUX</td><td class="num">30</td><td class="num">13.43</td><td class="num">13.43</td><td class="num">13.43</td><td class="num">13.43</td><td>HOLT</td></tr>
+<tr><td>ECOMPRD</td><td>SYSAUX</td><td class="num">90</td><td class="num">15.23</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>SYSAUX</td><td class="num">180</td><td class="num">17.93</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>SYSAUX</td><td class="num">365</td><td class="num">23.48</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>PRODUCT_CATALOG</td><td class="num">30</td><td class="num">12.00</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>PRODUCT_CATALOG</td><td class="num">90</td><td class="num">12.00</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>PRODUCT_CATALOG</td><td class="num">180</td><td class="num">12.00</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>PRODUCT_CATALOG</td><td class="num">365</td><td class="num">12.00</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>SYSTEM</td><td class="num">30</td><td class="num">1.10</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>SYSTEM</td><td class="num">90</td><td class="num">1.10</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>SYSTEM</td><td class="num">180</td><td class="num">1.10</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>SYSTEM</td><td class="num">365</td><td class="num">1.10</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+</tbody></table>
+</div>
+<h3 style="font-size:13px;margin:16px 0 6px">6b. CPU (busy% / DB CPU sec)</h3>
+<div class="tscroll">
+<table class="tbl"><thead><tr><th>DB/PDB</th><th>Metric<span class="info" tabindex="0" role="note" aria-label="CAPR column: SERIES_KEY" title="CAPR column: SERIES_KEY">i<span class="tip">CAPR column: SERIES_KEY</span></span></th><th class="num">Horizon (days)<span class="info" tabindex="0" role="note" aria-label="CAPR column: HORIZON_DAYS" title="CAPR column: HORIZON_DAYS">i<span class="tip">CAPR column: HORIZON_DAYS</span></span></th><th class="num">REGR<span class="info" tabindex="0" role="note" aria-label="CAPR column: REGR" title="CAPR column: REGR">i<span class="tip">CAPR column: REGR</span></span></th><th class="num">ESM<span class="info" tabindex="0" role="note" aria-label="CAPR column: ESM" title="CAPR column: ESM">i<span class="tip">CAPR column: ESM</span></span></th><th class="num">ESM low<span class="info" tabindex="0" role="note" aria-label="CAPR column: ESM_LO" title="CAPR column: ESM_LO">i<span class="tip">CAPR column: ESM_LO</span></span></th><th class="num">ESM high<span class="info" tabindex="0" role="note" aria-label="CAPR column: ESM_HI" title="CAPR column: ESM_HI">i<span class="tip">CAPR column: ESM_HI</span></span></th><th>ESM model<span class="info" tabindex="0" role="note" aria-label="CAPR column: ESM_MODEL" title="CAPR column: ESM_MODEL">i<span class="tip">CAPR column: ESM_MODEL</span></span></th></tr></thead><tbody>
+<tr><td>ECOMPRD</td><td>BUSY_P95</td><td class="num">30</td><td class="num">74.06</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>BUSY_P95</td><td class="num">90</td><td class="num">85.97</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>BUSY_PCT</td><td class="num">30</td><td class="num">56.68</td><td class="num">57.92</td><td class="num">51.74</td><td class="num">64.09</td><td>ADDW</td></tr>
+<tr><td>ECOMPRD</td><td>BUSY_PCT</td><td class="num">90</td><td class="num">65.40</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>BUSY_PEAK</td><td class="num">30</td><td class="num">70.98</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>BUSY_PEAK</td><td class="num">90</td><td class="num">82.90</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>DB_CPU_P95</td><td class="num">30</td><td class="num">2.22</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>DB_CPU_P95</td><td class="num">90</td><td class="num">2.58</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>DB_CPU_PCT</td><td class="num">30</td><td class="num">1.70</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>DB_CPU_PCT</td><td class="num">90</td><td class="num">1.96</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD</td><td>DB_CPU_SEC</td><td class="num">30</td><td class="num">23504.45</td><td class="num">24325.16</td><td class="num">21900.31</td><td class="num">26750.01</td><td>ADDW</td></tr>
+<tr><td>ECOMPRD</td><td>DB_CPU_SEC</td><td class="num">90</td><td class="num">27123.63</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>DB_CPU_P95</td><td class="num">30</td><td class="num">55.65</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>DB_CPU_P95</td><td class="num">90</td><td class="num">73.73</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>DB_CPU_PCT</td><td class="num">30</td><td class="num">42.71</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>DB_CPU_PCT</td><td class="num">90</td><td class="num">56.45</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>DB_CPU_SEC</td><td class="num">30</td><td class="num">590445.20</td><td class="num">688155.74</td><td class="num">425336.20</td><td class="num">950975.28</td><td>ADDW</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>DB_CPU_SEC</td><td class="num">90</td><td class="num">780296.83</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td></tr>
+</tbody></table>
+</div>
+<h3 style="font-size:13px;margin:16px 0 6px">6c. Backtest &mdash; which engine was right <span class="info" tabindex="0" role="note" aria-label="each engine forecast the recent held-out window from data before it; MAPE is the average percent miss vs what actually happened, BIAS above zero means it over-forecast. ESM column fills after EXEC cap_forecast_ml.train_backtest" title="each engine forecast the recent held-out window from data before it; MAPE is the average percent miss vs what actually happened, BIAS above zero means it over-forecast. ESM column fills after EXEC cap_forecast_ml.train_backtest">i<span class="tip">each engine forecast the recent held-out window from data before it; MAPE is the average percent miss vs what actually happened, BIAS above zero means it over-forecast. ESM column fills after EXEC cap_forecast_ml.train_backtest</span></span></h3>
+<div class="tscroll">
+<table class="tbl"><thead><tr><th>DB/PDB</th><th>Kind<span class="info" tabindex="0" role="note" aria-label="CAPR column: SERIES_KIND" title="CAPR column: SERIES_KIND">i<span class="tip">CAPR column: SERIES_KIND</span></span></th><th>Series<span class="info" tabindex="0" role="note" aria-label="CAPR column: SERIES_KEY" title="CAPR column: SERIES_KEY">i<span class="tip">CAPR column: SERIES_KEY</span></span></th><th>Cutoff<span class="info" tabindex="0" role="note" aria-label="the last day the engine was allowed to see before forecasting (CAPR column: CUTOFF_DAY)" title="the last day the engine was allowed to see before forecasting (CAPR column: CUTOFF_DAY)">i<span class="tip">the last day the engine was allowed to see before forecasting (CAPR column: CUTOFF_DAY)</span></span></th><th class="num">REGR MAPE %<span class="info" tabindex="0" role="note" aria-label="CAPR column: REGR_MAPE" title="CAPR column: REGR_MAPE">i<span class="tip">CAPR column: REGR_MAPE</span></span></th><th class="num">REGR bias %<span class="info" tabindex="0" role="note" aria-label="CAPR column: REGR_BIAS" title="CAPR column: REGR_BIAS">i<span class="tip">CAPR column: REGR_BIAS</span></span></th><th class="num">ESM MAPE %<span class="info" tabindex="0" role="note" aria-label="CAPR column: ESM_MAPE" title="CAPR column: ESM_MAPE">i<span class="tip">CAPR column: ESM_MAPE</span></span></th><th class="num">ESM bias %<span class="info" tabindex="0" role="note" aria-label="CAPR column: ESM_BIAS" title="CAPR column: ESM_BIAS">i<span class="tip">CAPR column: ESM_BIAS</span></span></th><th>Better<span class="info" tabindex="0" role="note" aria-label="CAPR column: BETTER" title="CAPR column: BETTER">i<span class="tip">CAPR column: BETTER</span></span></th><th>ESM pick <span class="info" tabindex="0" role="note" aria-label="which ESM variant this series was trained with and why: H = the EXSM_HOLT candidate's holdout MAPE, W = the EXSM_ADDWINTERS(7) candidate's. AUTO keeps the lower one (knobs esm_tbspc_model / esm_select_by_backtest) (CAPR column: ESM_PICK)" title="which ESM variant this series was trained with and why: H = the EXSM_HOLT candidate's holdout MAPE, W = the EXSM_ADDWINTERS(7) candidate's. AUTO keeps the lower one (knobs esm_tbspc_model / esm_select_by_backtest) (CAPR column: ESM_PICK)">i<span class="tip">which ESM variant this series was trained with and why: H = the EXSM_HOLT candidate's holdout MAPE, W = the EXSM_ADDWINTERS(7) candidate's. AUTO keeps the lower one (knobs esm_tbspc_model / esm_select_by_backtest) (CAPR column: ESM_PICK)</span></span></th></tr></thead><tbody>
+<tr><td>ECOMPRD</td><td>CPU</td><td>BUSY_PCT</td><td>2026-08-25</td><td class="num">5.66</td><td class="num">-4.04</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td><td>ADDW (default)</td></tr>
+<tr><td>ECOMPRD</td><td>CPU</td><td>DB_CPU_SEC</td><td>2026-08-25</td><td class="num">5.49</td><td class="num">-3.82</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td><td>ADDW (default)</td></tr>
+<tr><td>ECOMPRD</td><td>TBSPC</td><td>SYSAUX</td><td>2026-08-25</td><td class="num">0.00</td><td class="num">+0.00</td><td class="num">0.00</td><td class="num">+0.00</td><td><span class="pill pill-ok">REGR</span></td><td>HOLT H=0.00 W=0.00</td></tr>
+<tr><td>ECOMPRD</td><td>TBSPC</td><td>SYSTEM</td><td>2026-08-25</td><td class="num">0.00</td><td class="num">+0.00</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>CPU</td><td>DB_CPU_SEC</td><td>2026-08-25</td><td class="num">22.97</td><td class="num">-21.30</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td><td>ADDW (default)</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>TBSPC</td><td>ANALYTICS_STAGE</td><td>2026-08-25</td><td class="num">5.21</td><td class="num">-5.21</td><td class="num">4.88</td><td class="num">-4.88</td><td><span class="pill pill-ok">ESM</span></td><td>HOLT H=4.88 W=4.95</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>TBSPC</td><td>AUDIT_TRAIL</td><td>2026-08-25</td><td class="num">13.89</td><td class="num">-13.89</td><td class="num">0.48</td><td class="num">-0.48</td><td><span class="pill pill-ok">ESM</span></td><td>HOLT H=0.48 W=1.50</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>TBSPC</td><td>CUSTOMER_DATA</td><td>2026-08-25</td><td class="num">0.00</td><td class="num">+0.00</td><td class="num">0.00</td><td class="num">-0.00</td><td><span class="pill pill-ok">REGR</span></td><td>HOLT H=0.00 W=0.00</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>TBSPC</td><td>ORDERS_DATA</td><td>2026-08-25</td><td class="num">0.09</td><td class="num">-0.04</td><td class="num">0.06</td><td class="num">+0.02</td><td><span class="pill pill-ok">ESM</span></td><td>ADDW H=0.07 W=0.06</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>TBSPC</td><td>ORDERS_IDX</td><td>2026-08-25</td><td class="num">0.08</td><td class="num">+0.07</td><td class="num">0.12</td><td class="num">+0.12</td><td><span class="pill pill-ok">REGR</span></td><td>ADDW H=0.14 W=0.12</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>TBSPC</td><td>PRODUCT_CATALOG</td><td>2026-08-25</td><td class="num">0.00</td><td class="num">+0.00</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td>&ndash;</td><td>&ndash;</td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>TBSPC</td><td>SESSION_STORE</td><td>2026-08-25</td><td class="num">42.29</td><td class="num">+13.98</td><td class="num">51.74</td><td class="num">+38.36</td><td><span class="pill pill-ok">REGR</span></td><td>ADDW H=86.21 W=51.74</td></tr>
+</tbody></table>
+</div>
+</section>
+<section id="s7">
+<h2>7. Fixed-ceiling series <span class="info" tabindex="0" role="note" aria-label="peak processes and sessions against the init parameters, redo written per day, and total database size against the summed tablespace ceilings" title="peak processes and sessions against the init parameters, redo written per day, and total database size against the summed tablespace ceilings">i<span class="tip">peak processes and sessions against the init parameters, redo written per day, and total database size against the summed tablespace ceilings</span></span></h2>
+<p class="desc">Series with a hard ceiling that is not a tablespace. PROCESSES / SESSIONS are the AWR peak-concurrency high-water marks against the init parameter (summed over RAC instances); DB_SIZE_GB is total permanent-tablespace usage against the sum of the same tablespaces&#39; ceilings; REDO_GB_DAY has no ceiling and is a sizing trend for the FRA / archive destination. DAYS_LIM is the projected days until the series reaches SAT, and WORST/BEST bound it with the 95% CI on the slope.</p>
+<div class="tscroll">
+<table class="tbl"><thead><tr><th>DB/PDB</th><th>Series<span class="info" tabindex="0" role="note" aria-label="CAPR column: SERIES" title="CAPR column: SERIES">i<span class="tip">CAPR column: SERIES</span></span></th><th>Unit<span class="info" tabindex="0" role="note" aria-label="CAPR column: UNIT" title="CAPR column: UNIT">i<span class="tip">CAPR column: UNIT</span></span></th><th class="num">Current<span class="info" tabindex="0" role="note" aria-label="CAPR column: CUR_VAL" title="CAPR column: CUR_VAL">i<span class="tip">CAPR column: CUR_VAL</span></span></th><th class="num">Limit<span class="info" tabindex="0" role="note" aria-label="CAPR column: CUR_LIMIT" title="CAPR column: CUR_LIMIT">i<span class="tip">CAPR column: CUR_LIMIT</span></span></th><th class="num">Sat<span class="info" tabindex="0" role="note" aria-label="the fraction of the limit treated as saturated -- the level Days to limit counts down to (CAPR column: SAT_VALUE)" title="the fraction of the limit treated as saturated -- the level Days to limit counts down to (CAPR column: SAT_VALUE)">i<span class="tip">the fraction of the limit treated as saturated -- the level Days to limit counts down to (CAPR column: SAT_VALUE)</span></span></th><th class="num">% of limit<span class="info" tabindex="0" role="note" aria-label="CAPR column: PCT_OF_LIMIT" title="CAPR column: PCT_OF_LIMIT">i<span class="tip">CAPR column: PCT_OF_LIMIT</span></span></th><th class="num">Slope/day<span class="info" tabindex="0" role="note" aria-label="CAPR column: SLOPE_PER_DAY" title="CAPR column: SLOPE_PER_DAY">i<span class="tip">CAPR column: SLOPE_PER_DAY</span></span></th><th class="num">R2</th><th class="num">Days to limit<span class="info" tabindex="0" role="note" aria-label="CAPR column: DAYS_TO_LIMIT" title="CAPR column: DAYS_TO_LIMIT">i<span class="tip">CAPR column: DAYS_TO_LIMIT</span></span></th><th class="num">Worst<span class="info" tabindex="0" role="note" aria-label="CAPR column: LIMIT_WORST" title="CAPR column: LIMIT_WORST">i<span class="tip">CAPR column: LIMIT_WORST</span></span></th><th class="num">Best<span class="info" tabindex="0" role="note" aria-label="CAPR column: LIMIT_BEST" title="CAPR column: LIMIT_BEST">i<span class="tip">CAPR column: LIMIT_BEST</span></span></th><th>Severity<span class="info" tabindex="0" role="note" aria-label="CAPR column: SEV" title="CAPR column: SEV">i<span class="tip">CAPR column: SEV</span></span></th><th>Quality<span class="info" tabindex="0" role="note" aria-label="CAPR column: QUALITY" title="CAPR column: QUALITY">i<span class="tip">CAPR column: QUALITY</span></span></th></tr></thead><tbody>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>SESSIONS</td><td>COUNT</td><td class="num">1094.00</td><td class="num">1300.00</td><td class="num">1170.00</td><td class="num">84.2</td><td class="num">2.2009</td><td class="num">0.998</td><td class="num">34</td><td class="num">34</td><td class="num">34</td><td><span class="sev-warn">WARN</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>DB_SIZE_GB</td><td>GIB</td><td class="num">1232.67</td><td class="num">1906.00</td><td class="num">1715.40</td><td class="num">64.7</td><td class="num">3.4168</td><td class="num">0.923</td><td class="num">141</td><td class="num">133</td><td class="num">150</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr><td>ECOMPRD</td><td>DB_SIZE_GB</td><td>GIB</td><td class="num">13.63</td><td class="num">36.00</td><td class="num">32.40</td><td class="num">37.9</td><td class="num">0.0300</td><td class="num">1.</td><td class="num">625</td><td class="num">625</td><td class="num">625</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+<tr><td>ECOMPRD/SHOP_PDB</td><td>PROCESSES</td><td>COUNT</td><td class="num">912.00</td><td class="num">1600.00</td><td class="num">1440.00</td><td class="num">57.0</td><td class="num">0.0000</td><td class="num">1.</td><td class="num"><span class="na">no crossing</span></td><td class="num">&ndash;</td><td class="num">&ndash;</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-flat" title="not growing at all">FLAT</span></td></tr>
+<tr><td>ECOMPRD</td><td>REDO_GB_DAY</td><td>GIB_PER_DAY</td><td class="num">57.49</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">&ndash;</td><td class="num">0.1536</td><td class="num">0.663</td><td class="num"><span class="na">no crossing</span></td><td class="num">&ndash;</td><td class="num">&ndash;</td><td><span class="sev-ok">ok</span></td><td><span class="pill pill-ok" title="steady enough to forecast reliably">OK</span></td></tr>
+</tbody></table>
+</div>
+</section>
+<footer>End of report -- read-only run, no database objects created or modified. Written to reports/cap_report_ECOMPRD_202609221244.html</footer>
+</div>
+</body></html>

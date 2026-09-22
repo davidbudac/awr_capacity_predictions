@@ -369,3 +369,11 @@ hr.soft{border:none;border-top:1px solid var(--border);margin:40px 0}
 .fold__body{padding:4px 18px 8px}
 .toc a.toc__folded{padding-left:22px}
 .toc a[hidden]{display:none}
+
+/* ---- hero call to action ---- */
+.cta{display:flex;flex-wrap:wrap;align-items:center;gap:10px 12px;margin:0 0 22px}
+.btn{display:inline-block;padding:9px 16px;border-radius:8px;background:var(--accent);color:#fff;font-weight:600;font-size:14px;text-decoration:none;border:1px solid var(--accent)}
+.btn:hover{text-decoration:none;filter:brightness(1.08)}
+.btn--ghost{background:transparent;color:var(--accent-text);border-color:var(--border)}
+.btn--ghost:hover{border-color:var(--accent)}
+.cta__note{flex-basis:100%;font-size:13px;color:var(--faint);margin:0}

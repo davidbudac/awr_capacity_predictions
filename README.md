@@ -7,6 +7,8 @@ package, and a read-only SQL\*Plus text report.
 
 📖 **Documentation site:** <https://davidbudac.github.io/awr_capacity_predictions/>
 
+🧪 **Sample report** (real output, fictional database): <https://davidbudac.github.io/awr_capacity_predictions/demo/cap_report_demo.html>
+
 What it answers:
 
 - **Tablespace growth** — projected size at +30/+90/+180/+365 days (with 95%

@@ -1,0 +1,262 @@
+================================================================================
+AWR CAPACITY PREDICTIONS -- capacity + anomaly report
+================================================================================
+Database : ECOMPRD
+Host     : db-prod-01.example.com
+Schema   : CAPMON
+Generated: 2026-09-22 12:43:42 +00:00
+Config   : days-to-full WARN<=90 CRIT<=30 ; CPU saturation 80%
+Tier 2   : 24 OML ESM model(s) trained (OK)
+................................................................................
+NOTE: forecasts degrade loudly on short AWR retention -- watch TRAIN_N and
+QUALITY. INSUFFICIENT_HISTORY means fewer than the configured minimum
+training days; raise DBMS_WORKLOAD_REPOSITORY retention for real trends.
+================================================================================
+
+== 0. AT A GLANCE (from CAPR_ALERTS) ==
+One row per current issue. TBSPC_FULL/CPU_SAT: confident forecast inside the
+warning window. TBSPC_NEARFULL: nearly full RIGHT NOW, any forecast quality.
+*_ANOM: flagged days in the alert window (INFO = shrink/LOW side).
+
+ CRIT  WARN  INFO
+----- ----- -----
+    1     7     0
+
+SEV  KIND           DB/PDB               MESSAGE
+---- -------------- -------------------- --------------------------------------------------------------------------------------------------------------
+CRIT TBSPC_FULL     ECOMPRD/SHOP_PDB     Tablespace AUDIT_TRAIL forecast full in 17 days (92.0% used, 613.7 MiB/day)
+WARN CPU_ANOM       ECOMPRD              Host CPU 69.8% busy on 2026-09-14 vs usual 46.8% for that weekday
+WARN CPU_SAT        ECOMPRD              Host CPU (busy-hour p95) forecast to reach 80% busy in 49 days (now 70.2% busy)
+WARN CPU_SHIFT      ECOMPRD/SHOP_PDB     DB CPU (DB_CPU_PCT) shifted +21.8 pts: last 7 days median 45.8% vs prior 28 days 24.1%
+WARN SERIES_LIMIT   ECOMPRD/SHOP_PDB     SESSIONS forecast to reach 90% of its limit (1300 COUNT) in 34 days (now 1094, 84.2% of limit)
+WARN TBSPC_ANOM     ECOMPRD/SHOP_PDB     Tablespace ANALYTICS_STAGE grew 39.07 GiB on 2026-09-16 (robust z 295.9)
+WARN TBSPC_NEARFULL ECOMPRD/SHOP_PDB     Tablespace AUDIT_TRAIL is 92.0% full now (119.60 of 130.00 GiB; forecast quality OK)
+WARN TBSPC_NEARFULL ECOMPRD/SHOP_PDB     Tablespace CUSTOMER_DATA is 95.0% full now (152.02 of 160.00 GiB; forecast quality OK)
+
+== 1a. TABLESPACES BY DAYS-TO-FULL (any quality; top 10) ==
+SEV: CRIT<=30 days, WARN<=90 days. ACCEL>1.5 = growth accelerating.
+Trust the estimate per QUALITY (only OK is reliable).
+WORST/BEST: days-to-full range from the 95% CI on the growth slope
+(WORST = plausibly fastest fill; BEST empty = might never fill).
+
+DB/PDB               TABLESPACE         PCT_USED   CUR_GIB LIMIT_GIB     MIB/DAY DAYS_FULL     WORST      BEST SEV  QUALITY                ACCEL
+-------------------- ------------------ -------- --------- --------- ----------- --------- --------- --------- ---- -------------------- -------
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL            92.0    119.60    130.00     613.664        17        16        18 CRIT OK                      1.92
+ECOMPRD/SHOP_PDB     SESSION_STORE          21.7     65.00    300.00    2560.000        94        94        94 ok   OK                      1.00
+ECOMPRD/SHOP_PDB     ORDERS_DATA            79.8    479.04    600.00    1208.636       102       102       102 ok   OK                      1.03
+ECOMPRD/SHOP_PDB     ANALYTICS_STAGE        50.5    202.02    400.00    1206.476       168       158       179 ok   OK                      2.15
+ECOMPRD/SHOP_PDB     ORDERS_IDX             67.7    203.00    300.00     561.719       176       176       177 ok   OK                      0.99
+ECOMPRD/SHOP_PDB     CUSTOMER_DATA          95.0    152.02    160.00      20.480       399       398       399 ok   OK                      1.00
+ECOMPRD              SYSAUX                 39.2     12.53     32.00      30.720       648       648       649 ok   OK                      1.00
+
+== 1b. NEAR-FULL NOW (by PCT_USED, independent of fit quality; top 10) ==
+SEV: CRIT>=97%, WARN>=90% used. A tablespace can be nearly full
+today even when its growth is too flat/erratic to forecast.
+
+DB/PDB               TABLESPACE         PCT_USED   CUR_GIB LIMIT_GIB DAYS_FULL SEV  QUALITY
+-------------------- ------------------ -------- --------- --------- --------- ---- --------------------
+ECOMPRD/SHOP_PDB     CUSTOMER_DATA          95.0    152.02    160.00       399 WARN OK
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL            92.0    119.60    130.00        17 WARN OK
+ECOMPRD/SHOP_PDB     ORDERS_DATA            79.8    479.04    600.00       102 ok   OK
+ECOMPRD/SHOP_PDB     PRODUCT_CATALOG        75.0     12.00     16.00           ok   FLAT
+ECOMPRD/SHOP_PDB     ORDERS_IDX             67.7    203.00    300.00       176 ok   OK
+ECOMPRD/SHOP_PDB     ANALYTICS_STAGE        50.5    202.02    400.00       168 ok   OK
+ECOMPRD              SYSAUX                 39.2     12.53     32.00       648 ok   OK
+ECOMPRD              SYSTEM                 27.5      1.10      4.00           ok   FLAT
+ECOMPRD/SHOP_PDB     SESSION_STORE          21.7     65.00    300.00        94 ok   OK
+
+== 2. TABLESPACE FORECAST (GiB): current / +30 / +90 / +180, plus ESM +30 ==
+Showing 9 of 9 tablespace(s): growing, near-full, or >= 1 GiB
+used (knob report_min_gb), capped at top 10 -- CAPR_TBSPC_FORECAST has all.
+QUALITY: OK | LOW_CONFIDENCE (R2<gate) | FLAT (no growth) | INSUFFICIENT_HISTORY.
+ESM (Tier 2) only reaches +30 on 19c (hard horizon cap); +90/180 are REGR.
+180_LO/180_HI: 95% prediction band on the +180 projection (widest printed
+horizon); the +30/+90/+365 bands are in CAPF_TBSPC_FORECAST (proj_*_lo/hi).
+
+DB/PDB               TABLESPACE       TRAIN_N   CUR_GIB   +30_GIB   +90_GIB  +180_GIB    180_LO    180_HI      R2 QUALITY                 ESM+30
+-------------------- ---------------- ------- --------- --------- --------- --------- --------- --------- ------- -------------------- ---------
+ECOMPRD/SHOP_PDB     ORDERS_DATA           90    479.04    513.81    584.63    690.86    689.78    691.94   1.000 OK                      515.26
+ECOMPRD/SHOP_PDB     ORDERS_IDX            90    203.00    219.49    252.40    301.77    301.31    302.23   1.000 OK                      219.33
+ECOMPRD/SHOP_PDB     ANALYTICS_STAGE       90    202.02    210.30    280.99    387.03    362.27    411.78   0.919 OK                      231.84
+ECOMPRD/SHOP_PDB     CUSTOMER_DATA         90    152.02    152.62    153.82    155.62    155.62    155.62   1.000 OK                      152.62
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL           90    119.60    127.25    163.20    217.14    204.25    230.03   0.916 OK                      155.35
+ECOMPRD/SHOP_PDB     SESSION_STORE         19     65.00    140.00    290.00    515.00    515.00    515.00   1.000 OK                       52.18
+ECOMPRD              SYSAUX                90     12.53     13.43     15.23     17.93     17.93     17.93   1.000 OK                       13.43
+ECOMPRD/SHOP_PDB     PRODUCT_CATALOG       90     12.00     12.00     12.00     12.00     12.00     12.00   1.000 FLAT
+ECOMPRD              SYSTEM                90      1.10      1.10      1.10      1.10      1.10      1.10   1.000 FLAT
+
+== 3. TABLESPACE GROWTH ANOMALIES (last 30 days) ==
+Anomaly on the per-day growth RATE (delta/gap): FLAG when
+|rate - median_rate| exceeds THRESHOLD = max(k*MAD, 100MiB/day floor).
+GAP = days since previous sample (>1 across an AWR gap).
+
+DB/PDB               TABLESPACE       DAY         GAP  DELTA_MIB RATE_MIB/D  MED_MIB/D  THR_MIB/D ROBUST_Z FLAG
+-------------------- ---------------- ---------- ---- ---------- ---------- ---------- ---------- -------- -----
+ECOMPRD/SHOP_PDB     ANALYTICS_STAGE  2026-09-16    1    40003.2    40003.2     1016.8      395.3    295.9 HIGH
+ECOMPRD/SHOP_PDB     SESSION_STORE    2026-09-04    1   -74240.0   -74240.0     2560.0      100.0          LOW
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL      2026-09-03    1     1193.7     1193.7      396.5      393.9      6.1 HIGH
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL      2026-09-02    1     1191.3     1191.3      388.2      356.6      6.8 HIGH
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL      2026-09-01    1     1204.5     1204.5      388.2      314.1      7.8 HIGH
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL      2026-08-31    1     1179.1     1179.1      379.9      277.3      8.6 HIGH
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL      2026-08-30    1     1117.3     1117.3      379.9      246.5      9.0 HIGH
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL      2026-08-29    1     1179.9     1179.9      374.1      214.1     11.3 HIGH
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL      2026-08-28    1     1237.8     1237.8      373.9      206.6     12.5 HIGH
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL      2026-08-27    1     1216.9     1216.9      373.9      197.4     12.8 HIGH
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL      2026-08-26    1     1187.9     1187.9      368.9      169.9     14.5 HIGH
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL      2026-08-25    1     1131.1     1131.1      363.8      155.1     14.8 HIGH
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL      2026-08-24    1     1232.9     1232.9      363.8      147.2     17.7 HIGH
+
+== 4. CPU TREND (host busy% avg / p95 / peak window, DB CPU sec and % of cores) ==
+BUSY_PCT = daily average; BUSY_P95 / BUSY_PEAK = the busy hour (p95 of the
+day's snapshot intervals / peak-window busy%) -- what actually saturates.
+DB_CPU_PCT / DB_CPU_P95 = this container's DB CPU as % of host core capacity.
+DAYS_SAT = projected days until the metric reaches 80% (all but DB_CPU_SEC).
+WORST/BEST: days-to-saturation range from the 95% CI on the slope
+(BEST empty = might never saturate).
+
+DB/PDB               METRIC       TRAIN_N      CURRENT     SLOPE/DAY      R2  DAYS_SAT     WORST      BEST QUALITY
+-------------------- ------------ ------- ------------ ------------- ------- --------- --------- --------- --------------------
+ECOMPRD              BUSY_P95          90        70.22        0.1984   0.621        49        42        59 OK
+ECOMPRD              BUSY_PCT          90        54.44        0.1454   0.663       175       152       206 OK
+ECOMPRD              BUSY_PEAK         90        67.08        0.1987   0.609        65        55        78 OK
+ECOMPRD              DB_CPU_P95        90         2.11        0.0060   0.621     13087     11227     15684 OK
+ECOMPRD              DB_CPU_PCT        90         1.63        0.0044   0.663     17959     15603     21153 OK
+ECOMPRD              DB_CPU_SEC        90     22577.85       60.3198   0.663                               OK
+ECOMPRD/SHOP_PDB     DB_CPU_P95        90        59.69        0.3014   0.478        67        55        86 LOW_CONFIDENCE
+ECOMPRD/SHOP_PDB     DB_CPU_PCT        90        46.28        0.2289   0.476       147       120       189 LOW_CONFIDENCE
+ECOMPRD/SHOP_PDB     DB_CPU_SEC        90    639705.76     3164.1938   0.476                               LOW_CONFIDENCE
+
+== 5. CPU BUSY% ANOMALIES vs same-weekday baseline (last 30 days) ==
+FLAG when |busy% - median%| exceeds THRESHOLD (k*MAD, floored).
+
+DB/PDB               DAY           BUSY%  MEDIAN%  THRESH% ROBUST_Z FLAG
+-------------------- ---------- -------- -------- -------- -------- -----
+ECOMPRD              2026-09-14    69.80    46.82     9.00      7.7 HIGH
+
+== 5b. CPU LEVEL SHIFTS (sustained step, not a one-day outlier) ==
+Recent-window median vs the baseline median before it. Flagged only when
+the gap exceeds THRESH points AND every day of the recent window sits
+above (UP) or below (DOWN) the baseline median +/- its MAD sigma.
+
+DB/PDB               METRIC      WINDOWS   RECENT%   BASE% SHIFT_PTS  THRESH N_OF_M  FLAG
+-------------------- ----------- --------- ------- ------- --------- ------- ------- -----
+ECOMPRD/SHOP_PDB     DB_CPU_PCT  7v28         45.8    24.1     +21.8    15.0 7/7     UP
+
+== 6. TIER 2 (ESM) vs TIER 1 (REGR) ==
+24 OML ESM model(s) trained (OK). If 0: run  EXEC cap_forecast_ml.train_all
+ESM reaches +30 only (19c hard horizon cap) and only for fresh models
++90/180/365 are REGR-only. ESM_MODEL names the ESM variant behind the
+ESM column: HOLT = EXSM_HOLT, ADDW = EXSM_ADDWINTERS with a 7-day season.
+
+6a. Tablespaces (GiB) -- the same 9 of 9 tablespace(s) as
+section 2 (growing, near-full, or >= 1 GiB used, top 10):
+
+DB/PDB               TABLESPACE       HORIZON  REGR_GIB   ESM_GIB    ESM_LO    ESM_HI ESM_MODEL
+-------------------- ---------------- ------- --------- --------- --------- --------- ---------
+ECOMPRD/SHOP_PDB     ORDERS_DATA           30    513.81    515.26    513.55    516.98 ADDW
+ECOMPRD/SHOP_PDB     ORDERS_DATA           90    584.63
+ECOMPRD/SHOP_PDB     ORDERS_DATA          180    690.86
+ECOMPRD/SHOP_PDB     ORDERS_DATA          365    909.22
+ECOMPRD/SHOP_PDB     ORDERS_IDX            30    219.49    219.33    217.90    220.77 ADDW
+ECOMPRD/SHOP_PDB     ORDERS_IDX            90    252.40
+ECOMPRD/SHOP_PDB     ORDERS_IDX           180    301.77
+ECOMPRD/SHOP_PDB     ORDERS_IDX           365    403.25
+ECOMPRD/SHOP_PDB     ANALYTICS_STAGE       30    210.30    231.84    198.05    265.62 HOLT
+ECOMPRD/SHOP_PDB     ANALYTICS_STAGE       90    280.99
+ECOMPRD/SHOP_PDB     ANALYTICS_STAGE      180    387.03
+ECOMPRD/SHOP_PDB     ANALYTICS_STAGE      365    604.99
+ECOMPRD/SHOP_PDB     CUSTOMER_DATA         30    152.62    152.62    152.62    152.62 HOLT
+ECOMPRD/SHOP_PDB     CUSTOMER_DATA         90    153.82
+ECOMPRD/SHOP_PDB     CUSTOMER_DATA        180    155.62
+ECOMPRD/SHOP_PDB     CUSTOMER_DATA        365    159.32
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL           30    127.25    155.35    143.06    167.64 HOLT
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL           90    163.20
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL          180    217.14
+ECOMPRD/SHOP_PDB     AUDIT_TRAIL          365    328.01
+ECOMPRD/SHOP_PDB     SESSION_STORE         30    140.00     52.18    -92.51    196.88 ADDW
+ECOMPRD/SHOP_PDB     SESSION_STORE         90    290.00
+ECOMPRD/SHOP_PDB     SESSION_STORE        180    515.00
+ECOMPRD/SHOP_PDB     SESSION_STORE        365    977.50
+ECOMPRD              SYSAUX                30     13.43     13.43     13.43     13.43 HOLT
+ECOMPRD              SYSAUX                90     15.23
+ECOMPRD              SYSAUX               180     17.93
+ECOMPRD              SYSAUX               365     23.48
+ECOMPRD/SHOP_PDB     PRODUCT_CATALOG       30     12.00
+ECOMPRD/SHOP_PDB     PRODUCT_CATALOG       90     12.00
+ECOMPRD/SHOP_PDB     PRODUCT_CATALOG      180     12.00
+ECOMPRD/SHOP_PDB     PRODUCT_CATALOG      365     12.00
+ECOMPRD              SYSTEM                30      1.10
+ECOMPRD              SYSTEM                90      1.10
+ECOMPRD              SYSTEM               180      1.10
+ECOMPRD              SYSTEM               365      1.10
+
+6b. CPU (busy% / DB CPU sec):
+
+DB/PDB               METRIC       HORIZON         REGR          ESM       ESM_LO       ESM_HI ESM_MODEL
+-------------------- ------------ ------- ------------ ------------ ------------ ------------ ---------
+ECOMPRD              BUSY_P95          30        74.06
+ECOMPRD              BUSY_P95          90        85.97
+ECOMPRD              BUSY_PCT          30        56.68        57.92        51.74        64.09 ADDW
+ECOMPRD              BUSY_PCT          90        65.40
+ECOMPRD              BUSY_PEAK         30        70.98
+ECOMPRD              BUSY_PEAK         90        82.90
+ECOMPRD              DB_CPU_P95        30         2.22
+ECOMPRD              DB_CPU_P95        90         2.58
+ECOMPRD              DB_CPU_PCT        30         1.70
+ECOMPRD              DB_CPU_PCT        90         1.96
+ECOMPRD              DB_CPU_SEC        30     23504.45     24325.16     21900.31     26750.01 ADDW
+ECOMPRD              DB_CPU_SEC        90     27123.63
+ECOMPRD/SHOP_PDB     DB_CPU_P95        30        55.65
+ECOMPRD/SHOP_PDB     DB_CPU_P95        90        73.73
+ECOMPRD/SHOP_PDB     DB_CPU_PCT        30        42.71
+ECOMPRD/SHOP_PDB     DB_CPU_PCT        90        56.45
+ECOMPRD/SHOP_PDB     DB_CPU_SEC        30    590445.20    688155.74    425336.20    950975.28 ADDW
+ECOMPRD/SHOP_PDB     DB_CPU_SEC        90    780296.83
+
+6c. Backtest -- which engine was right over the held-out window (M9.4):
+Each engine forecast the last holdout window from data BEFORE it
+MAPE% = mean abs error vs actuals, BIAS% >0 = over-forecast. ESM
+columns fill after  EXEC cap_forecast_ml.train_backtest  (ESM may
+cover fewer days than REGR: 19c 30-step cap and rows/4 floor).
+ESM_PICK (M10.4) = the model type AUTO chose and why, as
+"<type> H=<Holt MAPE%> W=<AddWinters MAPE%>" over the same holdout.
+
+DB/PDB               KIND   SERIES           CUTOFF     REGR_MAPE% REGR_BIAS% ESM_MAPE% ESM_BIAS% BETTER ESM_PICK
+-------------------- ------ ---------------- ---------- ---------- ---------- --------- --------- ------ --------------------
+ECOMPRD              CPU    BUSY_PCT         2026-08-25       5.66      -4.04                            ADDW (default)
+ECOMPRD              CPU    DB_CPU_SEC       2026-08-25       5.49      -3.82                            ADDW (default)
+ECOMPRD              TBSPC  SYSAUX           2026-08-25       0.00      +0.00      0.00     +0.00 REGR   HOLT H=0.00 W=0.00
+ECOMPRD              TBSPC  SYSTEM           2026-08-25       0.00      +0.00
+ECOMPRD/SHOP_PDB     CPU    DB_CPU_SEC       2026-08-25      22.97     -21.30                            ADDW (default)
+ECOMPRD/SHOP_PDB     TBSPC  ANALYTICS_STAGE  2026-08-25       5.21      -5.21      4.88     -4.88 ESM    HOLT H=4.88 W=4.95
+ECOMPRD/SHOP_PDB     TBSPC  AUDIT_TRAIL      2026-08-25      13.89     -13.89      0.48     -0.48 ESM    HOLT H=0.48 W=1.50
+ECOMPRD/SHOP_PDB     TBSPC  CUSTOMER_DATA    2026-08-25       0.00      +0.00      0.00     -0.00 REGR   HOLT H=0.00 W=0.00
+ECOMPRD/SHOP_PDB     TBSPC  ORDERS_DATA      2026-08-25       0.09      -0.04      0.06     +0.02 ESM    ADDW H=0.07 W=0.06
+ECOMPRD/SHOP_PDB     TBSPC  ORDERS_IDX       2026-08-25       0.08      +0.07      0.12     +0.12 REGR   ADDW H=0.14 W=0.12
+ECOMPRD/SHOP_PDB     TBSPC  PRODUCT_CATALOG  2026-08-25       0.00      +0.00
+ECOMPRD/SHOP_PDB     TBSPC  SESSION_STORE    2026-08-25      42.29     +13.98     51.74    +38.36 REGR   ADDW H=86.21 W=51.74
+
+== 7. FIXED-CEILING SERIES (processes / sessions / redo / total DB size) ==
+PROCESSES, SESSIONS  peak concurrency (AWR max_utilization, a
+high-water mark since instance startup) against
+the init parameter. RAC: summed over instances.
+REDO_GB_DAY          redo written per day, GiB. No ceiling -- it is a
+trend for FRA / archive-destination sizing.
+DB_SIZE_GB           total permanent-tablespace bytes used, vs the sum
+of the same tablespaces' ceilings.
+DAYS_LIM = projected days until the series reaches SAT (the
+series_sat_pct% of LIMIT shown), empty when there is no ceiling or no
+growth. WORST/BEST bound it with the 95% CI on the slope
+(BEST empty = might never get there). Trust it per QUALITY.
+
+DB/PDB               SERIES       UNIT        TRAIN_N      CURRENT        LIMIT          SAT PCT_LIM     SLOPE/DAY      R2  DAYS_LIM     WORST      BEST SEV  QUALITY
+-------------------- ------------ ----------- ------- ------------ ------------ ------------ ------- ------------- ------- --------- --------- --------- ---- --------------------
+ECOMPRD/SHOP_PDB     SESSIONS     COUNT            90      1094.00      1300.00      1170.00    84.2        2.2009   0.998        34        34        34 WARN OK
+ECOMPRD/SHOP_PDB     DB_SIZE_GB   GIB              90      1232.67      1906.00      1715.40    64.7        3.4168   0.923       141       133       150 ok   OK
+ECOMPRD              DB_SIZE_GB   GIB              90        13.63        36.00        32.40    37.9        0.0300   1.000       625       625       625 ok   OK
+ECOMPRD/SHOP_PDB     PROCESSES    COUNT            90       912.00      1600.00      1440.00    57.0        0.0000   1.000                               ok   FLAT
+ECOMPRD              REDO_GB_DAY  GIB_PER_DAY      90        57.49                                          0.1536   0.663                               ok   OK
+
+================================================================================
+End of report -- read-only run, no database objects created or modified.
+================================================================================

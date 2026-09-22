@@ -39,6 +39,9 @@ Opt-in extras outside install.sql: `quickstart.sql` / `quickstart.sh`
 started" path), `doctor.sql` (preflight), `install_jobs.sql`
 / `uninstall_jobs.sql` (DBMS_SCHEDULER, disabled by default),
 `report/drill_tbspc.sql` / `report/drill_cpu.sql` (single-series drill-down).
+`test/demo_fixture.sql` fills the CAP_FIXTURE_* tables with a designed 150-day
+"ECOMPRD" story (hourly snapshots, two containers); `docs/demo/` holds the
+reports generated from it (identity strings genericised) for the docs site.
 Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomaly →
 `CAPR_` integration (display labels + pollable alerts).
 

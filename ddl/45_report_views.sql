@@ -240,9 +240,9 @@ WITH cfg AS (
                CASE WHEN s.days_to_limit <= cfg.dtf_crit THEN cfg.dtf_crit ELSE cfg.dtf_warn END,
                'DAYS',
                s.series || ' forecast to reach ' || TO_CHAR(cfg.series_sat, 'FM990')
-                 || '% of its limit (' || TO_CHAR(s.cur_limit, 'FM99999999990.99')
+                 || '% of its limit (' || RTRIM(TO_CHAR(s.cur_limit, 'FM99999999990.99'), '.')
                  || ' ' || s.unit || ') in ' || TO_CHAR(s.days_to_limit, 'FM9999990')
-                 || ' days (now ' || TO_CHAR(s.cur_val, 'FM99999999990.99')
+                 || ' days (now ' || RTRIM(TO_CHAR(s.cur_val, 'FM99999999990.99'), '.')
                  || ', ' || TO_CHAR(s.pct_of_limit, 'FM990.0') || '% of limit)'
         FROM   capf_series_forecast s CROSS JOIN cfg
         WHERE  s.quality = 'OK'
@@ -262,8 +262,8 @@ WITH cfg AS (
                CASE WHEN s.pct_of_limit >= cfg.nf_crit THEN cfg.nf_crit ELSE cfg.nf_warn END,
                'PCT',
                s.series || ' is at ' || TO_CHAR(s.pct_of_limit, 'FM990.0')
-                 || '% of its limit now (' || TO_CHAR(s.cur_val, 'FM99999999990.99')
-                 || ' of ' || TO_CHAR(s.cur_limit, 'FM99999999990.99') || ' ' || s.unit
+                 || '% of its limit now (' || RTRIM(TO_CHAR(s.cur_val, 'FM99999999990.99'), '.')
+                 || ' of ' || RTRIM(TO_CHAR(s.cur_limit, 'FM99999999990.99'), '.') || ' ' || s.unit
                  || '; forecast quality ' || s.quality || ')'
         FROM   capf_series_forecast s CROSS JOIN cfg
         WHERE  s.pct_of_limit >= cfg.nf_warn
