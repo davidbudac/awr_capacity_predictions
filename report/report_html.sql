@@ -1216,11 +1216,11 @@ DECLARE
   PROCEDURE strip_open(p_xmin IN NUMBER, p_xmax IN NUMBER) IS
     d DATE := c_epoch + p_xmax;
   BEGIN
-    p('<svg viewBox="0 0 600 30" class="strip-svg" aria-hidden="true">');
-    p('<line class="tl-baseline" x1="4" y1="15" x2="596" y2="15"/>');
+    p('<svg viewBox="0 0 900 30" class="strip-svg" aria-hidden="true">');
+    p('<line class="tl-baseline" x1="4" y1="15" x2="896" y2="15"/>');
     WHILE d > c_epoch + p_xmin LOOP
-      p('<line class="tl-grid" x1="' || fmt_px(lin(d - c_epoch, p_xmin, p_xmax, 4, 596)) || '" y1="8" x2="'
-        || fmt_px(lin(d - c_epoch, p_xmin, p_xmax, 4, 596)) || '" y2="22"/>');
+      p('<line class="tl-grid" x1="' || fmt_px(lin(d - c_epoch, p_xmin, p_xmax, 4, 896)) || '" y1="8" x2="'
+        || fmt_px(lin(d - c_epoch, p_xmin, p_xmax, 4, 896)) || '" y2="22"/>');
       d := d - 7;
     END LOOP;
   END strip_open;
@@ -1293,8 +1293,8 @@ BEGIN
   p('.kv-grid .kv dt{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}');
   p('.kv-grid .kv dd{margin:2px 0 0;font-size:13.5px;font-variant-numeric:tabular-nums}');
   p('.note{margin-top:14px;padding:10px 12px;border-radius:8px;background:var(--flat-bg);color:var(--muted); font-size:12.5px;border-left:3px solid var(--warn);}');
-  p('section{scroll-margin-top:56px;margin:26px 0}');
-  p('section h2{font-size:17px;margin:0 0 4px;display:flex;align-items:center;gap:8px}');
+  p('section{scroll-margin-top:56px;margin:34px 0}');
+  p('section h2{font-size:18px;letter-spacing:-.01em;margin:0 0 4px;display:flex;align-items:center;gap:8px}');
   p('section .desc{color:var(--muted);font-size:12.5px;margin:0 0 12px}');
   p('table{width:100%;border-collapse:collapse;font-size:13px;background:var(--panel)}');
   -- overflow:visible (not hidden) so an inline info-tooltip bubble can escape
@@ -1502,7 +1502,7 @@ BEGIN
   p('.attn .msg{font-size:13.5px;min-width:0}');
   p('.attn .msg b{font-weight:600}');
   p('.attn .msg .sub{display:block;color:var(--muted);font-size:12px}');
-  p('.attn .when{font-variant-numeric:tabular-nums;text-align:right;font-weight:700;font-size:15px;white-space:nowrap}');
+  p('.attn .when{font-variant-numeric:tabular-nums;text-align:right;font-weight:700;font-size:16px;white-space:nowrap}');
   p('.attn .when small{display:block;font-weight:400;font-size:11px;color:var(--muted)}');
   p('.attn .crit .when{color:var(--crit)}.attn .warn .when{color:var(--warn)}');
   p('.healthy{margin:10px 0 6px;font-size:12.5px;color:var(--muted);line-height:1.8}');
@@ -1538,6 +1538,7 @@ BEGIN
   p('.cross-label{fill:var(--crit);font-size:11px;font-weight:700}');
   p('.shift{fill:var(--shift-bg)}');
   p('.shift-label{fill:var(--warn);font-size:11px;font-weight:600}');
+  p('.cross-label,.limit-label,.thresh-label,.shift-label,.today-label,.axis-unit{paint-order:stroke;stroke:var(--panel);stroke-width:3px;stroke-linejoin:round}');
   -- quiet-series strip and anomaly strips
   p('.quiet{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:10px 14px;margin:0 0 20px}');
   p('.quiet .qh{font-size:12px;color:var(--muted);margin-bottom:6px}');
@@ -1550,7 +1551,7 @@ BEGIN
   p('.strip:first-child{border-top:none}');
   p('.strip .sl b{font-weight:600}');
   p('.strip .sl span{display:block;color:var(--faint);font-size:11px}');
-  p('.strip-svg{width:100%;height:30px;display:block}');
+  p('.strip-svg{width:100%;height:auto;display:block}');
   p('.strip-axis{display:grid;grid-template-columns:minmax(150px,180px) 1fr;gap:10px;font-size:11px;color:var(--muted);padding-top:2px}');
   p('.strip-axis div{display:flex;justify-content:space-between}');
   p('.sd-hi{fill:var(--crit)}.sd-lo{fill:var(--accent)}');
@@ -1565,7 +1566,10 @@ BEGIN
   p('.win.r{background:var(--accent-soft);color:var(--accent-text)}');
   p('.dim{color:var(--faint)}');
   p('.gap-hi{color:var(--warn);font-weight:700}');
+  p('.nowrap{white-space:nowrap}');
+  p('table.tight{font-size:12.5px} table.tight th,table.tight td{padding:6px 7px}');
   p('.glossary dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:10px 0 0}');
+  p('.rep-head,.chart-card,.attn,.quiet,.strips,details.fold,table.tbl{box-shadow:0 1px 2px rgba(16,24,40,.05)}');
   p('@media print{.tools{display:none}}');
   p('</style>');
   p('</head><body>');
@@ -2562,7 +2566,7 @@ BEGIN
                  || fmt_size_gb(ABS(a.delta_mb) / 1024) || ' (usual ' || fmt_size_gb(NVL(a.med_mb, 0) / 1024) || '/day), robust z '
                  || TO_CHAR(a.z, 'FM99990.0');
         p('<circle class="' || CASE WHEN a.anomaly_flag = 'HIGH' THEN 'sd-hi' ELSE 'sd-lo' END
-          || '" cx="' || fmt_px(lin(a.day_dt - c_epoch, v_xmin, v_xmax, 4, 596)) || '" cy="15" r="'
+          || '" cx="' || fmt_px(lin(a.day_dt - c_epoch, v_xmin, v_xmax, 4, 896)) || '" cy="15" r="'
           || fmt_px(3.5 + LEAST(4, ABS(NVL(a.z, 0)) / 6)) || '"><title>' || esc(v_tip) || '</title></circle>');
       END LOOP;
       p('</svg></div>');
@@ -2877,7 +2881,7 @@ BEGIN
         v_tip := a.day_str || ': ' || TO_CHAR(a.busy_pct, 'FM990') || '% busy vs the usual '
                  || TO_CHAR(a.median_pct, 'FM990') || '% for that weekday, robust z ' || TO_CHAR(a.z, 'FM99990.0');
         p('<circle class="' || CASE WHEN a.anomaly_flag = 'HIGH' THEN 'sd-hi' ELSE 'sd-lo' END
-          || '" cx="' || fmt_px(lin(a.day_dt - c_epoch, v_xmin, v_xmax, 4, 596)) || '" cy="15" r="'
+          || '" cx="' || fmt_px(lin(a.day_dt - c_epoch, v_xmin, v_xmax, 4, 896)) || '" cy="15" r="'
           || fmt_px(3.5 + LEAST(4, ABS(NVL(a.z, 0)) / 3)) || '"><title>' || esc(v_tip) || '</title></circle>');
       END LOOP;
       p('</svg></div>');
@@ -3037,7 +3041,7 @@ BEGIN
         || '<td>' || NVL(esc(r.esm_model), '&ndash;') || '</td>'
         || '<td class="num">' || CASE WHEN r.regr_mape IS NULL THEN '&ndash;' ELSE nz(r.regr_mape, 'FM99990.00') END
         || ' / ' || CASE WHEN r.esm_mape IS NULL THEN '&ndash;' ELSE nz(r.esm_mape, 'FM99990.00') END || '</td>'
-        || '<td>' || CASE WHEN r.better IS NULL THEN '&ndash;'
+        || '<td class="nowrap">' || CASE WHEN r.better IS NULL THEN '&ndash;'
                           ELSE '<span class="win' || CASE WHEN r.better = 'REGR' THEN ' r' END || '">' || r.better || '</span>' END
         || CASE WHEN r.esm_pick IS NOT NULL THEN ' <span class="dim">' || esc(r.esm_pick) || '</span>' END || '</td></tr>');
     END LOOP;
@@ -3075,7 +3079,7 @@ BEGIN
   ) LOOP
     IF NOT any_rows THEN
       p('<div class="tscroll">');
-      p('<table class="tbl"><thead><tr>'
+      p('<table class="tbl tight"><thead><tr>'
         || '<th>DB/PDB</th><th>Series' || info_icon('CAPR column: SERIES')
         || '</th><th>Unit' || info_icon('CAPR column: UNIT')
         || '</th><th class="num">Current' || info_icon('CAPR column: CUR_VAL')
