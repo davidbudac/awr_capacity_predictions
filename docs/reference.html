@@ -156,7 +156,7 @@
             <tr><td><span class="k">backtest_holdout_days</span></td><td class="num">28</td><td class="def">Holdout window (days) <code>CAPF_BACKTEST</code> fits before and scores against. Keep it at or below 30 so ESM can cover it on 19c.</td></tr>
             <tr><td><span class="k">esm_max_age_days</span></td><td class="num">7</td><td class="def">Tier 2: an ESM model trained more than this many days before its series' last day is stale; <code>CAPF_COMPARE</code> drops it.</td></tr>
             <tr><td><span class="k">esm_auto_tie_pct</span></td><td class="num">0.25</td><td class="def">Tier 2 AUTO: candidate MAPEs closer than this many percentage points tie and <code>EXSM_HOLT</code> is kept (<code>chosen_by = AUTO_TIE</code>).</td></tr>
-            <tr><td><span class="k">suite_version</span></td><td class="num">13</td><td class="def">Not a tuning knob. The suite release (latest <span class="inline">PLAN.md</span> milestone) that built the objects; every install overwrites it and <span class="inline">doctor.sql</span> prints it. No analytic view reads it; <span class="inline">CAP_CFG_CHECK</span> reports it <code>BAD</code> below 13.</td></tr>
+            <tr><td><span class="k">suite_version</span></td><td class="num">15</td><td class="def">Not a tuning knob. The suite release (latest <span class="inline">PLAN.md</span> milestone) that built the objects; every install overwrites it and <span class="inline">doctor.sql</span> prints it. No analytic view reads it; <span class="inline">CAP_CFG_CHECK</span> reports it <code>BAD</code> below 15.</td></tr>
           </tbody>
         </table>
       </div>

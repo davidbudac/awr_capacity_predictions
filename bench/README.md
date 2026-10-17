@@ -19,7 +19,7 @@ everywhere. This harness fixes that by running a repeatable daily load profile:
 - **Weekday/weekend contrast** — weekends run a reduced shape, giving
   `CAP_CONFIG.dow_weeks` (day-of-week CPU baseline) a real seasonal signal.
 - **An injectable anomaly** — `anomaly_load.sql` plus a 24-user burst, so
-  `CAPA_TBSPC_ANOM` / `CAPA_CPU_ANOM` have a true outlier to detect.
+  `CAPA_ANOM` has a true outlier to detect.
 
 ## Layout
 

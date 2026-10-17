@@ -97,6 +97,8 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
   `install.sql` re-asserts `SET DEFINE '&'` before each `&substitution`.
 - **A PROMPT line ending in `-` is line continuation** and swallows the next
   line. Never end a PROMPT with a hyphen (that killed the report header once).
+- **A PROMPT line ending in `;` loses the semicolon** (SQL*Plus strips it as a
+  terminator). End PROMPT sentences with `.` instead.
 - **`&&seam_mode` prompts if undefined** — non-interactive callers must
   `DEFINE seam_mode` up front or a heredoc line gets consumed as the answer.
 - **A `--` comment line ending in `;` terminates the statement buffer** in

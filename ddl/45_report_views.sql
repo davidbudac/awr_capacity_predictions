@@ -778,7 +778,7 @@ WITH hm AS (
         FROM   capa_anom a
         JOIN   capd_cpu_hourly h
           ON   h.dbid = a.dbid AND h.con_dbid = a.con_dbid
-         AND   h.metric = a.series AND h.hour_ts = a.ts
+         AND   a.kind = 'CPU' AND h.metric = a.series AND h.hour_ts = a.ts
         WHERE  a.baseline_mode = 'HOUR_OF_WEEK'
         GROUP  BY a.dbid, a.con_dbid, a.series, h.day_dt
      )
