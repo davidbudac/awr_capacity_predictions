@@ -280,6 +280,12 @@ SELECT severity, kind, db_pdb, message FROM capr_alerts ORDER BY sev_rank;
 Both reports' at-a-glance blocks are built from the same view, so what pages
 you and what the report says can never disagree.
 
+**Kibana.** `elk/` ships the same analytics (daily observations, forecasts,
+fits, anomalies, alerts) into Elasticsearch and installs three Lens
+dashboards: tablespaces, CPU and workload series, and a fleet-wide anomaly
+board. Anomalies are drawn in red on every chart. See
+[`elk/README.md`](elk/README.md).
+
 ## Preflight & scheduler jobs
 
 Two standalone scripts at the repo root; neither is part of `install.sql`.

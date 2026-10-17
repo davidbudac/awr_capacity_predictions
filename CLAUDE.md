@@ -42,6 +42,13 @@ started" path), `doctor.sql` (preflight), `install_jobs.sql`
 `test/demo_fixture.sql` fills the CAP_FIXTURE_* tables with a designed 150-day
 "ECOMPRD" story (hourly snapshots, two containers); `docs/demo/` holds the
 reports generated from it (identity strings genericised) for the docs site.
+`elk/` is the Kibana integration (opt-in, outside install.sql):
+`export_capacity.sql` emits one JSON doc per line from the CAPD_/CAPF_/CAPA_/
+CAPR_ views, `ship.sh` bulk-loads it into the ES index `awrcap-capacity`
+(mapping = `elk/elasticsearch/index-template.json`, `dynamic: strict`, so add
+a field there FIRST), `elk/kibana/build_*.py` generate the three dashboards
+(edit the builder, never the `.ndjson`), `setup_kibana.sh` imports them.
+See `elk/README.md`.
 Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomaly →
 `CAPR_` integration (display labels + pollable alerts).
 
