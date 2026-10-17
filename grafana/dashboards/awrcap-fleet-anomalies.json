@@ -1,7 +1,7 @@
 {
   "uid": "awrcap-fleet-anomalies",
   "title": "AWR Capacity - Fleet anomalies",
-  "description": "Every anomaly the CAPA_* layer flagged, across every database the ORDS module serves: tablespace growth outliers, host CPU outliers and DB CPU level shifts.",
+  "description": "Every anomaly the CAPA_* layer flagged, across every database the ORDS module serves and every baseline mode: tablespace growth, host and DB CPU, workload series outliers, and DB CPU level shifts.",
   "tags": [
     "awrcap"
   ],
@@ -88,7 +88,24 @@
         "name": "kind",
         "label": "Anomaly kind",
         "type": "custom",
-        "query": "TBSPC_GROWTH,CPU_BUSY,CPU_SHIFT",
+        "query": "TBSPC_GROWTH,CPU_BUSY,DBCPU_BUSY,SERIES_LEVEL,SERIES_GROWTH,CPU_SHIFT",
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": []
+      },
+      {
+        "name": "mode",
+        "label": "Baseline mode",
+        "type": "custom",
+        "query": "TRAILING,SAME_DOW,HOUR_OF_WEEK",
         "multi": true,
         "includeAll": true,
         "current": {
@@ -163,6 +180,11 @@
               "type": "timestamp"
             },
             {
+              "selector": "obs_day",
+              "text": "obs_day",
+              "type": "timestamp"
+            },
+            {
               "selector": "db",
               "text": "db",
               "type": "string"
@@ -175,6 +197,11 @@
             {
               "selector": "anomaly_kind",
               "text": "anomaly_kind",
+              "type": "string"
+            },
+            {
+              "selector": "baseline_mode",
+              "text": "baseline_mode",
               "type": "string"
             },
             {
@@ -205,7 +232,7 @@
           ],
           "filters": [],
           "computed_columns": [],
-          "filterExpression": "db IN (${db:singlequote}) && anomaly_kind IN (${kind:singlequote}) && sev IN (${sev:singlequote})"
+          "filterExpression": "db IN (${db:singlequote}) && anomaly_kind IN (${kind:singlequote}) && sev IN (${sev:singlequote}) && (anomaly_kind == 'CPU_SHIFT' || baseline_mode IN (${mode:singlequote}))"
         }
       ],
       "transformations": [],
@@ -293,23 +320,27 @@
               "db": 1,
               "series": 2,
               "anomaly_kind": 3,
-              "sev": 4,
-              "z": 5,
-              "anomaly_flag": 6,
-              "message": 7,
-              "sev_rank": 8
+              "baseline_mode": 4,
+              "sev": 5,
+              "z": 6,
+              "anomaly_flag": 7,
+              "message": 8,
+              "sev_rank": 9,
+              "obs_day": 10
             },
             "renameByName": {
-              "ts": "Day",
+              "ts": "When",
               "db": "Database",
               "series": "Series",
               "anomaly_kind": "Kind",
+              "baseline_mode": "Mode",
               "sev": "Sev",
               "anomaly_flag": "Flag",
               "message": "What happened"
             },
             "excludeByName": {
-              "sev_rank": true
+              "sev_rank": true,
+              "obs_day": true
             }
           }
         }
@@ -327,16 +358,16 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Day"
+              "options": "When"
             },
             "properties": [
               {
                 "id": "custom.width",
-                "value": 110
+                "value": 140
               },
               {
                 "id": "unit",
-                "value": "time:YYYY-MM-DD"
+                "value": "time:YYYY-MM-DD HH:mm"
               }
             ]
           },
@@ -399,6 +430,18 @@
               {
                 "id": "custom.width",
                 "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Mode"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
               }
             ]
           },
@@ -786,8 +829,8 @@
         "h": 9
       },
       "type": "timeseries",
-      "title": "Anomalies per day by kind",
-      "description": "TBSPC_GROWTH: a tablespace grew far faster (or slower) than its median daily rate. CPU_BUSY: a host-CPU day far outside its normal range. CPU_SHIFT: a container's DB CPU moved to a new level and stayed there (dated at the start of its recent window).",
+      "title": "Anomalies per day by kind and baseline mode",
+      "description": "One bar segment per kind and baseline mode, coloured by mode (TRAILING red, SAME_DOW amber, HOUR_OF_WEEK blue, level shifts grey), so a day two modes flagged shows two segments. HOUR_OF_WEEK counts flagged hours. TBSPC_GROWTH: tablespace growth rate; CPU_BUSY / DBCPU_BUSY: host CPU / a container's DB CPU; SERIES_LEVEL / SERIES_GROWTH: workload series; CPU_SHIFT: a container's DB CPU moved to a new level and stayed there (counted on the last day of its recent window).",
       "datasource": {
         "type": "datasource",
         "uid": "-- Dashboard --"
@@ -812,11 +855,15 @@
           "id": "groupBy",
           "options": {
             "fields": {
-              "ts": {
+              "obs_day": {
                 "aggregations": [],
                 "operation": "groupby"
               },
               "anomaly_kind": {
+                "aggregations": [],
+                "operation": "groupby"
+              },
+              "baseline_mode": {
                 "aggregations": [],
                 "operation": "groupby"
               },
@@ -833,7 +880,8 @@
           "id": "partitionByValues",
           "options": {
             "fields": [
-              "anomaly_kind"
+              "anomaly_kind",
+              "baseline_mode"
             ],
             "keepFields": false
           }
@@ -842,7 +890,7 @@
       "fieldConfig": {
         "defaults": {
           "unit": "none",
-          "displayName": "${__field.labels.anomaly_kind}",
+          "displayName": "${__field.labels.anomaly_kind} ${__field.labels.baseline_mode}",
           "color": {
             "mode": "palette-classic"
           },
@@ -864,7 +912,7 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/TBSPC_GROWTH/"
+              "options": "/ TRAILING$/"
             },
             "properties": [
               {
@@ -879,7 +927,7 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/CPU_BUSY/"
+              "options": "/ SAME_DOW$/"
             },
             "properties": [
               {
@@ -894,7 +942,7 @@
           {
             "matcher": {
               "id": "byRegexp",
-              "options": "/CPU_SHIFT/"
+              "options": "/ HOUR_OF_WEEK$/"
             },
             "properties": [
               {
@@ -902,6 +950,21 @@
                 "value": {
                   "mode": "fixed",
                   "fixedColor": "#6092c0"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^CPU_SHIFT/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
                 }
               }
             ]
@@ -1043,7 +1106,7 @@
           "id": "groupBy",
           "options": {
             "fields": {
-              "ts": {
+              "obs_day": {
                 "aggregations": [],
                 "operation": "groupby"
               },

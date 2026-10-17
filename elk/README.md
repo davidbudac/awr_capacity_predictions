@@ -36,14 +36,38 @@ index is deliberately not a data stream: every document has a deterministic
 | `observation` | container × series × day                   | the day                         |
 | `forecast`    | container × series × method × horizon      | last observed day + horizon     |
 | `fit`         | container × series × export day            | export day                      |
-| `anomaly`     | flagged event (growth, CPU, level shift)   | event day                       |
+| `anomaly`     | flagged event × baseline mode (growth, CPU, workload series, level shift) | event day or hour (`cap.obs_day` = its day) |
 | `alert`       | `CAPR_ALERTS` row × export day             | export day (`cap.obs_day` = the day it refers to) |
 
 `cap.kind` is `TBSPC`, `CPU` or `SERIES`; `cap.series` is the tablespace,
 CPU metric or workload series name; `cap.db` is the display label the
 reports use (`DBNAME` or `DBNAME/PDBNAME`). An observation flagged by the
 `CAPA_*` layer carries `cap.anomaly: true` plus `cap.z`, `cap.expected` and
-`cap.threshold`, which is what the dashboards draw in red.
+`cap.threshold` (of its headline baseline mode), `cap.anomaly_modes` (every
+mode that flagged the day) and, on BUSY_PCT and DB_CPU_PCT,
+`cap.hours_flagged` (hours the hour-of-week baseline flagged that day). That
+is what the dashboards draw in red. Hourly CPU points are not exported; the
+flagged hours arrive as anomaly documents.
+
+An anomaly document is one event judged against one baseline:
+`cap.baseline_mode` is `TRAILING` (the last weeks), `SAME_DOW` (the same
+weekday) or `HOUR_OF_WEEK` (the same weekday and hour; `cap.grain: HOUR`), and
+a level shift (`CPU_SHIFT`) has none. `cap.anomaly_kind` is `TBSPC_GROWTH`,
+`CPU_BUSY`, `DBCPU_BUSY`, `SERIES_LEVEL`, `SERIES_GROWTH` or `CPU_SHIFT`.
+`cap.value` is the scored value (for a tablespace the growth rate, also in
+`cap.tbspc.rate_bpd`; the day's raw delta is `cap.raw_value` and
+`cap.tbspc.delta_bytes`), `cap.n_hist` the number of history points the
+baseline used, and `cap.alerting` whether the row feeds `CAPR_ALERTS`.
+
+### Timestamps
+
+Every day and hour is the database's wall clock written with a `Z`. AWR
+stores local DATEs, and the export labels them instead of converting them, so
+a snapshot that ended at 18:00 on the database host reads 18:00 in Kibana.
+That holds only when Kibana displays UTC: `elk/setup.sh` sets the advanced
+setting `dateFormat:tz` to `UTC` on every run. Leave it there; any other zone
+shifts every point by its offset. `cap.exported_at` is the one true UTC
+instant.
 
 Forecast points are anchors (REGR at +0/+30/+90/+180/+365, ESM at +30);
 Lens joins them with linear fitting. Because they lie in the future, the
@@ -56,7 +80,7 @@ Stack side, once, from a workstation that can reach Elasticsearch and Kibana
 defaults `http://localhost:9200`, `:5601`, `elastic`):
 
 ```bash
-elk/setup.sh                                     # index template + data view + dashboards
+elk/setup.sh                                     # index template + tz setting + data view + dashboards
 cp elk/logstash/oracle_capacity.conf <logstash pipeline dir>/   # beside oracle.conf
 docker compose restart logstash                  # or however that Logstash reloads
 ```
@@ -77,6 +101,21 @@ files older than `--retention-days` (7), and refuses to write anything that
 does not match the mapping. `--stdout` prints the validated NDJSON instead.
 The `--source` label keys every document; keep it stable per database.
 
+### Upgrading to baseline modes
+
+Anomaly ids now include the baseline mode and the hour, and alert ids the
+mode, so documents exported before that change would stay beside the new ones
+as duplicates. Once, after the new `export_capacity.sql` is on the DB host
+and before its next run:
+
+```bash
+elk/setup.sh --purge-anomaly-docs    # template + one _delete_by_query on cap.record:(anomaly or alert)
+```
+
+The next `export.sh` run re-creates every anomaly and the current day's
+alerts; alert snapshots of earlier export days are gone. Observation, forecast
+and fit documents keep their ids and are not touched.
+
 ## Dashboards
 
 | id | title | answers |
@@ -87,8 +126,10 @@ The `--source` label keys every document; keep it stable per database.
 
 Anomalies are highlighted the same way everywhere: a red bar under the
 observed line on the day the `CAPA_*` layer flagged, and a row in the
-anomaly table with the one-line explanation (`cap.message`). Alerts
-(`CAPR_ALERTS`) appear as a compact table on every dashboard.
+anomaly table with the one-line explanation (`cap.message`) and its baseline
+mode. The CPU charts add a red marker per flagged day or hour. The fleet
+dashboard filters on `cap.baseline_mode` as well. Alerts (`CAPR_ALERTS`)
+appear as a compact table on every dashboard.
 
 Open them at `http://<kibana>/app/dashboards#/view/<id>`.
 

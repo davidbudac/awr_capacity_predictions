@@ -44,16 +44,21 @@ END;
 
 -- Every SELECT drives from alias t, a CAPR_* view carrying the container
 -- labels (db, db_name, con_name) next to dbid/con_dbid.
+-- Timestamps: every day and hour below is the DB wall clock labelled Z (a
+-- label, not a UTC conversion; Kibana runs with dateFormat:tz = UTC, set by
+-- elk/setup.sh). Only exported_at is a true UTC instant.
 DEFINE ident = "'db' VALUE t.db, 'db_name' VALUE t.db_name, 'con_name' VALUE t.con_name, 'dbid' VALUE t.dbid, 'con_dbid' VALUE t.con_dbid, 'source' VALUE :cap_source, 'exported_at' VALUE :exported_at"
 
 -- The four record types below are straight projections of the CAPR_* point
 -- views (ddl/45, ddl/55), which grafana/ords serves too; the logic lives
 -- there, once.
 
--- observation: CAPR_SERIES_POINTS
+-- observation: CAPR_SERIES_POINTS, daily only (CAPR_HOURLY_POINTS is not
+-- exported). doc_key = 'obs|dbid|con_dbid|kind|series|YYYY-MM-DD', the
+-- exact string this id hashed before the view carried it, so existing
+-- observation documents are overwritten in place.
 SELECT JSON_OBJECT(
-         'id' VALUE LOWER(RAWTOHEX(STANDARD_HASH('obs|' || t.dbid || '|' || t.con_dbid
-                    || '|' || t.kind || '|' || t.series || '|' || TO_CHAR(t.ts, 'YYYY-MM-DD'), 'MD5'))),
+         'id' VALUE LOWER(RAWTOHEX(STANDARD_HASH(t.doc_key, 'MD5'))),
          '@timestamp' VALUE TO_CHAR(t.ts, 'YYYY-MM-DD') || 'T00:00:00Z',
          'cap' VALUE JSON_OBJECT(
              'record' VALUE 'observation', 'kind' VALUE t.kind, 'series' VALUE t.series,
@@ -65,6 +70,9 @@ SELECT JSON_OBJECT(
              'gap'          VALUE CASE t.gap WHEN 1 THEN 'true' WHEN 0 THEN 'false' END FORMAT JSON,
              'anomaly'      VALUE CASE t.anomaly WHEN 1 THEN 'true' WHEN 0 THEN 'false' END FORMAT JSON,
              'anomaly_flag' VALUE t.anomaly_flag,
+             'anomaly_modes' VALUE CASE WHEN t.anomaly_modes IS NOT NULL
+                                        THEN '["' || REPLACE(t.anomaly_modes, ',', '","') || '"]' END FORMAT JSON,
+             'hours_flagged' VALUE t.how_hours_flagged,
              'z'            VALUE t.z,
              'expected'     VALUE t.expected,
              'threshold'    VALUE t.threshold,
@@ -149,23 +157,28 @@ SELECT JSON_OBJECT(
          ABSENT ON NULL RETURNING CLOB)
 FROM   capr_fit t;
 
--- anomaly: CAPR_ANOMALIES. A level shift's @timestamp is the start of its
--- recent window; its id keys on obs_day (the window's last day) so the
--- event is overwritten, not duplicated, as the window slides.
+-- anomaly: CAPR_ANOMALIES, one per (event, baseline mode). doc_key keys on
+-- kind, series, mode and the event hour; a level shift keys on obs_day (the
+-- window's last day), so it is overwritten, not duplicated, as the window
+-- slides, while its @timestamp is the window's first day. HOUR rows carry
+-- their hour in @timestamp; DAY rows land on midnight.
 SELECT JSON_OBJECT(
-         'id' VALUE LOWER(RAWTOHEX(STANDARD_HASH('anom|' || t.dbid || '|' || t.con_dbid
-                    || '|' || t.anomaly_kind || '|' || t.series || '|' || TO_CHAR(t.obs_day, 'YYYY-MM-DD'), 'MD5'))),
-         '@timestamp' VALUE TO_CHAR(t.ts, 'YYYY-MM-DD') || 'T00:00:00Z',
+         'id' VALUE LOWER(RAWTOHEX(STANDARD_HASH(t.doc_key, 'MD5'))),
+         '@timestamp' VALUE TO_CHAR(t.ts, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
          'cap' VALUE JSON_OBJECT(
              'record' VALUE 'anomaly', 'kind' VALUE t.kind, 'series' VALUE t.series,
              &ident,
              'unit'         VALUE t.unit,
              'anomaly'      VALUE 'true' FORMAT JSON,
              'anomaly_kind' VALUE t.anomaly_kind,
-             'obs_day'      VALUE CASE WHEN t.anomaly_kind = 'CPU_SHIFT'
-                                       THEN TO_CHAR(t.obs_day, 'YYYY-MM-DD') || 'T00:00:00Z' END,
+             'baseline_mode' VALUE t.baseline_mode,
+             'grain'        VALUE t.grain,
+             'n_hist'       VALUE t.n_hist,
+             'alerting'     VALUE CASE t.alerting WHEN 'Y' THEN 'true' WHEN 'N' THEN 'false' END FORMAT JSON,
+             'obs_day'      VALUE TO_CHAR(t.obs_day, 'YYYY-MM-DD') || 'T00:00:00Z',
              'anomaly_flag' VALUE t.anomaly_flag,
              'value'        VALUE t.value,
+             'raw_value'    VALUE t.raw_value,
              'expected'     VALUE t.expected,
              'threshold'    VALUE t.threshold,
              'z'            VALUE t.z,
@@ -174,20 +187,19 @@ SELECT JSON_OBJECT(
              'sev_rank'     VALUE t.sev_rank,
              'message'      VALUE t.message,
              'tbspc' VALUE CASE WHEN t.kind = 'TBSPC' THEN JSON_OBJECT(
-                 'delta_bytes' VALUE t.value,
-                 'rate_bpd'    VALUE t.rate_bpd
+                 'delta_bytes' VALUE t.raw_value,
+                 'rate_bpd'    VALUE t.value
                  ABSENT ON NULL) END FORMAT JSON
              ABSENT ON NULL)
          ABSENT ON NULL RETURNING CLOB)
 FROM   capr_anomalies t;
 
 -- ===================================================================
--- alert: the pollable CAPR_ALERTS feed, snapshotted per export day
+-- alert: the pollable CAPR_ALERTS feed, snapshotted per export day; one
+-- per alert_key (dbid|con_dbid|kind|series|day|mode) and export day
 -- ===================================================================
 SELECT JSON_OBJECT(
-         'id' VALUE LOWER(RAWTOHEX(STANDARD_HASH('alert|' || t.dbid || '|' || t.con_dbid
-                    || '|' || t.kind || '|' || t.series_key || '|' || TO_CHAR(t.day_dt, 'YYYY-MM-DD')
-                    || '|' || :export_day, 'MD5'))),
+         'id' VALUE LOWER(RAWTOHEX(STANDARD_HASH('alert|' || t.alert_key || '|' || :export_day, 'MD5'))),
          '@timestamp' VALUE :export_day || 'T00:00:00Z',
          'cap' VALUE JSON_OBJECT(
              'record' VALUE 'alert',
@@ -198,6 +210,7 @@ SELECT JSON_OBJECT(
              &ident,
              'unit'       VALUE LOWER(t.unit),
              'alert_kind' VALUE t.kind,
+             'baseline_mode' VALUE t.baseline_mode,
              'sev'        VALUE TRIM(t.severity),
              'sev_rank'   VALUE t.sev_rank,
              'obs_day'    VALUE TO_CHAR(t.day_dt, 'YYYY-MM-DD') || 'T00:00:00Z',

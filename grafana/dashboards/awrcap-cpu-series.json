@@ -106,7 +106,7 @@
           "source": "url",
           "parser": "backend",
           "format": "table",
-          "url": "/anomalies?from=${__from:date:iso}&to=${__to:date:iso}",
+          "url": "/anomalies?kind=CPU&from=${__from:date:iso}&to=${__to:date:iso}",
           "url_options": {
             "method": "GET",
             "data": ""
@@ -161,6 +161,82 @@
           "exclude": false,
           "ids": [
             1
+          ]
+        }
+      },
+      {
+        "name": "DB CPU anomalies",
+        "enable": true,
+        "iconColor": "#e7664c",
+        "datasource": {
+          "type": "yesoreyeram-infinity-datasource",
+          "uid": "awrcap-ords"
+        },
+        "target": {
+          "refId": "Anno",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "awrcap-ords"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/anomalies?kind=CPU&from=${__from:date:iso}&to=${__to:date:iso}",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "items",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "db",
+              "text": "db",
+              "type": "string"
+            },
+            {
+              "selector": "series",
+              "text": "series",
+              "type": "string"
+            },
+            {
+              "selector": "anomaly_kind",
+              "text": "anomaly_kind",
+              "type": "string"
+            },
+            {
+              "selector": "message",
+              "text": "message",
+              "type": "string"
+            }
+          ],
+          "filters": [],
+          "computed_columns": [],
+          "filterExpression": "anomaly_kind == 'DBCPU_BUSY' && db IN (${db:singlequote})"
+        },
+        "mappings": {
+          "time": {
+            "source": "field",
+            "value": "ts"
+          },
+          "text": {
+            "source": "field",
+            "value": "message"
+          },
+          "tags": {
+            "source": "field",
+            "value": "db"
+          }
+        },
+        "filter": {
+          "exclude": false,
+          "ids": [
+            2
           ]
         }
       },
@@ -262,7 +338,7 @@
       },
       "type": "timeseries",
       "title": "Host CPU busy %: observed, p95 forecast (dashed), anomalies (red)",
-      "description": "Daily host busy % (average and busy-hour p95) from OSSTAT. Right of today: the REGR forecast of p95 with its band. Red dashed line: the 80 % saturation line. Red dots and markers: days the anomaly layer flagged against the same weekday's normal range.",
+      "description": "Daily host busy % (average and busy-hour p95) from OSSTAT. Right of today: the REGR forecast of p95 with its band. Red dashed line: the 80 % saturation line. Red dots: days any baseline mode flagged (trailing, same weekday, or an hour of the day against its hour of the week); red markers: each flagged day or hour, with its message on hover.",
       "datasource": {
         "type": "yesoreyeram-infinity-datasource",
         "uid": "awrcap-ords"
@@ -562,7 +638,7 @@
       },
       "type": "timeseries",
       "title": "DB CPU % of host per container (red region = level shift window)",
-      "description": "Time-model DB CPU as a share of host CPU, per container. A red region marks a level shift: it starts where the recent window starts and ends on the day the shift was observed.",
+      "description": "Time-model DB CPU as a share of host CPU, per container. A red region marks a level shift: it starts where the recent window starts and ends on the day the shift was observed. A red marker is a day or hour the anomaly layer flagged.",
       "datasource": {
         "type": "yesoreyeram-infinity-datasource",
         "uid": "awrcap-ords"
@@ -658,6 +734,213 @@
       "gridPos": {
         "x": 0,
         "y": 10,
+        "w": 24,
+        "h": 8
+      },
+      "type": "timeseries",
+      "title": "Host CPU busy % per hour, last 14 days: usual for that hour (dashed), hour-of-week anomalies (red)",
+      "description": "Host busy % per AWR hour bucket (the bucket's end hour). The dashed line is the median of the same weekday and hour over the last weeks; a red dot is an hour the HOUR_OF_WEEK baseline flagged.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "awrcap-ords"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "awrcap-ords"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/hourly?series=BUSY_PCT&from=${__from:date:iso}&to=${__to:date:iso}",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "items",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "db",
+              "text": "db",
+              "type": "string"
+            },
+            {
+              "selector": "value",
+              "text": "busy %",
+              "type": "number"
+            },
+            {
+              "selector": "how_expected",
+              "text": "usual for the hour",
+              "type": "number"
+            }
+          ],
+          "filters": [],
+          "computed_columns": [],
+          "filterExpression": "db IN (${db:singlequote})"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "awrcap-ords"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/hourly?series=BUSY_PCT&from=${__from:date:iso}&to=${__to:date:iso}",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "items",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "db",
+              "text": "db",
+              "type": "string"
+            },
+            {
+              "selector": "anomaly",
+              "text": "anomaly",
+              "type": "string"
+            },
+            {
+              "selector": "value",
+              "text": "anomaly hour",
+              "type": "number"
+            }
+          ],
+          "filters": [],
+          "computed_columns": [],
+          "filterExpression": "anomaly == '1' && db IN (${db:singlequote})"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "db"
+            ],
+            "keepFields": false
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "displayName": "${__field.labels.db} ${__field.name}",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": true,
+            "axisSoftMin": 0,
+            "axisSoftMax": 100
+          },
+          "decimals": 1
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/usual/"
+            },
+            "properties": [
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    6
+                  ]
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/anomaly hour/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#e7664c"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "points"
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              },
+              {
+                "id": "custom.pointSize",
+                "value": 11
+              },
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "showLegend": true,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "timeFrom": "14d"
+    },
+    {
+      "id": 4,
+      "gridPos": {
+        "x": 0,
+        "y": 18,
         "w": 24,
         "h": 7
       },
@@ -1004,10 +1287,10 @@
       }
     },
     {
-      "id": 4,
+      "id": 5,
       "gridPos": {
         "x": 0,
-        "y": 17,
+        "y": 25,
         "w": 12,
         "h": 10
       },
@@ -1267,10 +1550,10 @@
       }
     },
     {
-      "id": 5,
+      "id": 6,
       "gridPos": {
         "x": 12,
-        "y": 17,
+        "y": 25,
         "w": 12,
         "h": 10
       },
@@ -1288,7 +1571,7 @@
             "type": "datasource",
             "uid": "-- Dashboard --"
           },
-          "panelId": 4,
+          "panelId": 5,
           "withTransforms": false
         }
       ],
@@ -1435,10 +1718,10 @@
       }
     },
     {
-      "id": 6,
+      "id": 7,
       "gridPos": {
         "x": 0,
-        "y": 27,
+        "y": 35,
         "w": 12,
         "h": 10
       },
@@ -1456,7 +1739,7 @@
             "type": "datasource",
             "uid": "-- Dashboard --"
           },
-          "panelId": 4,
+          "panelId": 5,
           "withTransforms": false
         }
       ],
@@ -1603,10 +1886,10 @@
       }
     },
     {
-      "id": 7,
+      "id": 8,
       "gridPos": {
         "x": 12,
-        "y": 27,
+        "y": 35,
         "w": 12,
         "h": 10
       },
@@ -1624,7 +1907,7 @@
             "type": "datasource",
             "uid": "-- Dashboard --"
           },
-          "panelId": 4,
+          "panelId": 5,
           "withTransforms": false
         }
       ],
@@ -1771,10 +2054,10 @@
       }
     },
     {
-      "id": 8,
+      "id": 9,
       "gridPos": {
         "x": 0,
-        "y": 37,
+        "y": 45,
         "w": 24,
         "h": 9
       },
@@ -2200,10 +2483,10 @@
       }
     },
     {
-      "id": 9,
+      "id": 10,
       "gridPos": {
         "x": 0,
-        "y": 46,
+        "y": 54,
         "w": 24,
         "h": 8
       },

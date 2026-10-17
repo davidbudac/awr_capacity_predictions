@@ -411,7 +411,7 @@
       },
       "type": "stat",
       "title": "Growth anomalies in range",
-      "description": "Days whose growth was far outside the tablespace's own median rate (robust z-score).",
+      "description": "Days whose growth rate was far outside the tablespace's own median rate (robust z-score), one per day and baseline mode (trailing, same weekday).",
       "datasource": {
         "type": "yesoreyeram-infinity-datasource",
         "uid": "awrcap-ords"
@@ -427,7 +427,7 @@
           "source": "url",
           "parser": "backend",
           "format": "table",
-          "url": "/anomalies?from=${__from:date:iso}&to=${__to:date:iso}",
+          "url": "/anomalies?kind=TBSPC&from=${__from:date:iso}&to=${__to:date:iso}",
           "url_options": {
             "method": "GET",
             "data": ""
@@ -453,6 +453,16 @@
               "selector": "anomaly_kind",
               "text": "anomaly_kind",
               "type": "string"
+            },
+            {
+              "selector": "baseline_mode",
+              "text": "baseline_mode",
+              "type": "string"
+            },
+            {
+              "selector": "raw_value",
+              "text": "raw_value",
+              "type": "number"
             },
             {
               "selector": "value",
@@ -1552,21 +1562,25 @@
               "ts": 0,
               "db": 1,
               "series": 2,
-              "value": 3,
-              "expected": 4,
-              "z": 5,
-              "anomaly_flag": 6,
-              "sev": 7,
-              "message": 8,
-              "anomaly_kind": 9,
-              "sev_rank": 10
+              "baseline_mode": 3,
+              "raw_value": 4,
+              "value": 5,
+              "expected": 6,
+              "z": 7,
+              "anomaly_flag": 8,
+              "sev": 9,
+              "message": 10,
+              "anomaly_kind": 11,
+              "sev_rank": 12
             },
             "renameByName": {
               "ts": "Day",
               "db": "Database",
               "series": "Tablespace",
-              "value": "Growth",
-              "expected": "Expected",
+              "baseline_mode": "Mode",
+              "raw_value": "Growth",
+              "value": "Rate / day",
+              "expected": "Usual rate / day",
               "anomaly_flag": "Flag",
               "sev": "Sev",
               "message": "What happened"
@@ -1631,6 +1645,18 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "Mode"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "Growth"
             },
             "properties": [
@@ -1651,12 +1677,32 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Expected"
+              "options": "Rate / day"
             },
             "properties": [
               {
                 "id": "custom.width",
                 "value": 100
+              },
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Usual rate / day"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 120
               },
               {
                 "id": "unit",

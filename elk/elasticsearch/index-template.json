@@ -1,12 +1,12 @@
 {
   "_meta": {
-    "description": "awrcap-capacity: one plain index (not a data stream) holding every record the AWR capacity suite exports for Kibana. Plain so that deterministic _ids can be re-indexed (overwritten) on every export run; volume is tiny (days x series). host.name and labels.* are stamped by Filebeat on the DB host; everything else comes from elk/export_capacity.sql.",
+    "description": "awrcap-capacity: one plain index (not a data stream) holding every record the AWR capacity suite exports for Kibana. Plain so that deterministic _ids can be re-indexed (overwritten) on every export run; volume is tiny (days x series). host.name and labels.* are stamped by Filebeat on the DB host; everything else comes from elk/export_capacity.sql. Timestamps: every day and hour is the database's wall clock labelled Z (a label, not a UTC conversion); set Kibana dateFormat:tz to UTC (elk/setup.sh does) so they display as the DB clock. cap.exported_at alone is a true UTC instant.",
     "records": {
-      "observation": "one per (container, series, day): the observed daily value, with cap.anomaly=true when the CAPA_* layer flagged that day. @timestamp = the day.",
+      "observation": "one per (container, series, day): the observed daily value, with cap.anomaly=true when any baseline mode flagged that day (cap.anomaly_modes lists them; cap.hours_flagged counts the HOUR_OF_WEEK hours flagged that day). @timestamp = the day.",
       "forecast": "one per (container, series, method, horizon): REGR anchors at 0/30/90/180(/365) and the ESM +30 point, each with its band. @timestamp = last observed day + horizon. Overwritten on each run; stale target days are deleted by ship.sh.",
       "fit": "one per (container, series, export day): slope, r2, quality, days-to-full/limit/saturation with bounds, severity. @timestamp = export day, so days_to_full can itself be charted over time.",
-      "anomaly": "one per flagged event: tablespace growth outlier, host CPU outlier, or a DB CPU level shift. @timestamp = the event day (shift: last day of the recent window).",
-      "alert": "one per CAPR_ALERTS row per export day. @timestamp = export day; cap.obs_day = the day the alert refers to."
+      "anomaly": "one per flagged event and baseline mode: tablespace growth, host CPU, DB CPU, workload series level/growth outlier (cap.baseline_mode TRAILING / SAME_DOW / HOUR_OF_WEEK, cap.grain DAY / HOUR), or a DB CPU level shift (no baseline_mode). The id keys on kind, series, mode and hour. @timestamp = the event day or hour (shift: first day of the recent window); cap.obs_day = the day (shift: last day of the window).",
+      "alert": "one per CAPR_ALERTS row per export day (anomaly kinds: one per series, day and baseline mode). @timestamp = export day; cap.obs_day = the day the alert refers to."
     },
     "managed_by": "awr_capacity_predictions/elk"
   },
@@ -91,6 +91,27 @@
             },
             "anomaly_flag": {
               "type": "keyword"
+            },
+            "anomaly_modes": {
+              "type": "keyword"
+            },
+            "baseline_mode": {
+              "type": "keyword"
+            },
+            "grain": {
+              "type": "keyword"
+            },
+            "n_hist": {
+              "type": "integer"
+            },
+            "raw_value": {
+              "type": "double"
+            },
+            "alerting": {
+              "type": "boolean"
+            },
+            "hours_flagged": {
+              "type": "integer"
             },
             "z": {
               "type": "double"

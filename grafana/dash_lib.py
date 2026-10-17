@@ -12,12 +12,17 @@ RED, AMBER, GREEN, BLUE, GREY = "#e7664c", "#f5a700", "#24c292", "#6092c0", "#8e
 DS = {"type": "yesoreyeram-infinity-datasource", "uid": "awrcap-ords"}
 OUT = pathlib.Path(__file__).resolve().parent / "dashboards"
 
-TIME_COLS = {"ts", "obs_day", "last_day"}
+TIME_COLS = {"ts", "obs_day", "last_day", "day_dt"}
 STRING_COLS = {
     "kind", "series", "db", "db_name", "con_name", "unit", "anomaly_flag",
     "method", "quality", "sev", "limit_source", "anomaly_kind", "message",
-    "alert_kind",
+    "alert_kind", "baseline_mode", "grain", "anomaly_modes", "alert_key",
+    "alerting", "how_flag",
 }
+# The CAPR_ANOMALIES vocabularies (grafana/API.md).
+ANOMALY_KINDS = ("TBSPC_GROWTH", "CPU_BUSY", "DBCPU_BUSY", "SERIES_LEVEL",
+                 "SERIES_GROWTH", "CPU_SHIFT")
+BASELINE_MODES = ("TRAILING", "SAME_DOW", "HOUR_OF_WEEK")
 RANGE = "from=${__from:date:iso}&to=${__to:date:iso}"
 DB = "db IN (${db:singlequote})"
 SERIES = "series IN (${series:singlequote})"

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Generate dashboards/awrcap-fleet-anomalies.json (AWR capacity: fleet anomalies)."""
 from dash_lib import (
-    AMBER, BLUE, DB, GREEN, RED, RANGE, Board, alerts_table, cell_bg, custom_var,
-    data, db_var, fixed, keep, override, prop, q, sev_cell, stat, steps, table,
-    timeseries, where, width,
+    AMBER, ANOMALY_KINDS, BASELINE_MODES, BLUE, DB, GREEN, GREY, RED, RANGE, Board,
+    alerts_table, cell_bg, custom_var, data, db_var, fixed, keep, override, prop, q,
+    sev_cell, stat, steps, table, timeseries, where, width,
 )
 
-KINDS = (("TBSPC_GROWTH", RED), ("CPU_BUSY", AMBER), ("CPU_SHIFT", BLUE))
-FILT = where(DB, "anomaly_kind IN (${kind:singlequote})", "sev IN (${sev:singlequote})")
+MODE_COLORS = dict(zip(BASELINE_MODES, (RED, AMBER, BLUE)))
+# A level shift has no baseline mode, so the mode filter lets it through.
+FILT = where(DB, "anomaly_kind IN (${kind:singlequote})", "sev IN (${sev:singlequote})",
+             "(anomaly_kind == 'CPU_SHIFT' || baseline_mode IN (${mode:singlequote}))")
 ALARM = ((GREEN, None), (RED, 1))
 WATCH = ((GREEN, None), (AMBER, 1))
 COUNT = r"sev_rank \(count\)"
@@ -22,12 +24,13 @@ def count_by(*fields):
 
 b = Board("awrcap-fleet-anomalies", "AWR Capacity - Fleet anomalies",
           "Every anomaly the CAPA_* layer flagged, across every database the ORDS "
-          "module serves: tablespace growth outliers, host CPU outliers and DB CPU "
-          "level shifts.",
+          "module serves and every baseline mode: tablespace growth, host and DB "
+          "CPU, workload series outliers, and DB CPU level shifts.",
           "now-120d", "now")
 b.variables += [
     db_var(),
-    custom_var("kind", "Anomaly kind", [k for k, _c in KINDS]),
+    custom_var("kind", "Anomaly kind", ANOMALY_KINDS),
+    custom_var("mode", "Baseline mode", BASELINE_MODES),
     custom_var("sev", "Severity", ["CRIT", "WARN", "INFO"]),
 ]
 
@@ -42,21 +45,24 @@ LINKS = [
 # into view. A y=0 stat is always visible.
 anomalies = b.add(stat(
     "Anomalies in range",
-    q("A", f"anomalies?{RANGE}", ["ts", "db", "series", "anomaly_kind", "sev", "sev_rank",
+    q("A", f"anomalies?{RANGE}", ["ts", "obs_day", "db", "series", "anomaly_kind",
+                                   "baseline_mode", "sev", "sev_rank",
                                    "z", "anomaly_flag", "message"], filt=FILT),
     field="sev_rank", calc="count", color_steps=ALARM), 0, 0, 6, 4)
 b.add(table(
     "Anomalies, newest first (click a database or series to drill in)", anomalies, [
-        ("ts", "Day", [width(110), prop("unit", "time:YYYY-MM-DD")]),
+        ("ts", "When", [width(140), prop("unit", "time:YYYY-MM-DD HH:mm")]),
         ("db", "Database", [width(190), prop("links", LINKS)]),
         ("series", "Series", [width(170), prop("links", LINKS)]),
         ("anomaly_kind", "Kind", [width(130)]),
+        ("baseline_mode", "Mode", [width(120)]),
         ("sev", "Sev", sev_cell()),
         ("z", "z", cell_bg(((GREEN, None), (AMBER, 3), (RED, 5)),
                            prop("decimals", 1), width(70))),
         ("anomaly_flag", "Flag", [width(60)]),
-        ("message", "What happened"), ("sev_rank", "sev_rank")],
-    sort="ts", desc=True, hidden=("sev_rank",)),
+        ("message", "What happened"), ("sev_rank", "sev_rank"),
+        ("obs_day", "obs_day")],
+    sort="ts", desc=True, hidden=("sev_rank", "obs_day")),
     0, 20, 24, 12)
 
 b.add(stat("Databases affected", anomalies, transformations=[count_by("db")],
@@ -67,16 +73,21 @@ b.add(stat("WARN anomalies", anomalies, transformations=[keep("sev", "WARN")],
            field="sev_rank", calc="count", color_steps=WATCH), 18, 0, 6, 4)
 
 b.add(timeseries(
-    "Anomalies per day by kind", anomalies,
-    transformations=[count_by("ts", "anomaly_kind")], partition=("anomaly_kind",),
-    display="${__field.labels.anomaly_kind}", decimals=0,
+    "Anomalies per day by kind and baseline mode", anomalies,
+    transformations=[count_by("obs_day", "anomaly_kind", "baseline_mode")],
+    partition=("anomaly_kind", "baseline_mode"),
+    display="${__field.labels.anomaly_kind} ${__field.labels.baseline_mode}", decimals=0,
     custom={"drawStyle": "bars", "fillOpacity": 90, "lineWidth": 1,
             "stacking": {"mode": "normal", "group": "k"}},
-    overrides=[override("byRegexp", f"/{k}/", fixed(c)) for k, c in KINDS],
-    description="TBSPC_GROWTH: a tablespace grew far faster (or slower) than its median daily "
-                "rate. CPU_BUSY: a host-CPU day far outside its normal range. CPU_SHIFT: a "
-                "container's DB CPU moved to a new level and stayed there (dated at the start "
-                "of its recent window)."),
+    overrides=[override("byRegexp", f"/ {m}$/", fixed(c)) for m, c in MODE_COLORS.items()]
+    + [override("byRegexp", "/^CPU_SHIFT/", fixed(GREY))],
+    description="One bar segment per kind and baseline mode, coloured by mode (TRAILING red, "
+                "SAME_DOW amber, HOUR_OF_WEEK blue, level shifts grey), so a day two modes "
+                "flagged shows two segments. HOUR_OF_WEEK counts flagged hours. "
+                "TBSPC_GROWTH: tablespace growth rate; CPU_BUSY / DBCPU_BUSY: host CPU / a "
+                "container's DB CPU; SERIES_LEVEL / SERIES_GROWTH: workload series; CPU_SHIFT: "
+                "a container's DB CPU moved to a new level and stayed there (counted on the "
+                "last day of its recent window)."),
     0, 4, 15, 9)
 
 b.add({
@@ -104,7 +115,7 @@ b.add({
     **data(anomalies),
     "transformations": [
         {"id": "groupBy", "options": {"fields": {
-            "ts": {"aggregations": [], "operation": "groupby"},
+            "obs_day": {"aggregations": [], "operation": "groupby"},
             "db": {"aggregations": [], "operation": "groupby"},
             "sev_rank": {"aggregations": ["min"], "operation": "aggregate"}}}},
         {"id": "partitionByValues", "options": {"fields": ["db"], "keepFields": False}},

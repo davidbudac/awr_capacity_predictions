@@ -71,10 +71,11 @@ sql_script | bash -c "${oracle_env}sqlplus -S -L / as sysdba" > "$raw" \
 # document with an unmapped field is rejected by Elasticsearch far downstream,
 # where only the Logstash log would show it.
 TEMPLATE="$here/elasticsearch/index-template.json" python3 - "$raw" <<'PY'
-import collections, json, os, sys
+import collections, json, os, re, sys
 
 path = sys.argv[1]
 mappings = json.load(open(os.environ["TEMPLATE"]))["template"]["mappings"]
+STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
 
 
 def fail(msg):
@@ -113,6 +114,12 @@ with open(path) as fh:
             fail(f"line {n} is not valid JSON ({e}): {line[:300]}")
         if not doc.get("id") or "@timestamp" not in doc or "record" not in doc.get("cap", {}):
             fail(f"line {n} lacks id/@timestamp/cap.record: {line[:300]}")
+        if not STAMP.fullmatch(doc["@timestamp"]):
+            fail(f"line {n} @timestamp is not YYYY-MM-DDTHH:MI:SSZ: {line[:300]}")
+        cap = doc["cap"]
+        if (cap["record"] == "anomaly" and cap.get("anomaly_kind") != "CPU_SHIFT"
+                and not cap.get("baseline_mode")):
+            fail(f"line {n} is an anomaly without cap.baseline_mode: {line[:300]}")
         unknown = set(doc_paths(doc)) - allowed
         if unknown:
             fail(f"line {n} has fields not in the index template {sorted(unknown)}: {line[:300]}")

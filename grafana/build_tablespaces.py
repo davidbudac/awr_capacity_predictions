@@ -37,12 +37,14 @@ fit_table = b.add(stat("Tablespaces CRIT", fit, transformations=[keep("sev", "CR
            description="Latest fit says full in 30 days or less (or already past the near-full line)."),
       0, 0, 6, 4)
 anomaly_table = b.add(stat("Growth anomalies in range",
-    q("A", f"anomalies?{RANGE}", ["ts", "db", "series", "anomaly_kind", "value",
-                                   "expected", "z", "anomaly_flag", "sev", "sev_rank",
-                                   "message"],
+    q("A", f"anomalies?kind=TBSPC&{RANGE}", ["ts", "db", "series", "anomaly_kind",
+                                              "baseline_mode", "raw_value", "value",
+                                              "expected", "z", "anomaly_flag", "sev",
+                                              "sev_rank", "message"],
       filt=GROWTH),
            field="sev_rank", calc="count", color_steps=((GREEN, None), (RED, 1)),
-           description="Days whose growth was far outside the tablespace's own median rate (robust z-score)."),
+           description="Days whose growth rate was far outside the tablespace's own median rate "
+                       "(robust z-score), one per day and baseline mode (trailing, same weekday)."),
       12, 0, 6, 4)
 b.add(table(
     "Days to full (latest fit per tablespace, soonest first)", fit_table, [
@@ -116,8 +118,11 @@ b.add(table(
     "Growth anomalies (newest first)", anomaly_table, [
         ("ts", "Day", [width(110), prop("unit", "time:YYYY-MM-DD")]),
         ("db", "Database", [width(190)]), ("series", "Tablespace", [width(170)]),
-        ("value", "Growth", [width(100), prop("unit", "bytes"), prop("decimals", 1)]),
-        ("expected", "Expected", [width(100), prop("unit", "bytes"), prop("decimals", 1)]),
+        ("baseline_mode", "Mode", [width(110)]),
+        ("raw_value", "Growth", [width(100), prop("unit", "bytes"), prop("decimals", 1)]),
+        ("value", "Rate / day", [width(100), prop("unit", "bytes"), prop("decimals", 1)]),
+        ("expected", "Usual rate / day", [width(120), prop("unit", "bytes"),
+                                          prop("decimals", 1)]),
         ("z", "z", cell_bg(((GREEN, None), (AMBER, 3), (RED, 5)),
                            prop("decimals", 1), width(70))),
         ("anomaly_flag", "Flag", [width(60)]), ("sev", "Sev", sev_cell()),

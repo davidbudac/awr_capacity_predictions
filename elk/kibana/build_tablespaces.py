@@ -158,23 +158,26 @@ b.add_lens("growth-xy", "Daily growth (sum of selected tablespaces; red = flagge
 # Growth anomalies, newest first.
 p = "anoms"
 day, db, ser = c(p, "day"), c(p, "db"), c(p, "series")
-val, exp, z, flag, msg = (c(p, n) for n in ("value", "exp", "z", "flag", "msg"))
+val, rate, exp, z, flag, msg = (c(p, n) for n in ("value", "rate", "exp", "z", "flag", "msg"))
+mode = c(p, "mode")
 cols = {
     day: col_date_histogram(label="Day", empty_rows=False),
     db: col_terms("cap.db", "Database", None, size=200),
     ser: col_terms("cap.series", "Tablespace", None, size=500),
-    val: col_max("cap.value", "Growth", fmt=fmt_bytes(1)),
-    exp: col_max("cap.expected", "Expected", fmt=fmt_bytes(1)),
+    mode: col_terms("cap.baseline_mode", "Mode", None, size=5),
+    val: col_max("cap.raw_value", "Growth", fmt=fmt_bytes(1)),
+    rate: col_max("cap.value", "Rate / day", fmt=fmt_bytes(1)),
+    exp: col_max("cap.expected", "Usual rate / day", fmt=fmt_bytes(1)),
     z: col_max("cap.z", "z", fmt=fmt_number(1)),
     flag: col_last_value("cap.anomaly_flag", "Flag", data_type="string"),
     msg: col_last_value("cap.message.keyword", "What happened",
                         data_type="string"),
 }
-order = [day, db, ser, val, exp, z, flag, msg]
+order = [day, db, ser, mode, val, rate, exp, z, flag, msg]
 b.add_lens("anom-table", "Growth anomalies (newest first)", 0, 47, 48, 12,
            "lnsDatatable", table_state(order, day, page_size=8, overrides={
                day: {"width": 110}, db: {"width": 190}, ser: {"width": 190},
-               val: {"width": 110},
+               mode: {"width": 110}, val: {"width": 110}, rate: {"width": 110},
                exp: {"width": 110}, z: {**cell_colors(col_palette_steps(3, 5)),
                                        "width": 80},
                flag: {"width": 70},

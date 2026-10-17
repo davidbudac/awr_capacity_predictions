@@ -39,6 +39,10 @@ DECLARE
     c_range CONSTANT VARCHAR2(400) :=
         q'[ts >= NVL(TRUNC(CAST(SYS_EXTRACT_UTC(TO_TIMESTAMP_TZ(:p_from, 'YYYY-MM-DD"T"HH24:MI:SS.FF3TZR')) AS DATE)), TRUNC(SYSDATE) - 120)
   AND  ts <= NVL(CAST(SYS_EXTRACT_UTC(TO_TIMESTAMP_TZ(:p_to, 'YYYY-MM-DD"T"HH24:MI:SS.FF3TZR')) AS DATE), SYSDATE)]';
+    -- Hour points take the range as given (no TRUNC), default the last 14 days.
+    c_hour_range CONSTANT VARCHAR2(400) :=
+        q'[ts >= NVL(CAST(SYS_EXTRACT_UTC(TO_TIMESTAMP_TZ(:p_from, 'YYYY-MM-DD"T"HH24:MI:SS.FF3TZR')) AS DATE), SYSDATE - 14)
+  AND  ts <= NVL(CAST(SYS_EXTRACT_UTC(TO_TIMESTAMP_TZ(:p_to, 'YYYY-MM-DD"T"HH24:MI:SS.FF3TZR')) AS DATE), SYSDATE)]';
 
     PROCEDURE run(p_call VARCHAR2) IS
     BEGIN
@@ -46,8 +50,9 @@ DECLARE
     END;
 
     -- p_items_per_page => 0 turns pagination off: the contract is every
-    -- matching row in one response.
-    PROCEDURE get(p_pattern VARCHAR2, p_source VARCHAR2, p_from_to BOOLEAN := FALSE) IS
+    -- matching row in one response. p_mapped lists the URL parameters that
+    -- are not legal bind names (from, to, mode); each binds as :p_<name>.
+    PROCEDURE get(p_pattern VARCHAR2, p_source VARCHAR2, p_mapped VARCHAR2 := NULL) IS
     BEGIN
         run('define_template(' || v_sch || 'p_module_name => ''' || c_module
             || ''', p_pattern => ''' || p_pattern || ''')');
@@ -55,9 +60,9 @@ DECLARE
             || ''', p_pattern => ''' || p_pattern || ''', p_method => ''GET'''
             || ', p_source_type => ''json/collection'', p_items_per_page => 0'
             || ', p_source => ' || DBMS_ASSERT.ENQUOTE_LITERAL(REPLACE(p_source, '''', '''''')) || ')');
-        IF p_from_to THEN
-            -- :from / :to are not legal bind names, so map them explicitly.
-            FOR b IN (SELECT 'from' AS name FROM dual UNION ALL SELECT 'to' FROM dual) LOOP
+        IF p_mapped IS NOT NULL THEN
+            FOR b IN (SELECT REGEXP_SUBSTR(p_mapped, '[^,]+', 1, LEVEL) AS name FROM dual
+                      CONNECT BY LEVEL <= REGEXP_COUNT(p_mapped, ',') + 1) LOOP
                 run('define_parameter(' || v_sch || 'p_module_name => ''' || c_module
                     || ''', p_pattern => ''' || p_pattern || ''', p_method => ''GET'''
                     || ', p_name => ''' || b.name || ''', p_bind_variable_name => ''p_' || b.name
@@ -90,13 +95,23 @@ ORDER  BY db_pdb]');
 SELECT ts, kind, series, db, con_dbid, value, limit_value, pct, unit,
        anomaly, anomaly_flag, z, expected, threshold, gap,
        used_bytes, size_bytes, limit_bytes, delta_bytes, rate_bpd,
-       busy_pct, busy_p95, busy_peak_pct
+       busy_pct, busy_p95, busy_peak_pct, anomaly_modes, how_hours_flagged
 FROM   capr_series_points
 WHERE  kind = UPPER(:kind)
   AND  (:db IS NULL OR db = :db)
   AND  (:series IS NULL OR series = :series)
   AND  ]' || c_range || q'[
-ORDER  BY db, series, ts]', TRUE);
+ORDER  BY db, series, ts]', 'from,to');
+
+    get('hourly', q'[
+SELECT ts, kind, series, db, con_dbid, day_dt, dow, hour_of_day, unit, value,
+       gap, ivl_hours, n_intervals, anomaly, how_expected, how_threshold, how_z,
+       how_flag, how_n_hist
+FROM   capr_hourly_points
+WHERE  (:db IS NULL OR db = :db)
+  AND  (:series IS NULL OR series = :series)
+  AND  ]' || c_hour_range || q'[
+ORDER  BY db, series, ts]', 'from,to');
 
     get('forecast', q'[
 SELECT ts, kind, series, db, con_dbid, method, horizon_days, value, lo, hi,
@@ -118,12 +133,14 @@ ORDER  BY sev_rank, days_to_full NULLS LAST, db, kind, series]');
 
     get('anomalies', q'[
 SELECT ts, kind, series, db, con_dbid, anomaly_kind, anomaly_flag, value,
-       expected, threshold, z, shift_pct, unit, sev, sev_rank, message, obs_day
+       expected, threshold, z, shift_pct, unit, sev, sev_rank, message, obs_day,
+       baseline_mode, grain, n_hist, alerting, raw_value
 FROM   capr_anomalies
 WHERE  (:kind IS NULL OR kind = UPPER(:kind))
   AND  (:db IS NULL OR db = :db)
+  AND  (:p_mode IS NULL OR baseline_mode = UPPER(:p_mode))
   AND  ]' || c_range || q'[
-ORDER  BY ts DESC, sev_rank, db, series]', TRUE);
+ORDER  BY ts DESC, sev_rank, db, series]', 'from,to,mode');
 
     get('alerts', q'[
 SELECT TRIM(severity) AS sev, sev_rank, kind AS alert_kind,
@@ -131,7 +148,7 @@ SELECT TRIM(severity) AS sev, sev_rank, kind AS alert_kind,
             WHEN kind LIKE 'SERIES%' THEN 'SERIES'
             ELSE 'CPU' END AS kind,
        series_key AS series, db_pdb AS db, con_dbid, day_dt AS obs_day,
-       value, threshold, LOWER(unit) AS unit, message
+       value, threshold, LOWER(unit) AS unit, message, baseline_mode, alert_key
 FROM   capr_alerts
 WHERE  (:db IS NULL OR db_pdb = :db)
 ORDER  BY sev_rank, db_pdb, kind, series_key]');

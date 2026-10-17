@@ -13,6 +13,11 @@ FC_HOST = ("cap.record:forecast and cap.kind:CPU and cap.method:REGR "
            "and cap.series:BUSY_P95")
 ANOM_HOST = f"{OBS_HOST} and cap.anomaly:true"
 SHIFT = "cap.record:anomaly and cap.anomaly_kind:CPU_SHIFT"
+# Hour-precise markers, one per flagged (day or hour, baseline mode). Each
+# chart names its own kind so the markers stay scoped even where Kibana
+# ignores the panel query for an annotation layer.
+EV_HOST = "cap.record:anomaly and cap.anomaly_kind:CPU_BUSY"
+EV_DBCPU = "cap.record:anomaly and cap.anomaly_kind:DBCPU_BUSY"
 PCT = fmt_number(1, suffix=" %")
 
 b = DashboardBuilder(
@@ -28,7 +33,9 @@ b.add_markdown("header", 0, 0, 48, 4, (
     "lines left of today are observed daily values; lines right of today are "
     "the linear forecast with its low/high band. **Red bars mark anomalies**: "
     "a host-CPU day far outside its normal range, or the day a container's "
-    "DB CPU shifted to a new level. The red dashed line is the 80 % "
+    "DB CPU shifted to a new level. **Red markers** are the flagged days and "
+    "hours of either chart (hover for the baseline mode and the message). "
+    "The red dashed line is the 80 % "
     "saturation line; grey dashed lines are SESSIONS / PROCESSES limits. "
     "Pick one database with the control above to read a single host."))
 
@@ -69,8 +76,12 @@ b.add_lens("host-xy", "Host CPU busy %: observed, p95 forecast, anomalies in red
                xy_data_layer("line", x_obs, [busy, p95], split=s_obs, key="obs"),
                xy_data_layer("line", x_fc, [fc, lo, hi], split=s_fc, key="fc"),
                xy_ref_layer(sat, RED, key="sat", icon="alert"),
+               xy_annotation_layer("anom-marker", "Anomaly", EV_HOST,
+                                   tooltip_fields=["cap.baseline_mode",
+                                                   "cap.message.keyword"]),
            ]), layers=layers,
-           query="cap.kind:CPU and cap.series:(BUSY_PCT or BUSY_P95)")
+           query="cap.kind:CPU and cap.series:(BUSY_PCT or BUSY_P95)",
+           annotations=["anom-marker"])
 
 # DB CPU per container, level shifts in red.
 p = "dbcpu"
@@ -87,15 +98,18 @@ layers = {
         s_obs: col_terms("cap.db", "Container", val, size=10),
     }, [s_obs, x_obs, val]),
 }
-b.add_lens("dbcpu-xy", "DB CPU % of host per container (red = level shift)",
+b.add_lens("dbcpu-xy", "DB CPU % of host per container (red = level shift or anomaly)",
            28, 4, 20, 15, "lnsXY", xy_multi_state([
                xy_data_layer("bar", x_sh, [sh], colors={sh: RED}, key="shift"),
                xy_data_layer("line", x_obs, [val], split=s_obs, key="obs"),
                xy_annotation_layer("shift-marker", "Level shift", SHIFT,
                                    text_field="cap.db",
                                    tooltip_fields=["cap.message.keyword"]),
+               xy_annotation_layer("anom-marker", "Anomaly", EV_DBCPU,
+                                   tooltip_fields=["cap.baseline_mode",
+                                                   "cap.message.keyword"]),
            ]), layers=layers, query="cap.kind:CPU and cap.series:DB_CPU_PCT",
-           time_range=PAST, annotations=["shift-marker"])
+           time_range=PAST, annotations=["shift-marker", "anom-marker"])
 
 
 def trend_table(p, title, y, h, kind, value_label, value_fmt, dtf_label,
@@ -173,7 +187,7 @@ trend_table("seriestrend", "Workload series (latest fit, soonest limit first)",
             56, 13, "SERIES", "Current", fmt_number(1), "Days to limit", True)
 add_alerts_table(
     b, "alerts", "CPU and series alerts (latest export)", 0, 69, 48, 12,
-    "cap.alert_kind:(CPU_SAT or DBCPU_SAT or CPU_ANOM or CPU_SHIFT or "
-    "SERIES_LIMIT or SERIES_NEARLIMIT)")
+    "cap.alert_kind:(CPU_SAT or DBCPU_SAT or CPU_ANOM or DBCPU_ANOM or "
+    "CPU_SHIFT or SERIES_LIMIT or SERIES_NEARLIMIT or SERIES_ANOM)")
 
 b.write("20-cpu-series.ndjson")
