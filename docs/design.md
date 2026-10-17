@@ -293,7 +293,13 @@ current day** so a spike can't inflate its own baseline.
   exactly-flat baseline (MAD=0) still flags, and sub-floor (≤100 MiB/day)
   wiggles never do. Flags require `n_hist ≥ tbspc_min_hist` (7). The raw
   `used_delta_bytes` and `day_gap` are carried through for the report's audit
-  trail.
+  trail. `pct_vs_median` and `pct_vs_avg` restate the deviation as a
+  percentage ("grew 25% more than usual") of the baseline median and of
+  `avg_rate_bpd`, the **mean** rate `SUM(delta)/SUM(gap)` over the trailing
+  `train_days` (90) days, current day excluded (`avg_days` = the days that sum
+  covers) — the same window length the trend is fitted on, and a mean rather
+  than a median because the question is "more than its long-term average".
+  Both are NULL when their baseline is not positive.
 - **`CAPA_CPU_ANOM`** — baseline is the prior `dow_weeks` **same weekdays**
   (`day − 7·level`, generated with `CONNECT BY`), so weekly seasonality is
   handled deterministically. The MAD floor is `cpu_min_mad_pct` (3 points),
@@ -302,7 +308,9 @@ current day** so a spike can't inflate its own baseline.
   as a baseline observation — an AWR outage is an instrumentation event, not a
   CPU event, and a 36 h average has no business dragging a same-weekday median
   around. `gap_flag` and `day_gap` ride through so the report can say *why* a
-  visibly odd day is unflagged.
+  visibly odd day is unflagged. `pct_vs_median` states the deviation as a
+  percentage of the same-weekday median (NULL when that median is not
+  positive).
 - **`CAPA_CPU_SHIFT` (M10.3)** — the failure mode the two views above are
   structurally blind to: a **sustained step**. A new release adds +18 points
   and stays there; every individual day sits inside `k·MAD` of its own weekday
@@ -328,6 +336,12 @@ current day** so a spike can't inflate its own baseline.
   re-derivable by hand. `BUSY_PEAK` is deliberately not covered: it is already
   a same-window average of `BUSY_PCT`'s busiest hours, so it shifts with them
   and would only duplicate the alert.
+
+The percentages flow downstream unchanged: `CAPR_TBSPC_ANOMALIES` /
+`CAPR_CPU_ANOMALIES` carry them as `pct_vs_med` / `pct_vs_avg` (plus `avg_mb`,
+`avg_days`), the `TBSPC_ANOM` / `CPU_ANOM` alert messages end with
+"+N% vs 90-day avg rate" / "(+N% vs median)", and `CAPR_ANOMALIES` appends
+`pct_vs_expected` / `pct_vs_avg` at the end of its select list.
 
 Self-join cost is O(days·window) at daily grain — fine for ≤ ~400 days, and it
 keeps every flag hand-recomputable.
@@ -523,7 +537,7 @@ The fixture seam is the correctness gate: since we can't `INSERT` into
 `DBA_HIST_*`, `CAPV_*` are pointed at `CAP_FIXTURE_*` tables filled with exact,
 anchored, deterministic series. Every asserted number is a closed form recorded
 in `CAP_FIXTURE_META` (so `run_test.sql` reads expectations rather than
-re-deriving dates). `run_test.sql` prints PASS/FAIL over **199** assertions and
+re-deriving dates). `run_test.sql` prints PASS/FAIL over **226** assertions and
 exits non-zero on any failure (CI-able); `run_test_ml.sql` adds **14** more
 behind the `CREATE MINING MODEL` privilege. The harness needs
 `CREATE TABLE/VIEW/TYPE/PROCEDURE` (+ `CREATE MINING MODEL` for Tier 2) and no

@@ -29,6 +29,7 @@ DECLARE
     v_num2  NUMBER;
     v_num3  NUMBER;
     v_str   VARCHAR2(40);
+    v_msg   VARCHAR2(4000);
     v_r2    NUMBER;
 
     FUNCTION meta_n(p VARCHAR2) RETURN NUMBER IS x NUMBER;
@@ -486,6 +487,81 @@ BEGIN
     SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE series_key = 'FIX_PURGE';
     chk_int('PURGE raises no CAPR_ALERTS (cliff predates the alert window)', v_n, 0);
 
+    DBMS_OUTPUT.PUT_LINE('=== anomaly deviation as % of baseline (median / train_days avg) ===');
+    -- FIX_SPIKE: 640 blocks/day (SPIKE_RATE = 5 MiB/day) every day, plus a
+    -- 262144-block (2 GiB) step on the spike day, so that day's rate is
+    -- SPIKE_RATE + 2 GiB and both baselines are exactly SPIKE_RATE:
+    -- 100 * 2 GiB / 5 MiB = 40960.
+    -- The step is written as the NUMBER literal 2147483648: 262144 * 8192 as
+    -- integer literals overflows PLS_INTEGER (2^31) in PL/SQL.
+    DECLARE
+        n_train NUMBER;
+        n_rate  NUMBER := meta_n('SPIKE_RATE');
+        n_pct   NUMBER := 100 * 2147483648 / meta_n('SPIKE_RATE');
+        n_avgd  NUMBER;
+        n_capa  NUMBER;
+    BEGIN
+        SELECT cfg_value INTO n_train FROM cap_config WHERE cfg_name = 'train_days';
+        -- Deltas exist from day index 1 (index 0 has no predecessor) with no
+        -- gaps, and the window is [day - train_days, day - 1], so it covers
+        -- LEAST(train_days, spike index - 1) one-day gaps.
+        n_avgd := LEAST(n_train, (d_spike - meta_d('BASE_DAY')) - 1);
+        SELECT avg_rate_bpd, avg_days, pct_vs_median, pct_vs_avg
+          INTO v_num, v_n, v_num2, v_num3
+          FROM capa_tbspc_anom WHERE tablespace_name = 'FIX_SPIKE' AND day_dt = d_spike;
+        chk_close('SPIKE avg_rate_bpd = SPIKE_RATE', v_num, n_rate, 0.000001);
+        chk_int  ('SPIKE avg_days (calendar days the average covers)', v_n, n_avgd);
+        chk_close('SPIKE pct_vs_median', v_num2, n_pct, 0.000001);
+        chk_close('SPIKE pct_vs_avg',    v_num3, n_pct, 0.000001);
+
+        -- Injected Tuesday: 70% busy vs the 40% weekday median -> +75%.
+        SELECT pct_vs_median INTO v_num FROM capa_cpu_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_inj;
+        chk_close('CPU injected Tuesday pct_vs_median', v_num, 100 * (70 - 40) / 40, 0.000001);
+
+        -- FIX_PURGE cliff: baseline growth LINEAR_SLOPE (1280 blocks = 10
+        -- MiB/day); the cliff day's delta is that growth minus the 76800-block
+        -- (600 MiB) purge. Closed form 100 * (-76800 * 8192) / LINEAR_SLOPE = -6000.
+        SELECT pct_vs_avg INTO v_num FROM capa_tbspc_anom
+          WHERE tablespace_name = 'FIX_PURGE' AND day_dt = d_purge;
+        chk_close('PURGE cliff day pct_vs_avg',
+                  v_num, 100 * ((n_slope - 76800 * 8192) - n_slope) / n_slope, 0.000001);
+
+        -- CAPR_ALERTS messages carry the percentages.
+        SELECT message INTO v_msg FROM capr_alerts
+          WHERE kind = 'TBSPC_ANOM' AND series_key = 'FIX_SPIKE' AND day_dt = d_spike;
+        chk_true('SPIKE TBSPC_ANOM message has "+' || n_pct || '% vs ' || n_train
+                 || '-day avg rate" (got: ' || v_msg || ')',
+                 INSTR(v_msg, '+' || TO_CHAR(n_pct, 'FM999999990') || '% vs '
+                              || TO_CHAR(n_train, 'FM9990') || '-day avg rate') > 0);
+        SELECT message INTO v_msg FROM capr_alerts
+          WHERE kind = 'CPU_ANOM' AND day_dt = d_inj;
+        chk_true('CPU_ANOM message has "+75% vs median" (got: ' || v_msg || ')',
+                 INSTR(v_msg, '(+75% vs median)') > 0);
+
+        -- Report views pass the CAPA numbers through unchanged.
+        SELECT r.avg_mb, r.avg_days, r.pct_vs_med, r.pct_vs_avg, a.pct_vs_median, a.pct_vs_avg
+          INTO v_num, v_n, v_num2, v_num3, v_r2, n_capa
+          FROM capr_tbspc_anomalies r
+          JOIN capa_tbspc_anom a
+            ON a.dbid = r.dbid AND a.con_dbid = r.con_dbid
+           AND a.tablespace_name = r.tablespace_name AND a.day_dt = r.day_dt
+          WHERE r.tablespace_name = 'FIX_SPIKE' AND r.day_dt = d_spike;
+        chk_close('CAPR_TBSPC_ANOMALIES SPIKE avg_mb = 5', v_num, n_rate / 1048576, 0.000001);
+        chk_int  ('CAPR_TBSPC_ANOMALIES SPIKE avg_days', v_n, n_avgd);
+        chk_close('CAPR_TBSPC_ANOMALIES SPIKE pct_vs_med = CAPA', v_num2, v_r2, 0.000001);
+        chk_close('CAPR_TBSPC_ANOMALIES SPIKE pct_vs_avg = CAPA', v_num3, n_capa, 0.000001);
+        SELECT r.pct_vs_med, a.pct_vs_median INTO v_num, v_num2
+          FROM capr_cpu_anomalies r
+          JOIN capa_cpu_anom a
+            ON a.dbid = r.dbid AND a.con_dbid = r.con_dbid AND a.day_dt = r.day_dt
+          WHERE r.dbid = v_dbid AND r.con_dbid = v_dbid AND r.day_dt = d_inj;
+        chk_close('CAPR_CPU_ANOMALIES Tuesday pct_vs_med = CAPA', v_num, v_num2, 0.000001);
+    EXCEPTION
+        WHEN OTHERS THEN
+            fail('anomaly-% block raised ' || SQLERRM);
+    END;
+
     -- M11 uses a local DATE for the last collected day: meta_d() is a nested
     -- PL/SQL function and cannot be called from inside a SQL statement
     -- (PLS-00231), so the value is resolved once here.
@@ -771,6 +847,16 @@ BEGIN
             AND a.ts = s.last_day - s.recent_days + 1 AND a.obs_day = s.last_day
             AND a.sev = 'WARN' AND a.db = 'FIXCDB/FIXPDB1';
         chk_int('CPU_SHIFT dated at the start of its recent window, obs_day = last_day', v_n, 1);
+        SELECT pct_vs_expected, pct_vs_avg INTO v_num, v_num2
+          FROM capr_anomalies
+          WHERE anomaly_kind = 'TBSPC_GROWTH' AND series = 'FIX_SPIKE' AND obs_day = d_spike;
+        chk_close('CAPR_ANOMALIES SPIKE pct_vs_expected', v_num,  100 * 2147483648 / meta_n('SPIKE_RATE'), 0.000001);
+        chk_close('CAPR_ANOMALIES SPIKE pct_vs_avg',      v_num2, 100 * 2147483648 / meta_n('SPIKE_RATE'), 0.000001);
+        SELECT a.pct_vs_expected, 100 * s.shift_pct / s.base_med INTO v_num, v_num2
+          FROM capr_anomalies a JOIN capa_cpu_shift s
+            ON s.dbid = a.dbid AND s.con_dbid = a.con_dbid AND s.metric = a.series
+          WHERE a.anomaly_kind = 'CPU_SHIFT';
+        chk_close('CAPR_ANOMALIES CPU_SHIFT pct_vs_expected = 100*shift_pct/base_med', v_num, v_num2, 0.000001);
     EXCEPTION
         WHEN OTHERS THEN
             fail('CAPR point-feed block raised ' || SQLERRM);

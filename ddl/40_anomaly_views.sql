@@ -4,6 +4,9 @@
 -- Robust (median + MAD) outlier flags. Every flag is reproducible by hand:
 -- the views expose value, baseline median, MAD-sigma, the k*sigma threshold,
 -- and the robust z-score, so an operator can re-derive any HIGH/LOW arithmetic.
+-- They also state the deviation as a percentage of the baseline median
+-- (pct_vs_median) and, for tablespaces, of the trailing train_days average
+-- growth rate (pct_vs_avg); both are NULL when that baseline is not positive.
 --
 -- MAD_sigma = MEDIAN(|x - median|) * 1.4826 (the 1.4826 makes MAD a consistent
 -- estimator of the standard deviation for normal data). Rolling MAD cannot be
@@ -39,23 +42,35 @@ WITH cfg AS (
         SELECT MAX(CASE WHEN cfg_name = 'mad_k'           THEN cfg_value END) AS mad_k,
                MAX(CASE WHEN cfg_name = 'mad_window_days' THEN cfg_value END) AS mad_window_days,
                MAX(CASE WHEN cfg_name = 'abs_floor_bytes' THEN cfg_value END) AS abs_floor_bytes,
-               MAX(CASE WHEN cfg_name = 'tbspc_min_hist'  THEN cfg_value END) AS min_hist
+               MAX(CASE WHEN cfg_name = 'tbspc_min_hist'  THEN cfg_value END) AS min_hist,
+               MAX(CASE WHEN cfg_name = 'train_days'      THEN cfg_value END) AS train_days
         FROM   cap_config
      ),
      -- val is the per-day growth RATE (gap-normalized), so a multi-day AWR gap
      -- is not mistaken for a one-day spike. raw_delta + day_gap are carried
      -- through for the report's audit trail.
+     -- avg_rate_bpd is the long-term MEAN rate over the trailing train_days
+     -- (current day excluded, like the median), as SUM(delta)/SUM(gap) so an
+     -- AWR gap weighs by the days it spans. avg_days is that denominator.
      base AS (
         SELECT dbid, con_dbid, tablespace_name, day_dt,
                used_rate_bpd    AS val,
                used_delta_bytes AS raw_delta,
-               day_gap
+               day_gap,
+               SUM(used_delta_bytes) OVER (PARTITION BY dbid, con_dbid, tablespace_name ORDER BY day_dt
+                                           RANGE BETWEEN (SELECT train_days FROM cfg) PRECEDING AND 1 PRECEDING)
+                 / NULLIF(SUM(day_gap) OVER (PARTITION BY dbid, con_dbid, tablespace_name ORDER BY day_dt
+                                             RANGE BETWEEN (SELECT train_days FROM cfg) PRECEDING AND 1 PRECEDING), 0)
+                                AS avg_rate_bpd,
+               SUM(day_gap) OVER (PARTITION BY dbid, con_dbid, tablespace_name ORDER BY day_dt
+                                  RANGE BETWEEN (SELECT train_days FROM cfg) PRECEDING AND 1 PRECEDING)
+                                AS avg_days
         FROM   capd_tbspc_delta
         WHERE  used_rate_bpd IS NOT NULL
      ),
      med AS (
         SELECT c.dbid, c.con_dbid, c.tablespace_name, c.day_dt,
-               c.val, c.raw_delta, c.day_gap,
+               c.val, c.raw_delta, c.day_gap, c.avg_rate_bpd, c.avg_days,
                MEDIAN(h.val) AS med, COUNT(h.val) AS n_hist
         FROM   base c
         JOIN   base h
@@ -64,11 +79,11 @@ WITH cfg AS (
          AND   h.day_dt BETWEEN c.day_dt - (SELECT mad_window_days FROM cfg)
                             AND c.day_dt - 1
         GROUP  BY c.dbid, c.con_dbid, c.tablespace_name, c.day_dt,
-                  c.val, c.raw_delta, c.day_gap
+                  c.val, c.raw_delta, c.day_gap, c.avg_rate_bpd, c.avg_days
      ),
      madc AS (
         SELECT m.dbid, m.con_dbid, m.tablespace_name, m.day_dt,
-               m.val, m.raw_delta, m.day_gap, m.med, m.n_hist,
+               m.val, m.raw_delta, m.day_gap, m.avg_rate_bpd, m.avg_days, m.med, m.n_hist,
                MEDIAN(ABS(h.val - m.med)) * 1.4826 AS mad_sigma
         FROM   med m
         JOIN   base h
@@ -77,7 +92,7 @@ WITH cfg AS (
          AND   h.day_dt BETWEEN m.day_dt - (SELECT mad_window_days FROM cfg)
                             AND m.day_dt - 1
         GROUP  BY m.dbid, m.con_dbid, m.tablespace_name, m.day_dt,
-                  m.val, m.raw_delta, m.day_gap, m.med, m.n_hist
+                  m.val, m.raw_delta, m.day_gap, m.avg_rate_bpd, m.avg_days, m.med, m.n_hist
      )
 SELECT a.dbid,
        a.con_dbid,
@@ -92,6 +107,11 @@ SELECT a.dbid,
        a.val - a.med                                               AS dev_bpd,
        GREATEST(cfg.mad_k * a.mad_sigma, cfg.abs_floor_bytes)      AS threshold_bpd,
        (a.val - a.med) / NULLIF(a.mad_sigma, 0)                    AS robust_z,
+       a.avg_rate_bpd,
+       a.avg_days,
+       CASE WHEN a.med > 0 THEN 100 * (a.val - a.med) / a.med END AS pct_vs_median,
+       CASE WHEN a.avg_rate_bpd > 0
+            THEN 100 * (a.val - a.avg_rate_bpd) / a.avg_rate_bpd END AS pct_vs_avg,
        CASE
            WHEN a.n_hist >= cfg.min_hist
             AND (a.val - a.med) >  GREATEST(cfg.mad_k * a.mad_sigma, cfg.abs_floor_bytes) THEN 'HIGH'
@@ -174,6 +194,7 @@ SELECT a.dbid,
        a.val - a.med                                                AS dev_pct,
        cfg.mad_k * GREATEST(a.mad_sigma, cfg.min_mad)               AS threshold_pct,
        (a.val - a.med) / NULLIF(GREATEST(a.mad_sigma, cfg.min_mad), 0) AS robust_z,
+       CASE WHEN a.med > 0 THEN 100 * (a.val - a.med) / a.med END   AS pct_vs_median,
        CASE
            WHEN a.gap_flag = 'Y' THEN NULL          -- M10.5: never flag a gap day
            WHEN a.n_hist >= cfg.min_hist

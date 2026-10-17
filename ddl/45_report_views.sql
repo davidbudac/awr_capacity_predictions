@@ -83,6 +83,7 @@ WITH cfg AS (
                MAX(CASE WHEN cfg_name = 'nearfull_crit_pct'   THEN cfg_value END) AS nf_crit,
                MAX(CASE WHEN cfg_name = 'cpu_sat_pct'         THEN cfg_value END) AS cpu_sat,
                MAX(CASE WHEN cfg_name = 'anomaly_report_days' THEN cfg_value END) AS anom_days,
+               MAX(CASE WHEN cfg_name = 'train_days'          THEN cfg_value END) AS train_days,
                -- which host-busy trend drives CPU_SAT (M10.1): p95 of the
                -- day's snapshot intervals (default) or the daily average
                CASE WHEN MAX(CASE WHEN cfg_name = 'cpu_sat_on_p95' THEN cfg_value END) = 0
@@ -207,6 +208,9 @@ WITH cfg AS (
                  -- clear-cut, so say that instead of printing an empty number.
                  || ' (robust z '
                  || NVL(TO_CHAR(a.robust_z, 'FM99990.0'), 'off-scale, flat baseline') || ')'
+                 || CASE WHEN a.pct_vs_avg IS NOT NULL
+                         THEN ', ' || TO_CHAR(a.pct_vs_avg, 'FMS999999999990') || '% vs '
+                              || TO_CHAR(cfg.train_days, 'FM9990') || '-day avg rate' END
         FROM   capa_tbspc_anom a CROSS JOIN cfg
         WHERE  a.anomaly_flag IS NOT NULL
           AND  a.day_dt > (SELECT MAX(day_dt) FROM capd_tbspc_daily) - cfg.anom_days
@@ -224,6 +228,8 @@ WITH cfg AS (
                'Host CPU ' || TO_CHAR(a.busy_pct, 'FM990.0') || '% busy on '
                  || TO_CHAR(a.day_dt, 'YYYY-MM-DD') || ' vs usual '
                  || TO_CHAR(a.median_pct, 'FM990.0') || '% for that weekday'
+                 || CASE WHEN a.pct_vs_median IS NOT NULL
+                         THEN ' (' || TO_CHAR(a.pct_vs_median, 'FMS999999999990') || '% vs median)' END
         FROM   capa_cpu_anom a CROSS JOIN cfg
         WHERE  a.anomaly_flag IS NOT NULL
           AND  a.day_dt > (SELECT MAX(day_dt) FROM capd_cpu_daily) - cfg.anom_days
@@ -380,6 +386,10 @@ SELECT a.dbid,
        a.median_rate_bpd  / 1048576            AS med_mb,
        a.threshold_bpd    / 1048576            AS thr_mb,
        a.robust_z                              AS z,
+       a.avg_rate_bpd     / 1048576            AS avg_mb,
+       a.avg_days,
+       a.pct_vs_median                         AS pct_vs_med,
+       a.pct_vs_avg,
        a.anomaly_flag
 FROM   capa_tbspc_anom a
 LEFT   JOIN capr_container c
@@ -426,6 +436,7 @@ SELECT a.dbid,
        a.median_pct,
        a.threshold_pct,
        a.robust_z                            AS z,
+       a.pct_vs_median                       AS pct_vs_med,
        a.anomaly_flag
 FROM   capa_cpu_anom a
 LEFT   JOIN capr_container c
@@ -758,6 +769,11 @@ LEFT   JOIN capr_container c
 -- A level shift is dated (ts) at the START of its recent window, the day
 -- the level moved, with the window's last day in obs_day; for the per-day
 -- kinds ts = obs_day.
+-- pct_vs_expected = the move as a percentage of expected (the baseline
+-- median for TBSPC_GROWTH / CPU_BUSY, base_med for CPU_SHIFT); pct_vs_avg =
+-- TBSPC_GROWTH's rate vs its train_days average. NULL when the baseline is
+-- not positive. Both sit at the END of the select list so the explicit
+-- column lists in elk/export_capacity.sql and grafana/ords keep working.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_anomalies AS
 SELECT e.dbid,
@@ -780,7 +796,9 @@ SELECT e.dbid,
        e.sev_rank,
        e.message,
        e.obs_day,
-       e.rate_bpd
+       e.rate_bpd,
+       e.pct_vs_expected,
+       e.pct_vs_avg
 FROM  (
         SELECT t.dbid, t.con_dbid, t.day_dt AS ts, 'TBSPC' AS kind, t.tablespace_name AS series,
                'TBSPC_GROWTH' AS anomaly_kind, t.anomaly_flag,
@@ -793,8 +811,11 @@ FROM  (
                  || TO_CHAR(ABS(t.used_delta_bytes) / 1073741824, 'FM999999990.0')
                  || ' GiB on ' || TO_CHAR(t.day_dt, 'YYYY-MM-DD')
                  || ' (median ' || TO_CHAR(t.median_rate_bpd / 1073741824, 'FM999999990.0')
-                 || ' GiB/day, z=' || NVL(TO_CHAR(t.robust_z, 'FM999999990.0'), 'off-scale') || ')' AS message,
-               t.day_dt AS obs_day, t.used_rate_bpd AS rate_bpd
+                 || ' GiB/day, z=' || NVL(TO_CHAR(t.robust_z, 'FM999999990.0'), 'off-scale') || ')'
+                 || CASE WHEN t.pct_vs_avg IS NOT NULL
+                         THEN ', ' || TO_CHAR(t.pct_vs_avg, 'FMS999999999990') || '% vs long-term avg rate' END AS message,
+               t.day_dt AS obs_day, t.used_rate_bpd AS rate_bpd,
+               t.pct_vs_median AS pct_vs_expected, t.pct_vs_avg AS pct_vs_avg
         FROM   capa_tbspc_anom t
         LEFT   JOIN capr_alerts al
           ON   al.kind = 'TBSPC_ANOM' AND al.dbid = t.dbid AND al.con_dbid = t.con_dbid
@@ -809,8 +830,11 @@ FROM  (
                'Host CPU ' || TO_CHAR(t.busy_pct, 'FM990.0') || '% busy on '
                  || TO_CHAR(t.day_dt, 'YYYY-MM-DD')
                  || ' (median ' || TO_CHAR(t.median_pct, 'FM990.0')
-                 || '% for that weekday, z=' || NVL(TO_CHAR(t.robust_z, 'FM999999990.0'), 'off-scale') || ')',
-               t.day_dt, NULL
+                 || '% for that weekday, z=' || NVL(TO_CHAR(t.robust_z, 'FM999999990.0'), 'off-scale') || ')'
+                 || CASE WHEN t.pct_vs_median IS NOT NULL
+                         THEN ' (' || TO_CHAR(t.pct_vs_median, 'FMS999999999990') || '% vs median)' END,
+               t.day_dt, NULL,
+               t.pct_vs_median, NULL
         FROM   capa_cpu_anom t
         LEFT   JOIN capr_alerts al
           ON   al.kind = 'CPU_ANOM' AND al.dbid = t.dbid AND al.con_dbid = t.con_dbid
@@ -828,7 +852,8 @@ FROM  (
                  || TO_CHAR(t.recent_med, 'FM99999990.0') || '% vs prior '
                  || TO_CHAR(t.base_days, 'FM9999990') || ' days '
                  || TO_CHAR(t.base_med, 'FM99999990.0') || '%',
-               t.last_day, NULL
+               t.last_day, NULL,
+               CASE WHEN t.base_med > 0 THEN 100 * t.shift_pct / t.base_med END, NULL
         FROM   capa_cpu_shift t
         LEFT   JOIN capr_alerts al
           ON   al.kind = 'CPU_SHIFT' AND al.dbid = t.dbid AND al.con_dbid = t.con_dbid

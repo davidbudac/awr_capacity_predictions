@@ -9,6 +9,7 @@
 PROMPT
 PROMPT == 5. CPU BUSY% ANOMALIES vs same-weekday baseline (last &anomaly_days days) ==
 PROMPT    FLAG when |busy% - median%| exceeds THRESHOLD (k*MAD, floored).
+PROMPT    VS_MED% = busy% vs the same-weekday median, as a percentage (+25 = 25% more)
 
 COLUMN db_pdb       FORMAT A20          HEADING 'DB/PDB'
 COLUMN day_dt       FORMAT A10          HEADING 'DAY'
@@ -16,6 +17,7 @@ COLUMN busy_pct     FORMAT 9990.00      HEADING 'BUSY%'
 COLUMN median_pct   FORMAT 9990.00      HEADING 'MEDIAN%'
 COLUMN threshold_pct FORMAT 9990.00     HEADING 'THRESH%'
 COLUMN z            FORMAT 99990.0      HEADING 'ROBUST_Z'
+COLUMN pct_vs_med   FORMAT S9999990     HEADING 'VS_MED%'
 COLUMN anomaly_flag FORMAT A5           HEADING 'FLAG'
 
 SELECT db_pdb,
@@ -24,6 +26,7 @@ SELECT db_pdb,
        median_pct,
        threshold_pct,
        z,
+       pct_vs_med,
        anomaly_flag
 FROM   capr_cpu_anomalies
 WHERE  days_ago < &anomaly_days

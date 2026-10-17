@@ -11,6 +11,7 @@ PROMPT == 3. TABLESPACE GROWTH ANOMALIES (last &anomaly_days days) ==
 PROMPT    Anomaly on the per-day growth RATE (delta/gap): FLAG when
 PROMPT    |rate - median_rate| exceeds THRESHOLD = max(k*MAD, 100MiB/day floor).
 PROMPT    GAP = days since previous sample (>1 across an AWR gap).
+PROMPT    VS_MED% / VS_AVG% = growth rate vs the baseline median / the train_days average, as a percentage (+25 = 25% more)
 
 COLUMN db_pdb          FORMAT A20         HEADING 'DB/PDB'
 COLUMN tablespace_name FORMAT A16         HEADING 'TABLESPACE'
@@ -21,6 +22,8 @@ COLUMN rate_mb         FORMAT 9999990.0    HEADING 'RATE_MIB/D'
 COLUMN med_mb          FORMAT 9999990.0    HEADING 'MED_MIB/D'
 COLUMN thr_mb          FORMAT 9999990.0    HEADING 'THR_MIB/D'
 COLUMN z               FORMAT 99990.0      HEADING 'ROBUST_Z'
+COLUMN pct_vs_med      FORMAT S9999990     HEADING 'VS_MED%'
+COLUMN pct_vs_avg      FORMAT S9999990     HEADING 'VS_AVG%'
 COLUMN anomaly_flag    FORMAT A5           HEADING 'FLAG'
 
 SELECT db_pdb,
@@ -32,6 +35,8 @@ SELECT db_pdb,
        med_mb,
        thr_mb,
        z,
+       pct_vs_med,
+       pct_vs_avg,
        anomaly_flag
 FROM   capr_tbspc_anomalies
 WHERE  days_ago < &anomaly_days

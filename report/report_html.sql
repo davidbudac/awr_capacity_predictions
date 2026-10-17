@@ -2580,7 +2580,8 @@ BEGIN
 
   any_rows := FALSE;
   FOR r IN (
-    SELECT db_pdb, tablespace_name, day_str AS day_dt, gap, delta_mb, rate_mb, med_mb, thr_mb, z, anomaly_flag
+    SELECT db_pdb, tablespace_name, day_str AS day_dt, gap, delta_mb, rate_mb, med_mb, thr_mb, z,
+           pct_vs_med, pct_vs_avg, anomaly_flag
     FROM   capr_tbspc_anomalies
     WHERE  days_ago < anomaly_days
     ORDER  BY con_dbid, tablespace_name, days_ago
@@ -2597,6 +2598,9 @@ BEGIN
         || '</th><th class="num">Median (MiB/day)' || info_icon('its usual daily growth rate over the recent baseline window (CAPR column: MED_MB)')
         || '</th><th class="num">Threshold (MiB/day)' || info_icon('how far from usual a day must be before it is flagged (CAPR column: THR_MB)')
         || '</th><th class="num">Robust z' || info_icon('how far outside its normal range this day was -- 3 or more is clearly unusual (CAPR column: Z)')
+        || '</th><th class="num">vs median %' || info_icon('how much faster (+) or slower (-) it grew that day than its usual daily rate, in percent -- +25 means 25% more (CAPR column: PCT_VS_MED)')
+        || '</th><th class="num">vs avg %' || info_icon('the same comparison against its average daily growth over the previous '
+           || TO_CHAR(train_days, 'FM9990') || ' days (CAPR column: PCT_VS_AVG)')
         || '</th><th>Flag' || info_icon('the direction of the flagged change for this day (CAPR column: ANOMALY_FLAG)') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
@@ -2608,6 +2612,8 @@ BEGIN
       || '<td class="num">' || nz(r.thr_mb, 'FM9999990.0') || '</td>'
       || '<td class="num' || (CASE WHEN ABS(NVL(r.z,0)) >= 3 THEN ' z-hi' ELSE '' END) || '">'
          || nz(r.z, 'FM99990.0') || '</td>'
+      || '<td class="num">' || nz(r.pct_vs_med, 'FMS999999999990') || '</td>'
+      || '<td class="num">' || nz(r.pct_vs_avg, 'FMS999999999990') || '</td>'
       || '<td class="' || CASE WHEN r.anomaly_flag = 'HIGH' THEN 'sev-crit' ELSE 'sev-ok' END || '">' || esc(r.anomaly_flag) || '</td></tr>');
   END LOOP;
   IF any_rows THEN
@@ -2895,7 +2901,7 @@ BEGIN
 
   any_rows := FALSE;
   FOR r IN (
-    SELECT db_pdb, day_str AS day_dt, busy_pct, median_pct, threshold_pct, z, anomaly_flag
+    SELECT db_pdb, day_str AS day_dt, busy_pct, median_pct, threshold_pct, z, pct_vs_med, anomaly_flag
     FROM   capr_cpu_anomalies
     WHERE  days_ago < anomaly_days
     ORDER  BY days_ago, con_dbid
@@ -2909,6 +2915,7 @@ BEGIN
         || '</th><th class="num">Median %' || info_icon('the usual busy percent for that same weekday (CAPR column: MEDIAN_PCT)')
         || '</th><th class="num">Threshold %' || info_icon('how far from usual a day must be before it is flagged (CAPR column: THRESHOLD_PCT)')
         || '</th><th class="num">Robust z' || info_icon('how far outside its normal range this day was -- 3 or more is clearly unusual (CAPR column: Z)')
+        || '</th><th class="num">vs median %' || info_icon('how much busier (+) or quieter (-) the host was than usual for that weekday, in percent -- +25 means 25% more (CAPR column: PCT_VS_MED)')
         || '</th><th>Flag' || info_icon('CAPR column: ANOMALY_FLAG') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
@@ -2918,6 +2925,7 @@ BEGIN
       || '<td class="num">' || nz(r.threshold_pct, 'FM9990.00') || '</td>'
       || '<td class="num' || (CASE WHEN ABS(NVL(r.z,0)) >= 3 THEN ' z-hi' ELSE '' END) || '">'
          || nz(r.z, 'FM99990.0') || '</td>'
+      || '<td class="num">' || nz(r.pct_vs_med, 'FMS999999999990') || '</td>'
       || '<td class="' || CASE WHEN r.anomaly_flag = 'HIGH' THEN 'sev-crit' ELSE 'sev-ok' END || '">' || esc(r.anomaly_flag) || '</td></tr>');
   END LOOP;
   IF any_rows THEN
