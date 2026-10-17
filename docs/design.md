@@ -285,7 +285,7 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   `proj_h ± half_h`. A perfectly linear or flat series has SSE = 0, so its
   bands collapse onto the point projection.
 - **Robust slope (M9.2)** — knob `slope_method` (`CAP_CONFIG` is numeric:
-  **0 = OLS**, the default, **1 = THEILSEN**). OLS minimises *squared* error, so
+  **0 = OLS**, the default, **1 = THEILSEN**, **2 = DRIFT**, next bullet). OLS minimises *squared* error, so
   a single step — a bulk load, an import, a partition drop — drags the whole
   slope with it: the `FIX_SPIKE` fixture grows at 5 MiB/day yet reads ~20 MiB/day
   in OLS because of one +2 GiB day. The **Theil–Sen** estimator is the `MEDIAN`
@@ -308,6 +308,38 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   `days_to_full_lo/hi` remain the OLS slope-CI range (so under THEILSEN the
   point `days_to_full` can fall outside its own range). Applies to
   `CAPF_CPU_TREND` as well.
+- **DRIFT estimator**: `slope_method = 2`. `used_bytes` is a cumulative
+  level, so the residuals of a line through it are autocorrelated: in a
+  simulation of random walks with drift (n = 90) the OLS 95% slope CI covered
+  the true drift about 14% of the time, and a driftless walk graded `OK` with a
+  positive slope in about 18% of windows. DRIFT works on the day-over-day
+  rates of the (reset-aware) training window instead:
+
+  ```
+  rate_i   = (y_i − y_prev) / (day_n_i − day_n_prev)    inside the window
+  slope    = MEDIAN(rate)                               robust to a one-off step
+  sd       = STDDEV_SAMP(rate)     se = sd / √n_rates
+  t        = 1.96 + 2.4 / (n_rates − 1)                 the M9.1 approximation
+  slope CI = t · se
+  half_h   = t · (sd·√h + h·se)
+  ```
+
+  `half_h` adds the random-walk fan (`sd·√h`) and the rate uncertainty carried
+  `h` days (`h·se`) as a plain sum, which is wider than the root of the sum of
+  squares: a conservative band. The first day of the window has no rate, so a
+  reset day's cliff never enters. Projections stay anchored at `cur_used`, so
+  no intercept is fitted; `icept` is reported as `cur_used − slope·last_day_n`,
+  the line the projections lie on. `days_to_full_lo/hi` come from `slope ± CI`.
+  Quality has no R² gate: `FLAT` when the slope is 0, `LOW_CONFIDENCE` when the
+  CI includes 0, else `OK` (`r2` stays the OLS R², for reference). Fixture
+  readings: `FIX_LINEAR` 10 MiB/day with sd 0 (bands collapse, 4990 days);
+  `FIX_SPIKE` 5 MiB/day, the +2 GiB day being one rate of 89, but its sd
+  (2 GiB/√89) puts the CI at ±45.7 MiB/day, so `LOW_CONFIDENCE`; `FIX_PURGE`
+  10 MiB/day after the reset. The median of a strictly alternating series is
+  one of its two rates: `FIX_ZIGZAG` (+50 / −30 MiB, mean 10) reads 50 MiB/day.
+  `drift_slope_bpd` / `drift_sd_bpd` are exposed under every `slope_method`.
+  The same estimator applies to `CAPF_CPU_TREND` (rates of the fit input) and
+  `CAPF_SERIES_FORECAST`.
 - **Change-point reset (M9.3)** — knobs `reset_on_shrink` (1) and
   `shrink_mad_k` (6), tablespaces only. After a purge or archive job the history
   has a *cliff* in it, and a line fitted across the cliff is a fiction: it
@@ -329,10 +361,36 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   about the *fit*, not about hiding the event. The M9.4 backtest fits its own
   window and is deliberately left alone. Its REGR replay is anchored like the
   live projections: `pred = actual(cutoff) + slope·(day_n − cutoff_n)`, the
-  anchor being the last training day's actual value.
+  anchor being the last training day's actual value. The replay's slope
+  follows `slope_method` (OLS, Theil–Sen over the window's pairs, or DRIFT),
+  and `CAPF_BACKTEST.slope_method` names it, so flipping the knob compares the
+  estimators on the same holdout.
+- **CYCLIC grade**: knob `cyclic_min_cliffs` (2; 0 = off). A rolling-retention
+  tablespace (fill for a month, purge, repeat) has a cliff in every cycle. The
+  M9.3 reset restarts at the most recent one only, so the post-purge leg reads
+  as fast growth that never fills: the demo's `SESSION_STORE` (20 → 92.5 GiB in
+  a 300 GiB tablespace) read `112 − k` days to full on cycle day k and fell
+  through `dtf_warn` 8 days a month; a weekly purge would never collect
+  `min_train_days` rows. So the cliffs of the **full** `train_days` window are
+  counted with the M9.3 rule (`cycle_n`, on every row). With `cycle_n ≥
+  cyclic_min_cliffs` no reset applies and quality is `CYCLIC`, judged on the
+  peaks: `cycle_days` (median spacing of the cliffs), `cycle_peak_bytes` /
+  `cycle_peak_pct` (the window's maximum, against `limit_bytes`),
+  `peak_slope_bpd` (OLS through the per-cycle maxima, the maximum of each
+  segment that ends at a cliff, when there are at least 3, else NULL) and
+  `days_to_full` = days until the peak line, anchored at the last cycle
+  maximum, reaches the limit, NULL unless `peak_slope_bpd > 0`.
+  `days_to_full_lo/hi` and `accel_ratio` are NULL; the cycle columns other than
+  `cycle_n` are NULL on non-`CYCLIC` rows. `CAPR_ALERTS.TBSPC_FULL` needs
+  quality `OK`, so a `CYCLIC` row never pages on its countdown. The count does
+  not depend on `reset_on_shrink`. Fixture: `FIX_CYCLIC` (flat peaks, no
+  countdown) and `FIX_CYCLIC_UP` (peaks +1 GiB a cycle, `peak_slope_bpd` =
+  1 GiB/30 d); with the grade off `FIX_CYCLIC` raises the old false page.
 - **Quality** (priority order): `INSUFFICIENT_HISTORY` (`train_n <
-  min_train_days`) → `FLAT` (chosen `slope = 0`, or `R² IS NULL`) → `LOW_CONFIDENCE`
-  (`R² < r2_gate`) → `OK`. Note the `FLAT` definition: Oracle's `REGR_R2`
+  min_train_days`) → `CYCLIC` (tablespaces, above) → `FLAT` (chosen `slope =
+  0`, or `R² IS NULL` outside DRIFT) → `LOW_CONFIDENCE` (`R² < r2_gate`; for
+  DRIFT, and for CPU under `cpu_quality_gate = 1`, the slope CI includes 0) →
+  `OK`. Note the `FLAT` definition: Oracle's `REGR_R2`
   returns **1** for a zero-variance *y* (a truly flat series) and NULL only for
   zero-variance *x*, so flatness is detected by `slope = 0`, not by a NULL R².
 - `CAPF_CPU_TREND` applies the same fit per `(dbid, con_dbid, metric)` to
@@ -342,13 +400,39 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   restart or outage day averages over less than `complete_day_pct` of the day
   and would pull the line. `last_day`, `train_start`, `cur_val` and the anchor
   all come from complete days; `newest_day` counts every day with a value, so
-  today's partial day does not make a series stale. Projections are anchored
-  at `cur_val`, which on a weekly-seasonal metric means the last complete day's
-  weekday level. Every percent-of-capacity metric gets
-  `days_to_sat` (+ `_lo/_hi`) against `cpu_sat_pct`; `DB_CPU_SEC` has no
-  ceiling, so its `days_to_sat` is NULL. `CAPR_ALERTS.CPU_SAT` keys off
+  today's partial day does not make a series stale. Every percent-of-capacity
+  metric gets `days_to_sat` (+ `_lo/_hi`) against `cpu_sat_pct`; `DB_CPU_SEC`
+  has no ceiling, so its `days_to_sat` is NULL. `CAPR_ALERTS.CPU_SAT` keys off
   `BUSY_P95` by default (`cpu_sat_on_p95 = 1`; set 0 for the daily average),
   and `DBCPU_SAT` fires per container off `DB_CPU_PCT`.
+  - **Weekday / weekend deseasoning**: knob `cpu_deseason` (1). A host at 60%
+    on weekdays and 20% at weekends keeps most of its variance in the weekly
+    pattern: with a true +10 point trend over 90 days, R² passed the 0.60 gate
+    in 0% of simulated windows, so `CPU_SAT` / `DBCPU_SAT` could never fire
+    (on dbmint, 6 of 6 real CPU metrics read `LOW_CONFIDENCE`). With 1 the fit
+    input is `fval = val − AVG(val of the same day type) + AVG(val)` over the
+    window, day type = weekday or Saturday/Sunday; a perfectly periodic weekly
+    pattern drops out and a ramp survives. Slope, `icept`, `r2`, the bands,
+    Theil–Sen and the DRIFT rates are all computed on `fval`; `deseasoned`
+    (`'Y'/'N'`) says which input the row used.
+  - **Quality gate**: knob `cpu_quality_gate` (1). 1 = slope significance:
+    `OK` when `|slope| > slope_ci_per_day`, else `LOW_CONFIDENCE` (`FLAT` when
+    the slope is 0); 0 = the legacy `R² ≥ r2_gate`. `slope_sig` (`'Y'/'N'`)
+    reports the significance test under either gate, `r2` is still reported.
+    Both knobs default to 1, a deliberate change of the CPU grades; setting
+    both to 0 reproduces the old fit. Tablespace and series fits keep their
+    gates.
+  - **Anchor**: `anchor_value` = `MEDIAN(val)` over the complete days in the
+    last `shift_days` days (raw values). Projections and `days_to_sat` start
+    there: anchoring at `cur_val` swung the +30 with the weekday of the last
+    day (the fixture's `BUSY_PCT` ends on a 20% weekend day against a 40%
+    weekday level). Tablespaces keep `cur_used`, a level rather than a noisy
+    sample. `cur_val` is still the raw last complete day.
+  - **Hot now**: for `BUSY_P95` and `DB_CPU_P95`, `recent_p95_med` is that
+    same median and `hot_now = 'Y'` when it is at or above `cpu_sat_pct`:
+    saturated in the busy hour now, whatever the trend says (tablespaces and
+    series have `NEARFULL` / `NEARLIMIT` for this). A column only; no alert
+    reads it yet.
 
 ## Layer 2b / 3b — fixed-ceiling series (M11)
 
@@ -396,6 +480,9 @@ proj_h        = cur_val + slope · h                     anchored at today, as i
 ```
 
 `days_to_limit_lo/_hi` bound it with the 95% CI on the slope (lo = worst case);
+`slope_method = 2` switches it to the DRIFT estimator of Layer 3 (Theil–Sen is
+never computed here, so 1 reads as OLS, and the `slope_method` column says
+which was used);
 `pct_of_limit` is the how-close-now number, independent of the fit. The fit
 reads complete days only (`is_complete = 'Y'`): the flow series `REDO_GB_DAY`
 drops its partial, restart and outage days, and the level series carry `'Y'`

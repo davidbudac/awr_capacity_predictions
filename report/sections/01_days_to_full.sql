@@ -18,6 +18,9 @@ PROMPT     SEV: CRIT<=&dtf_crit days, WARN<=&dtf_warn days. ACCEL>1.5 = growth a
 PROMPT     Trust the estimate per QUALITY (only OK is reliable).
 PROMPT     WORST/BEST: days-to-full range from the 95% CI on the growth slope
 PROMPT     (WORST = plausibly fastest fill; BEST empty = might never fill).
+PROMPT     CYCLIC = a recurring purge cycle (CYC_D days apart), always listed and judged
+PROMPT     on its peaks: PEAK% = highest fill in the window, DAYS_FULL = when the peak
+PROMPT     line reaches the limit (empty when the peaks do not grow).
 
 COLUMN db_pdb          FORMAT A20           HEADING 'DB/PDB'
 COLUMN tablespace_name FORMAT A18           HEADING 'TABLESPACE'
@@ -31,6 +34,8 @@ COLUMN dtf_best        FORMAT 99999990      HEADING 'BEST'
 COLUMN sev             FORMAT A4            HEADING 'SEV'
 COLUMN quality         FORMAT A20           HEADING 'QUALITY'
 COLUMN accel           FORMAT 990.00        HEADING 'ACCEL'
+COLUMN cycle_days      FORMAT 9990          HEADING 'CYC_D'
+COLUMN cycle_peak_pct  FORMAT 990.0         HEADING 'PEAK%'
 
 SELECT db_pdb,
        tablespace_name,
@@ -43,10 +48,12 @@ SELECT db_pdb,
        dtf_best,
        sev_dtf AS sev,
        quality,
-       accel
+       accel,
+       cycle_days,
+       cycle_peak_pct
 FROM   capr_tbspc_days_to_full
-WHERE  days_to_full IS NOT NULL
-  AND  rank_dtf <= &top_n
+WHERE  (days_to_full IS NOT NULL AND rank_dtf <= &top_n)
+   OR  quality = 'CYCLIC'
 ORDER  BY rank_dtf;
 
 PROMPT

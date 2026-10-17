@@ -655,6 +655,9 @@ BEGIN
     DBMS_OUTPUT.PUT_LINE('=== anchoring on CPU and SERIES fits ===');
     -- FIXPDB1 DB_CPU_PCT: the +18 step in the last 7 days leaves the last
     -- point above the fitted line, so anchored and fitted-line +30 differ.
+    -- CPU projections start at anchor_value (the median of the last
+    -- shift_days complete days, 58 here), and the slope is the deseasoned
+    -- one (cpu_deseason = 1 by default): both recomputed by the installer.
     n_aux := meta_n('PDB_CON_DBID');
     SELECT train_n, cur_val, slope_per_day, proj_30,
            icept + slope_per_day * (last_day - DATE '2020-01-01' + 30)
@@ -663,14 +666,19 @@ BEGIN
       WHERE dbid = v_dbid AND con_dbid = n_aux AND metric = 'DB_CPU_PCT';
     chk_int  ('PDB DB_CPU_PCT train_n (restart day has no row)', v_n, meta_n('PDB_DBCPU_TRAIN_N'));
     chk_close('PDB DB_CPU_PCT cur_val', v_num, meta_n('PDB_DBCPU_CUR'), 0.000001);
-    chk_close('PDB DB_CPU_PCT slope', v_num2, meta_n('PDB_DBCPU_SLOPE'), 0.000001);
-    chk_close('PDB DB_CPU_PCT proj_30 = cur + 30 * slope', v_num3, meta_n('PDB_DBCPU_P30'), 0.000001);
-    chk_close('PDB DB_CPU_PCT fitted-line +30 (icept unchanged)', v_r2, meta_n('PDB_DBCPU_P30_FIT'), 0.000001);
+    chk_close('PDB DB_CPU_PCT slope (deseasoned)', v_num2, meta_n('PDB_DBCPU_SLOPE'), 0.000001);
+    chk_close('PDB DB_CPU_PCT proj_30 = anchor_value + 30 * slope', v_num3, meta_n('PDB_DBCPU_P30'), 0.000001);
+    chk_close('PDB DB_CPU_PCT fitted-line +30 (deseasoned icept)', v_r2, meta_n('PDB_DBCPU_P30_FIT'), 0.000001);
+    SELECT anchor_value, days_to_sat INTO v_num, v_n
+      FROM capf_cpu_trend
+      WHERE dbid = v_dbid AND con_dbid = n_aux AND metric = 'DB_CPU_PCT';
+    chk_close('PDB DB_CPU_PCT anchor_value (median of the last 7 days)', v_num, meta_n('PDB_DBCPU_ANCHOR'), 0.000001);
+    chk_int  ('PDB DB_CPU_PCT days_to_sat from the anchor', v_n, meta_n('PDB_DBCPU_DTS'));
     SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
       WHERE slope_per_day IS NOT NULL
-        AND (ABS(proj_30 - (cur_val + slope_per_day * 30)) > 0.000001
-          OR ABS(proj_90 - (cur_val + slope_per_day * 90)) > 0.000001);
-    chk_int('CPU rows off the anchored projection', v_n, 0);
+        AND (ABS(proj_30 - (anchor_value + slope_per_day * 30)) > 0.000001
+          OR ABS(proj_90 - (anchor_value + slope_per_day * 90)) > 0.000001);
+    chk_int('CPU rows off the anchored projection (anchor_value)', v_n, 0);
     -- SESSIONS is exactly linear, so anchoring changes nothing: 440 + 2 * 30.
     SELECT proj_30 INTO v_num FROM capf_series_forecast
       WHERE dbid = v_dbid AND series = 'SESSIONS';
@@ -721,6 +729,313 @@ BEGIN
     END;
     UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'train_days';
     COMMIT;
+
+    DBMS_OUTPUT.PUT_LINE('=== CYCLIC grade (FIX_CYCLIC / FIX_CYCLIC_UP) ===');
+    SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'cyclic_min_cliffs';
+    chk_int('knob cyclic_min_cliffs default', v_num, 2);
+    DECLARE
+        v_cn NUMBER; v_cd NUMBER; v_pk NUMBER; v_pp NUMBER; v_ps NUMBER;
+        v_rd DATE; v_dtf NUMBER; v_lo NUMBER; v_hi NUMBER; v_acc NUMBER;
+    BEGIN
+        FOR g IN 0 .. 1 LOOP
+            v_str2 := CASE g WHEN 0 THEN 'FIX_CYCLIC' ELSE 'FIX_CYCLIC_UP' END;
+            SELECT quality, cycle_n, cycle_days, cycle_peak_bytes, cycle_peak_pct,
+                   peak_slope_bpd, reset_day, days_to_full, days_to_full_lo,
+                   days_to_full_hi, accel_ratio, train_n, cur_used
+              INTO v_str, v_cn, v_cd, v_pk, v_pp, v_ps, v_rd, v_dtf, v_lo, v_hi, v_acc, v_n, v_num
+              FROM capf_tbspc_forecast WHERE tablespace_name = v_str2;
+            chk_str  (v_str2 || ' quality', v_str, 'CYCLIC');
+            chk_int  (v_str2 || ' cycle_n (cliffs in the window)', v_cn, meta_n('CYC' || g || '_N'));
+            chk_int  (v_str2 || ' cycle_days', v_cd, meta_n('CYC' || g || '_DAYS'));
+            chk_int  (v_str2 || ' cycle_peak_bytes', v_pk, meta_n('CYC' || g || '_PEAK'));
+            chk_close(v_str2 || ' cycle_peak_pct', v_pp, meta_n('CYC' || g || '_PCT'), 0.000001);
+            chk_int  (v_str2 || ' cur_used', v_num, meta_n('CYC' || g || '_CUR'));
+            chk_true (v_str2 || ' reset_day IS NULL (no reset on a cyclic series)', v_rd IS NULL);
+            chk_int  (v_str2 || ' train_n = the full window', v_n, 90);
+            chk_true (v_str2 || ' days_to_full_lo / _hi / accel_ratio NULL',
+                      v_lo IS NULL AND v_hi IS NULL AND v_acc IS NULL);
+            IF g = 0 THEN
+                chk_close(v_str2 || ' peak_slope_bpd = 0 (peaks do not grow)', v_ps, 0, 0.000001);
+                chk_true (v_str2 || ' days_to_full IS NULL', v_dtf IS NULL);
+            ELSE
+                chk_close(v_str2 || ' peak_slope_bpd = 1 GiB / 30 days', v_ps, meta_n('CYC1_PSLOPE'), 0.000001);
+                chk_int  (v_str2 || ' days_to_full off the peak line', v_dtf, meta_n('CYC1_DTF'));
+            END IF;
+        END LOOP;
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+          WHERE kind = 'TBSPC_FULL' AND series_key IN ('FIX_CYCLIC', 'FIX_CYCLIC_UP');
+        chk_int('CYCLIC raises no TBSPC_FULL', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+          WHERE quality = 'CYCLIC' AND tablespace_name NOT IN ('FIX_CYCLIC', 'FIX_CYCLIC_UP');
+        chk_int('no other row is CYCLIC', v_n, 0);
+        SELECT cycle_n INTO v_n FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_PURGE';
+        chk_int('FIX_PURGE cycle_n = 1 (one purge: M9.3 reset, not CYCLIC)', v_n, 1);
+        SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+          WHERE quality <> 'CYCLIC'
+            AND (cycle_days IS NOT NULL OR cycle_peak_bytes IS NOT NULL
+                 OR cycle_peak_pct IS NOT NULL OR peak_slope_bpd IS NOT NULL);
+        chk_int('cycle_* columns NULL off CYCLIC rows', v_n, 0);
+        SELECT quality, cycle_n, cycle_days, cycle_peak_pct, days_to_full
+          INTO v_str, v_cn, v_cd, v_pp, v_dtf
+          FROM capr_tbspc_days_to_full WHERE tablespace_name = 'FIX_CYCLIC';
+        chk_true('CAPR_TBSPC_DAYS_TO_FULL passes the CYCLIC columns',
+                 v_str = 'CYCLIC' AND v_cn = meta_n('CYC0_N') AND v_cd = meta_n('CYC0_DAYS')
+                 AND v_pp = meta_n('CYC0_PCT') AND v_dtf IS NULL);
+        SELECT cycle_peak_gb, peak_slope_mb INTO v_pk, v_ps
+          FROM capr_tbspc_days_to_full WHERE tablespace_name = 'FIX_CYCLIC_UP';
+        chk_close('CAPR_TBSPC_DAYS_TO_FULL cycle_peak_gb', v_pk, meta_n('CYC1_PEAK') / 1073741824, 0.000001);
+        chk_close('CAPR_TBSPC_DAYS_TO_FULL peak_slope_mb', v_ps, meta_n('CYC1_PSLOPE') / 1048576, 0.000001);
+        SELECT quality, cycle_n, cycle_days, cycle_peak_pct, peak_slope_per_day, days_to_full
+          INTO v_str, v_cn, v_cd, v_pp, v_ps, v_dtf
+          FROM capr_fit WHERE kind = 'TBSPC' AND series = 'FIX_CYCLIC_UP';
+        chk_true('CAPR_FIT passes the CYCLIC columns',
+                 v_str = 'CYCLIC' AND v_cn = meta_n('CYC1_N') AND v_cd = meta_n('CYC1_DAYS')
+                 AND v_pp = meta_n('CYC1_PCT') AND ABS(v_ps - meta_n('CYC1_PSLOPE')) < 0.001
+                 AND v_dtf = meta_n('CYC1_DTF'));
+        -- The grade off (cyclic_min_cliffs = 0): the M9.3 reset restarts at
+        -- the last cliff, the current rise reads 2.5 GiB/day, and FIX_CYCLIC
+        -- falls inside dtf_warn: the false page the grade exists to stop.
+        BEGIN
+            UPDATE cap_config SET cfg_value = 0 WHERE cfg_name = 'cyclic_min_cliffs';
+            SELECT quality, reset_day, train_n, slope_bpd, days_to_full, cycle_n
+              INTO v_str, v_rd, v_n, v_ps, v_dtf, v_cn
+              FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_CYCLIC';
+            chk_str  ('cyclic_min_cliffs = 0: FIX_CYCLIC quality', v_str, 'OK');
+            chk_int  ('cyclic_min_cliffs = 0: reset_day = the last cliff', v_rd - meta_d('CYC0_LAST_CLIFF'), 0);
+            chk_int  ('cyclic_min_cliffs = 0: train_n (the current rise)', v_n, meta_n('CYC0_LEGACY_N'));
+            chk_close('cyclic_min_cliffs = 0: slope_bpd = 2.5 GiB/day', v_ps, meta_n('CYC0_RISE'), 0.000001);
+            chk_int  ('cyclic_min_cliffs = 0: days_to_full', v_dtf, meta_n('CYC0_LEGACY_DTF'));
+            chk_int  ('cyclic_min_cliffs = 0: cycle_n still counted', v_cn, meta_n('CYC0_N'));
+            SELECT COUNT(*) INTO v_n FROM capr_alerts
+              WHERE kind = 'TBSPC_FULL' AND series_key = 'FIX_CYCLIC';
+            chk_int('cyclic_min_cliffs = 0: FIX_CYCLIC raises the TBSPC_FULL false page', v_n, 1);
+        EXCEPTION
+            WHEN OTHERS THEN
+                UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'cyclic_min_cliffs';
+                COMMIT;
+                RAISE;
+        END;
+        UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'cyclic_min_cliffs';
+        COMMIT;
+    END;
+
+    DBMS_OUTPUT.PUT_LINE('=== DRIFT estimator (slope_method = 2) ===');
+    -- Closed forms from the installer's own rates (DR_*). Flipped for this
+    -- block only, then restored and committed.
+    DECLARE
+        v_sd NUMBER; v_ci NUMBER; v_p NUMBER; v_lo NUMBER; v_hi NUMBER;
+        v_d NUMBER; v_dlo NUMBER; v_dhi NUMBER; v_m VARCHAR2(10);
+    BEGIN
+        -- Under the default the drift columns are there, the estimator is not.
+        SELECT drift_slope_bpd, drift_sd_bpd, slope_method INTO v_num, v_sd, v_m
+          FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
+        chk_close('LINEAR drift_slope_bpd under slope_method 0', v_num, meta_n('DR_LINEAR_SLOPE'), 0.000001);
+        chk_close('LINEAR drift_sd_bpd under slope_method 0 (0)', v_sd, 0, 0.000001);
+        chk_str  ('LINEAR slope_method under 0', v_m, 'OLS');
+        UPDATE cap_config SET cfg_value = 2 WHERE cfg_name = 'slope_method';
+        BEGIN
+            SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast WHERE slope_method <> 'DRIFT';
+            chk_int('every TBSPC row uses DRIFT', v_n, 0);
+            FOR r IN (SELECT 'LINEAR' AS k FROM dual UNION ALL SELECT 'SPIKE' FROM dual
+                      UNION ALL SELECT 'ZIGZAG' FROM dual UNION ALL SELECT 'PURGE' FROM dual) LOOP
+                SELECT slope_bpd, drift_sd_bpd, slope_ci_bpd, proj_30_bytes, proj_30_lo, proj_30_hi,
+                       days_to_full, days_to_full_lo, days_to_full_hi, quality
+                  INTO v_num, v_sd, v_ci, v_p, v_lo, v_hi, v_d, v_dlo, v_dhi, v_str
+                  FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_' || r.k;
+                chk_close('DRIFT ' || r.k || ' slope_bpd (median rate)', v_num, meta_n('DR_' || r.k || '_SLOPE'), 0.000001);
+                chk_close('DRIFT ' || r.k || ' drift_sd_bpd', v_sd, meta_n('DR_' || r.k || '_SD'), 0.000001);
+                chk_close('DRIFT ' || r.k || ' slope_ci_bpd = t * sd / sqrt(n)', v_ci, meta_n('DR_' || r.k || '_CI'), 0.000001);
+                chk_close('DRIFT ' || r.k || ' proj_30_bytes', v_p,  meta_n('DR_' || r.k || '_P30'),    0.000001);
+                chk_close('DRIFT ' || r.k || ' proj_30_lo',    v_lo, meta_n('DR_' || r.k || '_P30_LO'), 0.000001);
+                chk_close('DRIFT ' || r.k || ' proj_30_hi',    v_hi, meta_n('DR_' || r.k || '_P30_HI'), 0.000001);
+                chk_int  ('DRIFT ' || r.k || ' days_to_full',    v_d,   meta_n('DR_' || r.k || '_DTF'));
+                chk_true ('DRIFT ' || r.k || ' days_to_full_lo = ' || meta_n('DR_' || r.k || '_DTF_LO')
+                          || ' (got ' || v_dlo || ')', v_dlo = meta_n('DR_' || r.k || '_DTF_LO'));
+                chk_true ('DRIFT ' || r.k || ' days_to_full_hi = ' || NVL(TO_CHAR(meta_n('DR_' || r.k || '_DTF_HI')), 'NULL')
+                          || ' (got ' || NVL(TO_CHAR(v_dhi), 'NULL') || ')',
+                          (v_dhi IS NULL AND meta_n('DR_' || r.k || '_DTF_HI') IS NULL)
+                          OR v_dhi = meta_n('DR_' || r.k || '_DTF_HI'));
+                SELECT sval INTO v_str2 FROM cap_fixture_meta WHERE mkey = 'DR_' || r.k || '_Q';
+                chk_str  ('DRIFT ' || r.k || ' quality', v_str, v_str2);
+            END LOOP;
+            -- The named closed forms behind those rows.
+            chk_close('DRIFT LINEAR slope = 10 MiB/day', meta_n('DR_LINEAR_SLOPE'), n_slope, 0.000001);
+            chk_int  ('DRIFT LINEAR days_to_full = LINEAR_DTF', meta_n('DR_LINEAR_DTF'), n_dtf);
+            chk_close('DRIFT SPIKE slope = 5 MiB/day (the step is 1 of 89 rates)',
+                      meta_n('DR_SPIKE_SLOPE'), meta_n('SPIKE_RATE'), 0.000001);
+            chk_close('DRIFT SPIKE sd = 2 GiB / sqrt(89)', meta_n('DR_SPIKE_SD'), 2147483648 / SQRT(89), 0.000001);
+            chk_close('DRIFT ZIGZAG slope = +50 MiB/day (45 of 89 rates)', meta_n('DR_ZIGZAG_SLOPE'), 50 * 1048576, 0.000001);
+            chk_close('DRIFT PURGE slope = 10 MiB/day (post-reset rates)', meta_n('DR_PURGE_SLOPE'), n_slope, 0.000001);
+            chk_int  ('DRIFT PURGE days_to_full = PURGE_DTF', meta_n('DR_PURGE_DTF'), meta_n('PURGE_DTF'));
+            SELECT reset_day INTO d_reset FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_PURGE';
+            chk_int('DRIFT PURGE reset_day unchanged', d_reset - meta_d('PURGE_DAY'), 0);
+            SELECT proj_30_lo, proj_30_hi, proj_30_bytes INTO v_lo, v_hi, v_p
+              FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
+            chk_true('DRIFT LINEAR bands collapse (sd 0)', ABS(v_hi - v_lo) < 1 AND ABS(v_p - meta_n('LINEAR_PRED30_DAY')) < 1);
+            SELECT icept + slope_bpd * (last_day - DATE '2020-01-01'), cur_used INTO v_num, v_num2
+              FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_ZIGZAG';
+            chk_close('DRIFT icept: the anchored line passes through cur_used', v_num, v_num2, 0.000000001);
+            SELECT quality INTO v_str FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_FLAT';
+            chk_str('DRIFT FLAT quality (median rate 0)', v_str, 'FLAT');
+            SELECT quality INTO v_str FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_CYCLIC';
+            chk_str('DRIFT FIX_CYCLIC still CYCLIC', v_str, 'CYCLIC');
+            -- CPU and SERIES follow the knob.
+            SELECT COUNT(*) INTO v_n FROM capf_cpu_trend WHERE slope_method <> 'DRIFT';
+            chk_int('every CPU row uses DRIFT', v_n, 0);
+            SELECT slope_method, slope_per_day, drift_sd_per_day, days_to_limit, quality, proj_30_lo, proj_30_hi
+              INTO v_m, v_num, v_sd, v_n, v_str, v_lo, v_hi
+              FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'SESSIONS';
+            chk_str  ('DRIFT SESSIONS slope_method', v_m, 'DRIFT');
+            chk_close('DRIFT SESSIONS slope = 2/day', v_num, 2, 0.000001);
+            chk_close('DRIFT SESSIONS sd = 0', v_sd, 0, 0.000001);
+            chk_int  ('DRIFT SESSIONS days_to_limit', v_n, meta_n('SESS_DTL'));
+            chk_str  ('DRIFT SESSIONS quality', v_str, 'OK');
+            chk_true ('DRIFT SESSIONS bands collapse', ABS(v_hi - v_lo) < 0.000001);
+            -- CAPF_BACKTEST's REGR replay follows the knob.
+            SELECT slope_method, mape_pct, bias_pct INTO v_m, v_num, v_num2
+              FROM capf_backtest WHERE series_key = 'FIX_ZIGZAG' AND engine = 'REGR';
+            chk_str  ('DRIFT backtest ZIGZAG slope_method', v_m, 'DRIFT');
+            chk_close('DRIFT backtest ZIGZAG MAPE%', v_num,  meta_n('ZZ_BT_DR_MAPE'), 0.0001);
+            chk_close('DRIFT backtest ZIGZAG BIAS%', v_num2, meta_n('ZZ_BT_DR_BIAS'), 0.0001);
+            SELECT mape_pct INTO v_num FROM capf_backtest WHERE series_key = 'FIX_LINEAR' AND engine = 'REGR';
+            chk_true('DRIFT backtest LINEAR MAPE ~ 0 (got ' || v_num || ')', ABS(v_num) < 0.000001);
+        EXCEPTION
+            WHEN OTHERS THEN
+                UPDATE cap_config SET cfg_value = 0 WHERE cfg_name = 'slope_method';
+                COMMIT;
+                RAISE;
+        END;
+        -- THEILSEN in the backtest replay as well.
+        UPDATE cap_config SET cfg_value = 1 WHERE cfg_name = 'slope_method';
+        BEGIN
+            SELECT slope_method, mape_pct, bias_pct INTO v_m, v_num, v_num2
+              FROM capf_backtest WHERE series_key = 'FIX_ZIGZAG' AND engine = 'REGR';
+            chk_str  ('THEILSEN backtest ZIGZAG slope_method', v_m, 'THEILSEN');
+            chk_close('THEILSEN backtest ZIGZAG MAPE%', v_num,  meta_n('ZZ_BT_TS_MAPE'), 0.0001);
+            chk_close('THEILSEN backtest ZIGZAG BIAS%', v_num2, meta_n('ZZ_BT_TS_BIAS'), 0.0001);
+        EXCEPTION
+            WHEN OTHERS THEN
+                UPDATE cap_config SET cfg_value = 0 WHERE cfg_name = 'slope_method';
+                COMMIT;
+                RAISE;
+        END;
+        UPDATE cap_config SET cfg_value = 0 WHERE cfg_name = 'slope_method';
+        COMMIT;
+        SELECT slope_method INTO v_m FROM capf_backtest WHERE series_key = 'FIX_ZIGZAG' AND engine = 'REGR';
+        chk_str('backtest slope_method back to OLS', v_m, 'OLS');
+    END;
+
+    DBMS_OUTPUT.PUT_LINE('=== CPU gate, deseasoning, anchor, hot_now ===');
+    SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'cpu_quality_gate';
+    chk_int('knob cpu_quality_gate default (1 = slope significance)', v_num, 1);
+    SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'cpu_deseason';
+    chk_int('knob cpu_deseason default (1 = weekday / weekend demeaning)', v_num, 1);
+    DECLARE
+        n_p2 NUMBER := meta_n('PDB2_CON_DBID');
+        n_p1 NUMBER := meta_n('PDB_CON_DBID');
+        v_ci NUMBER; v_sig VARCHAR2(1); v_ds VARCHAR2(1); v_anc NUMBER; v_hot VARCHAR2(1);
+    BEGIN
+        -- Root: no trend by construction. Deseasoned, the slope is the pull
+        -- of the injected Tuesday alone, inside its own CI.
+        SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
+          WHERE dbid = v_dbid AND con_dbid = v_dbid
+            AND slope_sig = 'N' AND deseasoned = 'Y' AND quality IN ('LOW_CONFIDENCE', 'FLAT');
+        chk_int('root: all 6 metrics slope_sig N, deseasoned, LOW_CONFIDENCE / FLAT', v_n, 6);
+        SELECT slope_per_day, slope_ci_per_day, anchor_value, proj_30, cur_val
+          INTO v_num, v_ci, v_anc, v_num2, v_num3
+          FROM capf_cpu_trend WHERE dbid = v_dbid AND con_dbid = v_dbid AND metric = 'BUSY_PCT';
+        chk_close('root BUSY_PCT deseasoned slope', v_num, meta_n('ROOT_BUSY_SLOPE'), 0.000001);
+        chk_close('root BUSY_PCT slope_ci', v_ci, meta_n('ROOT_BUSY_CI'), 0.000001);
+        chk_close('root BUSY_PCT anchor_value = 40 (median of the last 7 days)', v_anc, meta_n('ROOT_BUSY_ANCHOR'), 0.000001);
+        chk_close('root BUSY_PCT anchor_value closed form', meta_n('ROOT_BUSY_ANCHOR'), 40, 0.000001);
+        chk_close('root BUSY_PCT proj_30 = anchor + 30 * slope', v_num2, meta_n('ROOT_BUSY_P30'), 0.000001);
+        chk_true ('root BUSY_PCT cur_val is the raw last day (got ' || v_num3 || ')', v_num3 IN (20, 40, 70));
+        -- FIXPDB1: the +18 step makes the deseasoned slope significant.
+        SELECT slope_ci_per_day, slope_sig, quality INTO v_ci, v_sig, v_str
+          FROM capf_cpu_trend WHERE dbid = v_dbid AND con_dbid = n_p1 AND metric = 'DB_CPU_PCT';
+        chk_close('PDB DB_CPU_PCT slope_ci', v_ci, meta_n('PDB_DBCPU_CI'), 0.000001);
+        chk_str  ('PDB DB_CPU_PCT slope_sig', v_sig, 'Y');
+        chk_str  ('PDB DB_CPU_PCT quality (gate 1)', v_str, 'OK');
+        -- FIXPDB2: weekday 60 / weekend 20 plus a +1/12 per day ramp.
+        SELECT train_n, slope_per_day, slope_ci_per_day, r2, slope_sig, deseasoned, quality,
+               anchor_value, proj_30, days_to_sat
+          INTO v_n, v_num, v_ci, v_r2, v_sig, v_ds, v_str, v_anc, v_num2, v_num3
+          FROM capf_cpu_trend WHERE dbid = v_dbid AND con_dbid = n_p2 AND metric = 'DB_CPU_PCT';
+        chk_int  ('PDB2 DB_CPU_PCT train_n', v_n, meta_n('PDB2_TRAIN_N'));
+        chk_close('PDB2 DB_CPU_PCT deseasoned slope', v_num, meta_n('PDB2_PCT_SLOPE'), 0.000001);
+        chk_close('PDB2 DB_CPU_PCT slope near the 1/12 ramp', v_num, 1/12, 0.01);
+        chk_close('PDB2 DB_CPU_PCT slope_ci', v_ci, meta_n('PDB2_PCT_CI'), 0.00001);
+        chk_close('PDB2 DB_CPU_PCT r2 (deseasoned)', v_r2, meta_n('PDB2_PCT_R2'), 0.000001);
+        chk_str  ('PDB2 DB_CPU_PCT slope_sig', v_sig, 'Y');
+        chk_str  ('PDB2 DB_CPU_PCT deseasoned', v_ds, 'Y');
+        chk_str  ('PDB2 DB_CPU_PCT quality (deseason 1, gate 1)', v_str, 'OK');
+        chk_close('PDB2 DB_CPU_PCT anchor_value', v_anc, meta_n('PDB2_PCT_ANCHOR'), 0.000001);
+        chk_close('PDB2 DB_CPU_PCT proj_30', v_num2, meta_n('PDB2_PCT_P30'), 0.000001);
+        chk_int  ('PDB2 DB_CPU_PCT days_to_sat', v_num3, meta_n('PDB2_PCT_DTS'));
+        chk_true ('PDB2 DB_CPU_PCT days_to_sat beyond dtf_warn (no DBCPU_SAT)', v_num3 > 90);
+        -- hot_now: only FIXPDB2's busy-hour DB CPU sits at or above 80%.
+        SELECT recent_p95_med, hot_now, days_to_sat INTO v_anc, v_hot, v_n
+          FROM capf_cpu_trend WHERE dbid = v_dbid AND con_dbid = n_p2 AND metric = 'DB_CPU_P95';
+        chk_close('PDB2 DB_CPU_P95 recent_p95_med', v_anc, meta_n('PDB2_P95_RECENT_MED'), 0.000001);
+        chk_str  ('PDB2 DB_CPU_P95 hot_now', v_hot, 'Y');
+        chk_int  ('PDB2 DB_CPU_P95 days_to_sat (already past 80)', v_n, 0);
+        SELECT hot_now, recent_p95_med INTO v_hot, v_anc
+          FROM capf_cpu_trend WHERE dbid = v_dbid AND con_dbid = v_dbid AND metric = 'BUSY_P95';
+        chk_str  ('root BUSY_P95 hot_now (58 never reaches 80)', v_hot, 'N');
+        chk_close('root BUSY_P95 recent_p95_med = 58', v_anc, meta_n('CPU_PROBE_P95'), 0.000001);
+        SELECT COUNT(*) INTO v_n FROM capf_cpu_trend WHERE hot_now = 'Y';
+        chk_int('exactly one hot_now = Y row', v_n, 1);
+        SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
+          WHERE (metric IN ('BUSY_P95', 'DB_CPU_P95') AND (hot_now IS NULL OR recent_p95_med IS NULL))
+             OR (metric NOT IN ('BUSY_P95', 'DB_CPU_P95') AND (hot_now IS NOT NULL OR recent_p95_med IS NOT NULL));
+        chk_int('hot_now / recent_p95_med on the two p95 metrics only', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capr_cpu_trend t JOIN capf_cpu_trend f
+            ON f.dbid = t.dbid AND f.con_dbid = t.con_dbid AND f.metric = t.metric
+          WHERE NVL(t.hot_now, '-') <> NVL(f.hot_now, '-') OR t.slope_sig <> f.slope_sig
+             OR t.deseasoned <> f.deseasoned OR t.anchor_value <> f.anchor_value
+             OR NVL(t.recent_p95_med, -1) <> NVL(f.recent_p95_med, -1);
+        chk_int('CAPR_CPU_TREND passes slope_sig / deseasoned / anchor_value / hot_now', v_n, 0);
+        SELECT hot_now, slope_sig INTO v_num, v_num2 FROM capr_fit
+          WHERE kind = 'CPU' AND con_dbid = n_p2 AND series = 'DB_CPU_P95';
+        chk_true('CAPR_FIT hot_now = 1, slope_sig = 1 for PDB2 DB_CPU_P95', v_num = 1 AND v_num2 = 1);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind IN ('CPU_SAT', 'DBCPU_SAT');
+        chk_int('no CPU_SAT / DBCPU_SAT alert (hot now is not a forecast)', v_n, 0);
+
+        -- Legacy: deseason off and the R^2 gate reproduce the old answers.
+        BEGIN
+            UPDATE cap_config SET cfg_value = 0 WHERE cfg_name IN ('cpu_deseason', 'cpu_quality_gate');
+            SELECT slope_per_day, r2, quality, deseasoned INTO v_num, v_r2, v_str, v_ds
+              FROM capf_cpu_trend WHERE dbid = v_dbid AND con_dbid = n_p2 AND metric = 'DB_CPU_PCT';
+            chk_close('legacy PDB2 DB_CPU_PCT raw slope', v_num, meta_n('PDB2_PCT_SLOPE_RAW'), 0.000001);
+            chk_close('legacy PDB2 DB_CPU_PCT raw r2', v_r2, meta_n('PDB2_PCT_R2_RAW'), 0.000001);
+            chk_true ('legacy PDB2 DB_CPU_PCT r2 below r2_gate (' || ROUND(v_r2, 4) || ')', v_r2 < 0.6);
+            chk_str  ('legacy PDB2 DB_CPU_PCT quality', v_str, 'LOW_CONFIDENCE');
+            chk_str  ('legacy PDB2 DB_CPU_PCT deseasoned', v_ds, 'N');
+            SELECT slope_per_day, r2, proj_30 INTO v_num, v_r2, v_num2
+              FROM capf_cpu_trend WHERE dbid = v_dbid AND con_dbid = n_p1 AND metric = 'DB_CPU_PCT';
+            chk_close('legacy PDB DB_CPU_PCT raw slope', v_num, meta_n('PDB_DBCPU_SLOPE_RAW'), 0.000001);
+            chk_close('legacy PDB DB_CPU_PCT raw r2', v_r2, meta_n('PDB_DBCPU_R2_RAW'), 0.000001);
+            chk_close('legacy PDB DB_CPU_PCT proj_30 = anchor + 30 * raw slope', v_num2, meta_n('PDB_DBCPU_P30_RAW'), 0.000001);
+            SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
+              WHERE quality <> CASE WHEN train_n < 14 THEN 'INSUFFICIENT_HISTORY'
+                                    WHEN slope_per_day = 0 OR r2 IS NULL THEN 'FLAT'
+                                    WHEN r2 < 0.6 THEN 'LOW_CONFIDENCE' ELSE 'OK' END;
+            chk_int('legacy gate: every CPU quality is the R^2 ladder', v_n, 0);
+            SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
+              WHERE dbid = v_dbid AND con_dbid = v_dbid AND quality <> 'LOW_CONFIDENCE';
+            chk_int('legacy gate: root metrics LOW_CONFIDENCE', v_n, 0);
+        EXCEPTION
+            WHEN OTHERS THEN
+                UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name IN ('cpu_deseason', 'cpu_quality_gate');
+                COMMIT;
+                RAISE;
+        END;
+        UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name IN ('cpu_deseason', 'cpu_quality_gate');
+        COMMIT;
+        SELECT quality INTO v_str FROM capf_cpu_trend
+          WHERE dbid = v_dbid AND con_dbid = n_p2 AND metric = 'DB_CPU_PCT';
+        chk_str('PDB2 DB_CPU_PCT quality back to OK after the restore', v_str, 'OK');
+    END;
 
     DBMS_OUTPUT.PUT_LINE('=== anomaly deviation as % of baseline (median / train_days avg) ===');
     -- FIX_SPIKE: 640 blocks/day (SPIKE_RATE = 5 MiB/day) every day, plus a
@@ -986,9 +1301,9 @@ BEGIN
         chk_int('knob cpu_gap_hours', v_num, 12);
 
         -- One row per (container, metric): root has BUSY_PCT / BUSY_P95 /
-        -- DB_CPU_PCT, FIXPDB1 (time-model only) has DB_CPU_PCT alone.
+        -- DB_CPU_PCT, FIXPDB1 and FIXPDB2 (time-model only) DB_CPU_PCT alone.
         SELECT COUNT(*) INTO v_n FROM capa_cpu_shift WHERE dbid = v_dbid;
-        chk_int('CAPA_CPU_SHIFT row count (3 root + 1 PDB)', v_n, 4);
+        chk_int('CAPA_CPU_SHIFT row count (3 root + 1 per PDB, 2 PDBs)', v_n, 5);
 
         -- The FIXPDB1 step: +18 points sustained over the last 7 days.
         SELECT shift_flag, shift_pct, recent_med, base_med
@@ -1251,11 +1566,12 @@ BEGIN
           FROM capv_contract WHERE source_name = 'OSSTAT';
         chk_int('CAPV_CONTRACT OSSTAT n_rows', v_num, 4 * (n_snaps - 2));
         chk_int('CAPV_CONTRACT OSSTAT n_con_dbid (host level)', v_num2, 1);
-        -- TIME_MODEL: 3 names, root on the OSSTAT snapshots, FIXPDB1 on all.
+        -- TIME_MODEL: 3 names, root on the OSSTAT snapshots, FIXPDB1 and
+        -- FIXPDB2 on all.
         SELECT n_rows, n_con_dbid INTO v_num, v_num2
           FROM capv_contract WHERE source_name = 'TIME_MODEL';
-        chk_int('CAPV_CONTRACT TIME_MODEL n_rows', v_num, 3 * (n_snaps - 2) + 3 * n_snaps);
-        chk_int('CAPV_CONTRACT TIME_MODEL n_con_dbid (root + FIXPDB1)', v_num2, 2);
+        chk_int('CAPV_CONTRACT TIME_MODEL n_rows', v_num, 3 * (n_snaps - 2) + 2 * 3 * n_snaps);
+        chk_int('CAPV_CONTRACT TIME_MODEL n_con_dbid (root + FIXPDB1 + FIXPDB2)', v_num2, 3);
     EXCEPTION
         WHEN OTHERS THEN
             fail('seam/daily contract block raised ' || SQLERRM);
@@ -1353,6 +1669,26 @@ BEGIN
     SELECT status, value INTO v_str, v_num FROM cap_cfg_check WHERE knob = 'recent_days';
     chk_str('CAP_CFG_CHECK recent_days after reset', v_str, 'OK');
     chk_int('recent_days after reset to cfg_default', v_num, 28);
+
+    -- The new knobs' range rules.
+    UPDATE cap_config SET cfg_value = 1 WHERE cfg_name = 'cyclic_min_cliffs';
+    SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'cyclic_min_cliffs';
+    chk_str('CAP_CFG_CHECK cyclic_min_cliffs = 1', v_str, 'BAD');
+    UPDATE cap_config SET cfg_value = 3 WHERE cfg_name = 'slope_method';
+    SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'slope_method';
+    chk_str('CAP_CFG_CHECK slope_method = 3', v_str, 'BAD');
+    UPDATE cap_config SET cfg_value = 2 WHERE cfg_name = 'cpu_quality_gate';
+    SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'cpu_quality_gate';
+    chk_str('CAP_CFG_CHECK cpu_quality_gate = 2', v_str, 'BAD');
+    UPDATE cap_config SET cfg_value = 2 WHERE cfg_name = 'cpu_deseason';
+    SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'cpu_deseason';
+    chk_str('CAP_CFG_CHECK cpu_deseason = 2', v_str, 'BAD');
+    UPDATE cap_config SET cfg_value = cfg_default
+     WHERE cfg_name IN ('cyclic_min_cliffs', 'slope_method', 'cpu_quality_gate', 'cpu_deseason');
+    COMMIT;
+    SELECT COUNT(*) INTO v_n FROM cap_cfg_check
+      WHERE knob IN ('cyclic_min_cliffs', 'slope_method', 'cpu_quality_gate', 'cpu_deseason') AND status = 'OK';
+    chk_int('new knobs OK after reset', v_n, 4);
 
     -- suite_version: stamped by every install, BAD when older than this release.
     SELECT suite_version INTO v_num FROM cap_cfg;

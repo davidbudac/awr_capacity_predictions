@@ -355,7 +355,9 @@ DECLARE
     tablespace_name VARCHAR2(128),
     dtf_lo          NUMBER,
     dtf_hi          NUMBER,
-    accel           NUMBER
+    accel           NUMBER,
+    cycle_days      NUMBER,
+    cycle_peak_pct  NUMBER
   );
   TYPE dtf_diag_tab IS TABLE OF dtf_diag_rec INDEX BY PLS_INTEGER;
   v_dtf_diag   dtf_diag_tab;
@@ -565,12 +567,14 @@ DECLARE
                   WHEN 'LOW_CONFIDENCE'        THEN 'pill-warn'
                   WHEN 'FLAT'                  THEN 'pill-flat'
                   WHEN 'INSUFFICIENT_HISTORY'  THEN 'pill-crit'
+                  WHEN 'CYCLIC'                THEN 'pill-flat'
                   ELSE 'pill-flat' END;
     -- Plain-English gloss per quality value, shown as a native tooltip on hover.
     ttl := CASE q WHEN 'OK'                   THEN 'steady enough to forecast reliably'
                   WHEN 'LOW_CONFIDENCE'       THEN 'growth is too erratic for a dependable estimate'
                   WHEN 'FLAT'                 THEN 'not growing at all'
                   WHEN 'INSUFFICIENT_HISTORY' THEN 'not enough days of AWR history yet'
+                  WHEN 'CYCLIC'               THEN 'a recurring purge cycle, judged on its peaks'
                   ELSE NULL END;
     RETURN '<span class="pill ' || cls || '"'
            || CASE WHEN ttl IS NOT NULL THEN ' title="' || ttl || '"' END
@@ -612,6 +616,7 @@ DECLARE
     IF d IS NOT NULL AND cap_year AND d > 365 THEN RETURN '<span class="na">&gt; 1 year</span>'; END IF;
     IF d IS NOT NULL THEN RETURN TO_CHAR(d, fmt); END IF;
     IF q = 'INSUFFICIENT_HISTORY' THEN RETURN '<span class="na">insufficient history</span>'; END IF;
+    IF q = 'CYCLIC' THEN RETURN '<span class="na">peaks not growing</span>'; END IF;
     IF q IN ('FLAT','OK','LOW_CONFIDENCE') THEN RETURN '<span class="na">no crossing</span>'; END IF;
     RETURN '<span class="na">n/a</span>';
   END dtf_cell;
@@ -2151,10 +2156,15 @@ BEGIN
            dtf_best  AS days_to_full_hi,
            sev_dtf   AS sev,
            quality,
-           accel
+           accel,
+           cycle_days,
+           cycle_peak_pct
     FROM   capr_tbspc_days_to_full
-    WHERE  days_to_full IS NOT NULL
-      AND  rank_dtf <= top_n
+    -- CYCLIC rows are always listed: their days_to_full is the peak line's
+    -- crossing, often empty, and the row explains why a purge cycle is not
+    -- paging.
+    WHERE  (days_to_full IS NOT NULL AND rank_dtf <= top_n)
+       OR  quality = 'CYCLIC'
     ORDER  BY rank_dtf
   ) LOOP
     IF NOT any_rows THEN
@@ -2187,6 +2197,8 @@ BEGIN
     v_dtf_diag(v_dtf_diag_n).dtf_lo          := r.days_to_full_lo;
     v_dtf_diag(v_dtf_diag_n).dtf_hi          := r.days_to_full_hi;
     v_dtf_diag(v_dtf_diag_n).accel           := r.accel;
+    v_dtf_diag(v_dtf_diag_n).cycle_days      := r.cycle_days;
+    v_dtf_diag(v_dtf_diag_n).cycle_peak_pct  := r.cycle_peak_pct;
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
@@ -2205,13 +2217,18 @@ BEGIN
       || '<th class="num">Fill low' || info_icon('earliest credible fill day, the low end of the growth-rate uncertainty range (CAPR column: DTF_WORST)')
       || '</th><th class="num">Fill high' || info_icon('latest credible fill day; blank means the range includes not growing at all, i.e. it may never fill (CAPR column: DTF_BEST)')
       || '</th><th class="num">Accel.' || info_icon('above 1.5 means growth is speeding up (CAPR column: ACCEL)') || '</th>'
+      || '<th>Cycle' || info_icon('CYCLIC rows only: days between purges and the highest fill in the window, where the peak line starts (CAPR columns: CYCLE_DAYS, CYCLE_PEAK_PCT)') || '</th>'
       || '</tr></thead><tbody>');
     FOR i IN 1 .. v_dtf_diag_n LOOP
       p('<tr><td>' || esc(v_dtf_diag(i).db_pdb) || '</td>'
         || '<td>' || esc(v_dtf_diag(i).tablespace_name) || '</td>'
         || '<td class="num">' || nz(v_dtf_diag(i).dtf_lo, 'FM99999990') || '</td>'
         || '<td class="num">' || nz(v_dtf_diag(i).dtf_hi, 'FM99999990') || '</td>'
-        || '<td class="num">' || nz(v_dtf_diag(i).accel, 'FM990.00') || '</td></tr>');
+        || '<td class="num">' || nz(v_dtf_diag(i).accel, 'FM990.00') || '</td>'
+        || '<td>' || CASE WHEN v_dtf_diag(i).cycle_days IS NOT NULL
+                          THEN 'every ' || TO_CHAR(v_dtf_diag(i).cycle_days, 'FM9990') || ' d, peak '
+                               || TO_CHAR(v_dtf_diag(i).cycle_peak_pct, 'FM990.0') || '%'
+                          ELSE '&ndash;' END || '</td></tr>');
     END LOOP;
     p('</tbody></table>');
     p('</div>');  -- .tscroll
@@ -2823,7 +2840,10 @@ BEGIN
            days_to_sat   AS days_sat,
            sat_worst,
            sat_best,
-           quality
+           quality,
+           anchor_value,
+           slope_sig,
+           hot_now
     FROM   capr_cpu_trend
     ORDER  BY con_dbid, metric
   ) LOOP
@@ -2838,7 +2858,11 @@ BEGIN
         || '</th><th class="num">R2</th>'
         || '<th class="num">Days to saturation' || info_icon('estimated days until this metric reaches the saturation threshold (none for DB_CPU_SEC, which has no ceiling) (CAPR column: DAYS_SAT)')
         || '</th><th class="num">Range' || info_icon('worst-to-best case days-to-saturation from the statistical uncertainty of the trend; never = it may not saturate at the slow end (CAPR columns: SAT_WORST, SAT_BEST)')
-        || '</th><th>Quality' || info_icon('CAPR column: QUALITY') || '</th></tr></thead><tbody>');
+        || '</th><th>Quality' || info_icon('OK = the slope is outside its own 95% range when cpu_quality_gate = 1 (default), else R2 at or above r2_gate (CAPR column: QUALITY)')
+        || '</th><th class="num">Anchor' || info_icon('median of the last shift_days complete days, where projections and days to saturation start (CAPR column: ANCHOR_VALUE)')
+        || '</th><th>Sig.' || info_icon('Y when the slope is outside its own 95% range (CAPR column: SLOPE_SIG)')
+        || '</th><th>Hot now' || info_icon('BUSY_P95 / DB_CPU_P95 only: Y when the recent busy-hour median is at or above the saturation threshold (CAPR column: HOT_NOW)')
+        || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
     p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.metric) || '</td>'
@@ -2857,7 +2881,11 @@ BEGIN
               WHEN r.sat_worst > 365 THEN '<span class="na">&gt; 1 year</span>'
               ELSE TO_CHAR(r.sat_worst, 'FM99999990') || '&ndash;'
                    || NVL(TO_CHAR(r.sat_best, 'FM99999990'), 'never') END || '</td>'
-      || '<td>' || quality_pill(r.quality) || '</td></tr>');
+      || '<td>' || quality_pill(r.quality) || '</td>'
+      || '<td class="num">' || nz(r.anchor_value, 'FM99999990.00') || '</td>'
+      || '<td>' || esc(r.slope_sig) || '</td>'
+      || '<td>' || CASE r.hot_now WHEN 'Y' THEN '<span class="sev-crit">Y</span>'
+                                  WHEN 'N' THEN 'N' ELSE '&ndash;' END || '</td></tr>');
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');

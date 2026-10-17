@@ -39,8 +39,14 @@
 --   FLAT                  slope = 0 OR R^2 IS NULL  (REGR_R2 returns 1, not
 --                         NULL, for a zero-variance y -- so FLAT keys off the
 --                         slope, verified on 19c)
---   LOW_CONFIDENCE        R^2 < r2_gate
+--   LOW_CONFIDENCE        R^2 < r2_gate (DRIFT: the slope CI includes 0)
 --   OK                    otherwise
+--
+-- slope_method = 2 (DRIFT) applies here exactly as in ddl/30: slope =
+-- MEDIAN of the day-over-day rates of the window, CI t * sd / SQRT(n_rates),
+-- bands t * (sd * SQRT(h) + h * se), no R^2 gate. slope_method = 1 does not:
+-- this view never computes Theil-Sen, and the slope_method column says OLS.
+-- drift_slope_per_day / drift_sd_per_day are exposed under every setting.
 --
 -- 19c note: inline OVER (...) on every window call; no 21c WINDOW clause.
 --
@@ -75,22 +81,43 @@ WITH src AS (
         FROM   d JOIN b ON b.dbid = d.dbid AND b.con_dbid = d.con_dbid
                        AND b.series = d.series
      ),
-     fit AS (
-        SELECT dd.dbid, dd.con_dbid, dd.series,
-               MAX(dd.last_day)                 AS last_day,
-               MAX(dd.last_day_n)               AS last_day_n,
-               REGR_SLOPE(dd.val, dd.day_n)     AS slope,
-               REGR_INTERCEPT(dd.val, dd.day_n) AS icept,
-               REGR_R2(dd.val, dd.day_n)        AS r2,
-               REGR_COUNT(dd.val, dd.day_n)     AS n,
-               -- Sums for the M9.1 prediction intervals (hand-auditable).
-               REGR_SXX(dd.val, dd.day_n)       AS sxx,
-               REGR_SYY(dd.val, dd.day_n)       AS syy,
-               REGR_SXY(dd.val, dd.day_n)       AS sxy,
-               REGR_AVGX(dd.val, dd.day_n)      AS xbar
-        FROM   dd CROSS JOIN cap_cfg cfg
+     w AS (
+        SELECT dd.* FROM dd CROSS JOIN cap_cfg cfg
         WHERE  dd.day_dt > dd.last_day - cfg.train_days
-        GROUP  BY dd.dbid, dd.con_dbid, dd.series
+     ),
+     -- DRIFT input: day-over-day rate inside the window (gap-normalised).
+     wr AS (
+        SELECT w.*,
+               (w.val - LAG(w.val) OVER (PARTITION BY w.dbid, w.con_dbid, w.series ORDER BY w.day_dt))
+             / (w.day_n - LAG(w.day_n) OVER (PARTITION BY w.dbid, w.con_dbid, w.series ORDER BY w.day_dt)) AS rate
+        FROM   w
+     ),
+     fit AS (
+        SELECT w.dbid, w.con_dbid, w.series,
+               MAX(w.last_day)                 AS last_day,
+               MAX(w.last_day_n)               AS last_day_n,
+               REGR_SLOPE(w.val, w.day_n)      AS slope,
+               REGR_INTERCEPT(w.val, w.day_n)  AS icept,
+               REGR_R2(w.val, w.day_n)         AS r2,
+               REGR_COUNT(w.val, w.day_n)      AS n,
+               -- Sums for the M9.1 prediction intervals (hand-auditable).
+               REGR_SXX(w.val, w.day_n)        AS sxx,
+               REGR_SYY(w.val, w.day_n)        AS syy,
+               REGR_SXY(w.val, w.day_n)        AS sxy,
+               REGR_AVGX(w.val, w.day_n)       AS xbar
+        FROM   w
+        GROUP  BY w.dbid, w.con_dbid, w.series
+     ),
+     dband AS (
+        SELECT x.*,
+               CASE WHEN x.drift_n > 1 THEN 1.96 + 2.4 / (x.drift_n - 1) END AS dtval,
+               CASE WHEN x.drift_n > 1 THEN x.drift_sd / SQRT(x.drift_n)  END AS dse
+        FROM  (SELECT dbid, con_dbid, series,
+                      MEDIAN(rate)      AS drift,
+                      STDDEV_SAMP(rate) AS drift_sd,
+                      COUNT(rate)       AS drift_n
+               FROM   wr
+               GROUP  BY dbid, con_dbid, series) x
      ),
      -- M9.1 closed forms (see ddl/30_forecast_views.sql for the derivation):
      --   SSE      = SYY - SXY^2/SXX
@@ -119,6 +146,22 @@ WITH src AS (
                  s.tval * s.resid_se / SQRT(s.sxx) END                                                    AS slope_ci
         FROM   stat s
      ),
+     est AS (
+        SELECT q.*,
+               CASE q.slope_method WHEN 'DRIFT' THEN q.drift ELSE q.slope END           AS use_slope,
+               CASE q.slope_method WHEN 'DRIFT' THEN q.dtval * q.dse ELSE q.slope_ci END AS use_ci,
+               CASE q.slope_method WHEN 'DRIFT' THEN q.dtval * (q.drift_sd * SQRT(30) + 30 * q.dse)
+                                   ELSE q.half_30 END                                    AS use_h30,
+               CASE q.slope_method WHEN 'DRIFT' THEN q.dtval * (q.drift_sd * SQRT(90) + 90 * q.dse)
+                                   ELSE q.half_90 END                                    AS use_h90
+        FROM  (SELECT b.*, x.drift, x.drift_sd, x.drift_n, x.dtval, x.dse,
+                      CASE WHEN cfg.slope_method = 2 AND x.drift IS NOT NULL
+                           THEN 'DRIFT' ELSE 'OLS' END AS slope_method
+               FROM   band b
+               LEFT   JOIN dband x ON x.dbid = b.dbid AND x.con_dbid = b.con_dbid
+                                  AND x.series = b.series
+               CROSS  JOIN cap_cfg cfg) q
+     ),
      -- The ceiling and the unit are properties of the LAST observed day: a
      -- `processes` parameter change or a datafile resize moves them, and the
      -- current one is what the forecast is aiming at.
@@ -143,43 +186,52 @@ SELECT f.dbid,
        CASE WHEN c.cur_limit > 0
             THEN ROUND(100 * c.cur_val / c.cur_limit, 1)
        END                                          AS pct_of_limit,
-       f.slope                                      AS slope_per_day,
-       f.icept,
+       f.use_slope                                  AS slope_per_day,
+       -- DRIFT fits no intercept: the line the projections lie on.
+       CASE f.slope_method WHEN 'DRIFT' THEN c.cur_val - f.use_slope * f.last_day_n
+                           ELSE f.icept END         AS icept,
        f.r2,
-       -- Anchored at today; the OLS half-widths are drawn around the anchor.
-       c.cur_val + f.slope * 30                     AS proj_30,
-       c.cur_val + f.slope * 90                     AS proj_90,
-       c.cur_val + f.slope * 30 - f.half_30         AS proj_30_lo,
-       c.cur_val + f.slope * 30 + f.half_30         AS proj_30_hi,
-       c.cur_val + f.slope * 90 - f.half_90         AS proj_90_lo,
-       c.cur_val + f.slope * 90 + f.half_90         AS proj_90_hi,
-       f.slope_ci                                   AS slope_ci_per_day,
+       -- Anchored at today; the half-widths are drawn around the anchor.
+       c.cur_val + f.use_slope * 30                 AS proj_30,
+       c.cur_val + f.use_slope * 90                 AS proj_90,
+       c.cur_val + f.use_slope * 30 - f.use_h30     AS proj_30_lo,
+       c.cur_val + f.use_slope * 30 + f.use_h30     AS proj_30_hi,
+       c.cur_val + f.use_slope * 90 - f.use_h90     AS proj_90_lo,
+       c.cur_val + f.use_slope * 90 + f.use_h90     AS proj_90_hi,
+       f.use_ci                                     AS slope_ci_per_day,
        -- The saturation target itself, so a reader can check the arithmetic
        -- without re-reading the knob.
        CASE WHEN c.cur_limit > 0
             THEN c.cur_limit * cfg.series_sat_pct / 100
        END                                          AS sat_value,
-       CASE WHEN c.cur_limit > 0 AND f.slope > 0
-            THEN GREATEST(0, FLOOR((c.cur_limit * cfg.series_sat_pct / 100 - c.cur_val) / f.slope))
+       CASE WHEN c.cur_limit > 0 AND f.use_slope > 0
+            THEN GREATEST(0, FLOOR((c.cur_limit * cfg.series_sat_pct / 100 - c.cur_val) / f.use_slope))
        END                                          AS days_to_limit,
-       CASE WHEN c.cur_limit > 0 AND f.slope > 0 AND f.slope_ci IS NOT NULL
+       CASE WHEN c.cur_limit > 0 AND f.use_slope > 0 AND f.use_ci IS NOT NULL
             THEN GREATEST(0, FLOOR((c.cur_limit * cfg.series_sat_pct / 100 - c.cur_val)
-                                   / (f.slope + f.slope_ci)))
+                                   / (f.use_slope + f.use_ci)))
        END                                          AS days_to_limit_lo,
-       CASE WHEN c.cur_limit > 0 AND f.slope > 0 AND f.slope_ci IS NOT NULL
-                 AND f.slope - f.slope_ci > 0
+       CASE WHEN c.cur_limit > 0 AND f.use_slope > 0 AND f.use_ci IS NOT NULL
+                 AND f.use_slope - f.use_ci > 0
             THEN GREATEST(0, FLOOR((c.cur_limit * cfg.series_sat_pct / 100 - c.cur_val)
-                                   / (f.slope - f.slope_ci)))
+                                   / (f.use_slope - f.use_ci)))
        END                                          AS days_to_limit_hi,
        CASE WHEN f.n  < cfg.min_train_days     THEN 'INSUFFICIENT_HISTORY'
-            WHEN f.slope = 0 OR f.r2 IS NULL   THEN 'FLAT'
+            WHEN f.use_slope = 0
+              OR (f.slope_method <> 'DRIFT' AND f.r2 IS NULL) THEN 'FLAT'
+            WHEN f.slope_method = 'DRIFT'
+                 THEN CASE WHEN ABS(f.use_slope) > f.use_ci THEN 'OK'
+                           ELSE 'LOW_CONFIDENCE' END
             WHEN f.r2 < cfg.r2_gate            THEN 'LOW_CONFIDENCE'
             ELSE 'OK'
        END                                          AS quality,
        n.newest_day,
        CASE WHEN f.last_day >= n.newest_day - cfg.stale_days
-            THEN 'Y' ELSE 'N' END                   AS is_current
-FROM   band f
+            THEN 'Y' ELSE 'N' END                   AS is_current,
+       f.slope_method,
+       f.drift                                      AS drift_slope_per_day,
+       f.drift_sd                                   AS drift_sd_per_day
+FROM   est f
 JOIN   cur c ON c.dbid = f.dbid AND c.con_dbid = f.con_dbid AND c.series = f.series
 JOIN   nd  n ON n.dbid = f.dbid
 CROSS  JOIN cap_cfg cfg;

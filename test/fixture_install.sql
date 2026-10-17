@@ -35,6 +35,14 @@
 --   FIX_DROPPED  : FIX_LINEAR's 10 MiB/day, but its usage rows stop 30 days
 --                  before the end of the spine (a dropped tablespace): it
 --                  still fits (OK) and reads is_current = N.
+--   FIX_CYCLIC   : a 30-day sawtooth (rolling retention): 20 GiB after each
+--                  purge, +2.5 GiB/day for 29 days to a 92.5 GiB peak, then
+--                  a cliff back to 20 GiB, against a 300 GiB maxsize. Cliffs
+--                  on the days i = 5 (mod 30): 3 in the 90-day window, so
+--                  quality CYCLIC, no reset, no days_to_full (flat peaks).
+--   FIX_CYCLIC_UP: the same sawtooth with floor and peak +1 GiB per cycle
+--                  and a maxsize one block under 300 GiB: peak_slope_bpd =
+--                  1 GiB / 30 days and days_to_full off the peak line.
 --   CPU          : two snapshots per day (06:00 = the overnight interval,
 --                  18:00 = the daytime/peak interval) on an SMT host:
 --                  NUM_CPUS 8, NUM_CPU_CORES 4. Weekday 20% night /
@@ -53,6 +61,14 @@
 --                  time-model rows ONLY -- a 7-day 34..46% DB CPU sawtooth
 --                  that steps +18 points for the last 7 days. The M10.3
 --                  level-shift fixture.
+--   PDB2 CPU     : a THIRD container (FIXPDB2, con_dbid 42424244), time-model
+--                  rows only: DB CPU at 60% on weekdays and 20% at weekends
+--                  plus a ramp of 1/12 point a day (+10 over the spine). The
+--                  night interval runs at level - s and the day interval at
+--                  level + s (s = 25 weekdays, 10 weekends), so DB_CPU_P95 =
+--                  level + 0.9 s sits above 80% on weekdays. The weekday /
+--                  weekend deseasoning, slope-significance gate and hot_now
+--                  fixture.
 --   SERIES (M11) : SESSIONS max_utilization = 200 + 2*i against a limit of 500
 --                  -> exactly 2/day growth, days_to_limit (90% of 500) = 5, a
 --                  SERIES_LIMIT CRIT. PROCESSES constant 150 of 300 -> FLAT,
@@ -61,7 +77,7 @@
 --                  REDO_GB_DAY = 2.0 GiB/day, no ceiling, no alert. A second
 --                  ('user commits') stat name is present purely so the
 --                  downstream 'redo size' filter is exercised.
---   CONTAINER    : FIXCDB root row + one synthetic FIXPDB1 row (M7.2 labels).
+--   CONTAINER    : FIXCDB root row + FIXPDB1 and FIXPDB2 rows (M7.2 labels).
 --
 -- Run this BEFORE @install.sql with seam_mode=fixture (the seam views need the
 -- tables to exist), then run test/run_test.sql.
@@ -193,6 +209,20 @@ DECLARE
     v_pcpu   NUMBER := 0;
     v_ptime  NUMBER := 0;
     v_pbg    NUMBER := 0;
+    -- FIX_CYCLIC / FIX_CYCLIC_UP: cliffs on the days i = c_cyc0 (mod 30).
+    -- c_cyc0 = 5 puts 3 cliffs (35, 65, 95) in the 90-day window (31..120),
+    -- the first window day mid-rise (so segment 0 still ends at a peak), the
+    -- last cliff 25 days back (outside the 14-day anomaly alert window), and
+    -- keeps the fixture's DB_SIZE_GB slope positive.
+    c_cyc0   CONSTANT PLS_INTEGER := 5;
+    c_cyclen CONSTANT PLS_INTEGER := 30;
+    c_gb     CONSTANT NUMBER      := 131072;      -- 1 GiB in 8 KiB blocks
+    c_cycmax CONSTANT NUMBER      := 39321600;    -- 300 GiB in 8 KiB blocks
+    -- FIXPDB2: the deseasoning / slope-significance / hot_now container.
+    c_pdb2   CONSTANT NUMBER      := 42424244;    -- = c_con + 2
+    v_qcpu   NUMBER := 0;
+    v_qtime  NUMBER := 0;
+    v_qbg    NUMBER := 0;
 
     FUNCTION dow(p_i PLS_INTEGER) RETURN PLS_INTEGER IS       -- 0=Mon .. 6=Sun
     BEGIN RETURN MOD(TRUNC(v_base + p_i) - DATE '2020-01-06', 7); END;
@@ -235,6 +265,23 @@ DECLARE
         RETURN v;
     END;
 
+    -- FIX_CYCLIC (p_grow 0) / FIX_CYCLIC_UP (p_grow 1) used blocks on day
+    -- p_i: cycle day k = 0 is the post-purge floor, k = 29 the peak. Cycle c
+    -- is -1 before the first cliff, so FIX_CYCLIC_UP's floor is 19 GiB there.
+    FUNCTION cyc_used(p_i PLS_INTEGER, p_grow PLS_INTEGER) RETURN NUMBER IS
+        k PLS_INTEGER := MOD(p_i - c_cyc0 + c_cyclen, c_cyclen);
+        c NUMBER      := FLOOR((p_i - c_cyc0) / c_cyclen);
+    BEGIN
+        RETURN 20 * c_gb + c_gb * 5 / 2 * k + p_grow * c_gb * c;
+    END;
+
+    -- FIXPDB2 daily DB CPU level (percent of the 8 logical CPUs) and the
+    -- half-spread of its two 12 h intervals around it.
+    FUNCTION p2_lvl(p_i PLS_INTEGER) RETURN NUMBER IS
+    BEGIN RETURN CASE WHEN dow(p_i) >= 5 THEN 20 ELSE 60 END + p_i / 12; END;
+    FUNCTION p2_spr(p_i PLS_INTEGER) RETURN NUMBER IS
+    BEGIN RETURN CASE WHEN dow(p_i) >= 5 THEN 10 ELSE 25 END; END;
+
     PROCEDURE osstat(p_snap NUMBER, p_name VARCHAR2, p_val NUMBER) IS
     BEGIN
         INSERT INTO cap_fixture_osstat
@@ -255,6 +302,11 @@ DECLARE
     BEGIN
         INSERT INTO cap_fixture_time_model
         VALUES (c_dbid, c_pdb, c_inst, p_snap, p_name, p_val);
+    END;
+    PROCEDURE qtmodel(p_snap NUMBER, p_name VARCHAR2, p_val NUMBER) IS
+    BEGIN
+        INSERT INTO cap_fixture_time_model
+        VALUES (c_dbid, c_pdb2, c_inst, p_snap, p_name, p_val);
     END;
 BEGIN
     -- Injected Tuesday = the LATEST Tuesday (dow=1) in range, so no later
@@ -295,6 +347,8 @@ BEGIN
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 19, 'FIX_PURGE',    'PERMANENT', c_bs);
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 20, 'FIX_OVERFULL', 'PERMANENT', c_bs);
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 21, 'FIX_DROPPED',  'PERMANENT', c_bs);
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 22, 'FIX_CYCLIC',   'PERMANENT', c_bs);
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 23, 'FIX_CYCLIC_UP','PERMANENT', c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 10, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 11, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 12, c_bs);
@@ -307,6 +361,8 @@ BEGIN
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 19, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 20, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 21, c_bs);
+    INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 22, c_bs);
+    INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 23, c_bs);
 
     -- Container naming (M7.2): the row every fixture series resolves through
     -- (con_dbid = dbid -> label is the db_name alone), plus one synthetic PDB
@@ -314,6 +370,7 @@ BEGIN
     -- DBNAME/PDBNAME label branch of CAPR_CONTAINER.
     INSERT INTO cap_fixture_container VALUES (c_dbid, c_con,     'FIXCDB', 'CDB$ROOT');
     INSERT INTO cap_fixture_container VALUES (c_dbid, c_con + 1, 'FIXCDB', 'FIXPDB1');
+    INSERT INTO cap_fixture_container VALUES (c_dbid, c_pdb2,    'FIXCDB', 'FIXPDB2');
 
     -- ---- per-day series ----
     -- Two snapshots a day: 2000+2i ends 06:00 (covers the night), 2001+2i
@@ -430,6 +487,17 @@ BEGIN
             VALUES (c_dbid, c_con, 2001 + 2 * i, 21, v_used, v_max50g, v_used);
         END IF;
 
+        -- FIX_CYCLIC / FIX_CYCLIC_UP : the rolling-retention sawtooths (see
+        -- cyc_used). FIX_CYCLIC_UP's maxsize is one block under 300 GiB so the
+        -- peak-line division never lands on an exact integer, where FLOOR
+        -- would hang on the last digit of REGR_SLOPE.
+        v_used := cyc_used(i, 0);
+        INSERT INTO cap_fixture_tbspc_usage
+        VALUES (c_dbid, c_con, 2001 + 2 * i, 22, v_used, c_cycmax, v_used);
+        v_used := cyc_used(i, 1);
+        INSERT INTO cap_fixture_tbspc_usage
+        VALUES (c_dbid, c_con, 2001 + 2 * i, 23, v_used, c_cycmax - 1, v_used);
+
         -- FIX_GAP : 60 MiB/day = 7680 blocks/day, but with a 3-day AWR gap
         -- (days 100-102 have NO usage sample). The post-gap day (103) sees a
         -- 4-day, 240 MiB jump; the per-day RATE (60 MiB) must NOT flag. Without
@@ -472,6 +540,7 @@ BEGIN
         IF i = c_restart THEN
             v_busy := 0; v_idle := 0; v_dbcpu := 0; v_dbtime := 0; v_bg := 0;
             v_pcpu := 0; v_ptime := 0; v_pbg := 0;
+            v_qcpu := 0; v_qtime := 0; v_qbg := 0;
         ELSE
             v_busy   := v_busy   + fnight(i) * c_tot_cs / 2;
             v_idle   := v_idle   + (1 - fnight(i)) * c_tot_cs / 2;
@@ -493,10 +562,18 @@ BEGIN
             ptmodel(2000 + 2 * i, 'DB CPU', v_pcpu);
             ptmodel(2000 + 2 * i, 'DB time', v_ptime);
             ptmodel(2000 + 2 * i, 'background cpu time', v_pbg);
+            -- FIXPDB2 night interval: level - spread.
+            v_qcpu   := v_qcpu  + (p2_lvl(i) - p2_spr(i)) * 3456 * 1000000;
+            v_qtime  := v_qtime + (p2_lvl(i) - p2_spr(i)) * 3456 * 1.2 * 1000000;
+            v_qbg    := v_qbg   + 25 * 1000000;
+            qtmodel(2000 + 2 * i, 'DB CPU', v_qcpu);
+            qtmodel(2000 + 2 * i, 'DB time', v_qtime);
+            qtmodel(2000 + 2 * i, 'background cpu time', v_qbg);
         END IF;
         IF i = v_partial THEN
             v_busy := 0; v_idle := 0; v_dbcpu := 0; v_dbtime := 0; v_bg := 0;
             v_pcpu := 0; v_ptime := 0; v_pbg := 0;
+            v_qcpu := 0; v_qtime := 0; v_qbg := 0;
         END IF;
         v_busy   := v_busy   + fday(i) * c_tot_cs / 2;
         v_idle   := v_idle   + (1 - fday(i)) * c_tot_cs / 2;
@@ -518,6 +595,13 @@ BEGIN
         ptmodel(2001 + 2 * i, 'DB CPU', v_pcpu);
         ptmodel(2001 + 2 * i, 'DB time', v_ptime);
         ptmodel(2001 + 2 * i, 'background cpu time', v_pbg);
+        -- FIXPDB2 day interval: level + spread.
+        v_qcpu   := v_qcpu  + (p2_lvl(i) + p2_spr(i)) * 3456 * 1000000;
+        v_qtime  := v_qtime + (p2_lvl(i) + p2_spr(i)) * 3456 * 1.2 * 1000000;
+        v_qbg    := v_qbg   + 25 * 1000000;
+        qtmodel(2001 + 2 * i, 'DB CPU', v_qcpu);
+        qtmodel(2001 + 2 * i, 'DB time', v_qtime);
+        qtmodel(2001 + 2 * i, 'background cpu time', v_qbg);
     END LOOP;
 
     -- ---- expected values / key dates for run_test.sql ----
@@ -790,32 +874,310 @@ BEGIN
         put_counts(120, '_120');       -- 117 / 118 / 120
     END;
 
-    -- ---- anchoring on a CPU series: FIXPDB1 DB_CPU_PCT ------------------
-    -- Its daily value is exactly pdb_pct(i) on every day but the restart day
-    -- (no row) and the partial day (outside the window). The +18 step over
-    -- the last 7 days puts the last point well above the fitted line, so the
-    -- anchored +30 (pdb_pct(c_nd) + slope * 30) and the old fitted-line +30
-    -- differ by several points. OLS in i-space over days 31..120 minus the
-    -- restart day.
+    -- ---- CPU fits: deseasoned OLS, anchor, significance, hot_now --------
+    -- Every CPU closed form below mirrors CAPF_CPU_TREND under the shipped
+    -- knobs (train_days 90, shift_days 7, cpu_sat_pct 80): complete days in
+    -- the window i = c_nd - 89 .. c_nd, OLS in i-space (day_n is i +
+    -- constant, so slopes, residuals and fitted values at a given i are
+    -- shift-invariant), the M9.1 t ~ 1.96 + 2.4/df, and, when deseasoned,
+    -- fval = val - mean(val of the same day type) + mean(val) over the
+    -- window, day type = weekday or Saturday / Sunday. The anchor is the
+    -- MEDIAN of the raw values over the last 7 days (all complete for these
+    -- series).
     DECLARE
-        n PLS_INTEGER := 0;
-        sx NUMBER := 0; sy NUMBER := 0; sxx NUMBER := 0; sxy NUMBER := 0;
-        slope NUMBER; icept NUMBER;
-        v_cur NUMBER := pdb_pct(c_nd);
+        v_x  SYS.ODCINUMBERLIST := SYS.ODCINUMBERLIST();
+        v_y  SYS.ODCINUMBERLIST := SYS.ODCINUMBERLIST();
+        v_a  SYS.ODCINUMBERLIST := SYS.ODCINUMBERLIST();
+        v_slope NUMBER; v_icept NUMBER; v_ci NUMBER; v_r2 NUMBER;
+        v_anchor NUMBER; v_cur NUMBER; v_rslope NUMBER; v_rr2 NUMBER;
+
+        FUNCTION med(p SYS.ODCINUMBERLIST) RETURN NUMBER IS v NUMBER;
+        BEGIN
+            SELECT AVG(x) INTO v
+            FROM   (SELECT column_value AS x,
+                           ROW_NUMBER() OVER (ORDER BY column_value) AS rn,
+                           COUNT(*)     OVER ()                      AS c
+                    FROM   TABLE(p))
+            WHERE  rn IN (FLOOR((c + 1) / 2), CEIL((c + 1) / 2));
+            RETURN v;
+        END;
+
+        PROCEDURE put(p_k VARCHAR2, p_v NUMBER) IS
+        BEGIN INSERT INTO cap_fixture_meta (mkey, nval) VALUES (p_k, p_v); END;
+
+        -- OLS of v_y on v_x (deseasoned when p_ds = 1) -> slope, icept,
+        -- slope CI half-width, R^2.
+        PROCEDURE ols(p_ds PLS_INTEGER, o_slope OUT NUMBER, o_icept OUT NUMBER,
+                      o_ci OUT NUMBER, o_r2 OUT NUMBER) IS
+            n NUMBER := v_x.COUNT;
+            m_all NUMBER := 0; m_we NUMBER := 0; m_wd NUMBER := 0; n_we NUMBER := 0;
+            sx NUMBER := 0; sy NUMBER := 0; sxx NUMBER := 0; sxy NUMBER := 0; syy NUMBER := 0;
+            y NUMBER; bxx NUMBER; bxy NUMBER; byy NUMBER; sse NUMBER;
+        BEGIN
+            FOR k IN 1 .. n LOOP
+                m_all := m_all + v_y(k);
+                IF dow(v_x(k)) >= 5 THEN m_we := m_we + v_y(k); n_we := n_we + 1;
+                ELSE m_wd := m_wd + v_y(k); END IF;
+            END LOOP;
+            m_all := m_all / n;
+            IF n_we > 0 THEN m_we := m_we / n_we; END IF;
+            IF n_we < n THEN m_wd := m_wd / (n - n_we); END IF;
+            FOR k IN 1 .. n LOOP
+                y := v_y(k);
+                IF p_ds = 1 THEN
+                    y := y - CASE WHEN dow(v_x(k)) >= 5 THEN m_we ELSE m_wd END + m_all;
+                END IF;
+                sx := sx + v_x(k); sy := sy + y; sxx := sxx + v_x(k) * v_x(k);
+                sxy := sxy + v_x(k) * y; syy := syy + y * y;
+            END LOOP;
+            bxx := sxx - sx * sx / n; bxy := sxy - sx * sy / n; byy := syy - sy * sy / n;
+            o_slope := bxy / bxx;
+            o_icept := sy / n - o_slope * sx / n;
+            sse     := GREATEST(0, byy - bxy * bxy / bxx);
+            o_ci    := (1.96 + 2.4 / (n - 2)) * SQRT(sse / (n - 2)) / SQRT(bxx);
+            o_r2    := bxy * bxy / (bxx * byy);
+        END;
     BEGIN
+        -- Root BUSY_PCT: complete days skip the restart day and the gap day.
+        -- The day after the gap averages its 36 h + 12 h intervals (four
+        -- half-days). No trend by construction: the injected Tuesday near
+        -- the end is the only lever, and it is not significant.
         FOR i IN c_nd - 89 .. c_nd LOOP
-            IF i <> c_restart THEN
-                n := n + 1; sx := sx + i; sy := sy + pdb_pct(i);
-                sxx := sxx + i * i; sxy := sxy + i * pdb_pct(i);
+            IF i NOT IN (c_restart, v_cpugap) THEN
+                v_x.EXTEND; v_x(v_x.COUNT) := i;
+                v_y.EXTEND;
+                v_y(v_y.COUNT) := CASE WHEN i = v_cpugap + 1
+                                       THEN 100 * (fnight(i - 1) + fday(i - 1) + fnight(i) + fday(i)) / 4
+                                       ELSE 100 * (fnight(i) + fday(i)) / 2 END;
             END IF;
         END LOOP;
-        slope := (sxy - sx * sy / n) / (sxx - sx * sx / n);
-        icept := sy / n - slope * (sx / n);
-        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_DBCPU_TRAIN_N', n);           -- 89
-        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_DBCPU_CUR',     v_cur);
-        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_DBCPU_SLOPE',   slope);
-        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_DBCPU_P30',     v_cur + slope * 30);
-        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_DBCPU_P30_FIT', icept + slope * (c_nd + 30));
+        FOR i IN c_nd - 6 .. c_nd LOOP
+            v_a.EXTEND; v_a(v_a.COUNT) := 100 * (fnight(i) + fday(i)) / 2;
+        END LOOP;
+        ols(1, v_slope, v_icept, v_ci, v_r2);
+        put('ROOT_BUSY_SLOPE',  v_slope);
+        put('ROOT_BUSY_CI',     v_ci);
+        put('ROOT_BUSY_ANCHOR', med(v_a));                                  -- 40
+        put('ROOT_BUSY_P30',    med(v_a) + 30 * v_slope);
+
+        -- FIXPDB1 DB_CPU_PCT: exactly pdb_pct(i) on every complete day (the
+        -- restart day has no row). The +18 step over the last 7 days makes
+        -- the anchor 58 and the deseasoned slope significant.
+        v_x.DELETE; v_y.DELETE; v_a.DELETE;
+        FOR i IN c_nd - 89 .. c_nd LOOP
+            IF i <> c_restart THEN
+                v_x.EXTEND; v_x(v_x.COUNT) := i;
+                v_y.EXTEND; v_y(v_y.COUNT) := pdb_pct(i);
+            END IF;
+        END LOOP;
+        FOR i IN c_nd - 6 .. c_nd LOOP
+            v_a.EXTEND; v_a(v_a.COUNT) := pdb_pct(i);
+        END LOOP;
+        v_cur    := pdb_pct(c_nd);
+        v_anchor := med(v_a);
+        ols(0, v_rslope, v_icept, v_ci, v_rr2);       -- raw (legacy) fit first
+        put('PDB_DBCPU_SLOPE_RAW', v_rslope);
+        put('PDB_DBCPU_R2_RAW',    v_rr2);
+        ols(1, v_slope, v_icept, v_ci, v_r2);
+        put('PDB_DBCPU_TRAIN_N',   v_x.COUNT);                               -- 89
+        put('PDB_DBCPU_CUR',       v_cur);
+        put('PDB_DBCPU_ANCHOR',    v_anchor);                                -- 58
+        put('PDB_DBCPU_SLOPE',     v_slope);
+        put('PDB_DBCPU_CI',        v_ci);
+        put('PDB_DBCPU_P30',       v_anchor + v_slope * 30);
+        put('PDB_DBCPU_P30_FIT',   v_icept + v_slope * (c_nd + 30));
+        put('PDB_DBCPU_P30_RAW',   v_anchor + v_rslope * 30);
+        put('PDB_DBCPU_DTS',       FLOOR((80 - v_anchor) / v_slope));
+
+        -- FIXPDB2 DB_CPU_PCT = p2_lvl(i): a weekly two-level pattern plus a
+        -- 1/12 point/day ramp. Deseasoned, only the ramp (and a tiny
+        -- day-type offset from the window's uneven weekday positions) is
+        -- left, so the fit is significant. Raw, R^2 stays near 0.
+        v_x.DELETE; v_y.DELETE; v_a.DELETE;
+        FOR i IN c_nd - 89 .. c_nd LOOP
+            IF i <> c_restart THEN
+                v_x.EXTEND; v_x(v_x.COUNT) := i;
+                v_y.EXTEND; v_y(v_y.COUNT) := p2_lvl(i);
+            END IF;
+        END LOOP;
+        FOR i IN c_nd - 6 .. c_nd LOOP
+            v_a.EXTEND; v_a(v_a.COUNT) := p2_lvl(i);
+        END LOOP;
+        v_anchor := med(v_a);
+        ols(0, v_rslope, v_icept, v_ci, v_rr2);
+        put('PDB2_PCT_SLOPE_RAW', v_rslope);
+        put('PDB2_PCT_R2_RAW',    v_rr2);
+        ols(1, v_slope, v_icept, v_ci, v_r2);
+        put('PDB2_CON_DBID',      c_pdb2);
+        put('PDB2_TRAIN_N',       v_x.COUNT);
+        put('PDB2_PCT_SLOPE',     v_slope);
+        put('PDB2_PCT_CI',        v_ci);
+        put('PDB2_PCT_R2',        v_r2);
+        put('PDB2_PCT_ANCHOR',    v_anchor);
+        put('PDB2_PCT_P30',       v_anchor + v_slope * 30);
+        put('PDB2_PCT_DTS',       FLOOR((80 - v_anchor) / v_slope));
+        -- DB_CPU_P95 = PERCENTILE_CONT(.95) of {level - s, level + s} =
+        -- level + 0.9 s: about 92 on the last weekdays, so hot now.
+        v_a.DELETE;
+        FOR i IN c_nd - 6 .. c_nd LOOP
+            v_a.EXTEND; v_a(v_a.COUNT) := p2_lvl(i) + 0.9 * p2_spr(i);
+        END LOOP;
+        put('PDB2_P95_RECENT_MED', med(v_a));
+    END;
+
+    -- ---- CYCLIC expectations (FIX_CYCLIC / FIX_CYCLIC_UP) ---------------
+    -- Walked over the forecast window (i = c_nd - 89 .. c_nd) straight from
+    -- cyc_used: a cliff is a day whose usage falls (the sawtooth's only
+    -- negative steps, 72.5 / 71.5 GiB, far past the 100 MiB floor with a
+    -- zero MAD). Each cliff closes a segment, whose maximum is a cycle peak.
+    DECLARE
+        n_cl NUMBER; n_pk NUMBER; seg_max NUMBER; seg_day NUMBER; w_max NUMBER;
+        sx NUMBER; sy NUMBER; sxx NUMBER; sxy NUMBER;
+        lpk NUMBER; lpkd NUMBER; slope NUMBER; lim NUMBER; lcl NUMBER;
+        ccur NUMBER;               -- cyc_used(c_nd, g): not callable inside SQL
+    BEGIN
+        FOR g IN 0 .. 1 LOOP
+            n_cl := 0; n_pk := 0; seg_max := NULL; w_max := 0;
+            sx := 0; sy := 0; sxx := 0; sxy := 0;
+            FOR i IN c_nd - 89 .. c_nd LOOP
+                IF cyc_used(i, g) < cyc_used(i - 1, g) THEN
+                    IF seg_max IS NOT NULL THEN
+                        n_pk := n_pk + 1;
+                        sx := sx + seg_day; sy := sy + seg_max;
+                        sxx := sxx + seg_day * seg_day; sxy := sxy + seg_day * seg_max;
+                        lpk := seg_max; lpkd := seg_day;
+                    END IF;
+                    n_cl := n_cl + 1;
+                    lcl  := i;
+                    seg_max := NULL;
+                END IF;
+                IF seg_max IS NULL OR cyc_used(i, g) >= seg_max THEN
+                    seg_max := cyc_used(i, g); seg_day := i;
+                END IF;
+                w_max := GREATEST(w_max, cyc_used(i, g));
+            END LOOP;
+            slope := (sxy - sx * sy / n_pk) / (sxx - sx * sx / n_pk) * c_bs;
+            ccur  := cyc_used(c_nd, g) * c_bs;
+            lim   := (c_cycmax - g) * c_bs;
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CYC' || g || '_N',     n_cl);     -- 3
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CYC' || g || '_NPK',   n_pk);     -- 3
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CYC' || g || '_DAYS',  c_cyclen); -- 30
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CYC' || g || '_PEAK',  w_max * c_bs);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CYC' || g || '_PCT',
+                ROUND(100 * w_max * c_bs / lim, 1));                                          -- 30.8 / 31.5
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CYC' || g || '_CUR',   ccur);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CYC' || g || '_PSLOPE', slope); -- 0 / 1 GiB / 30
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CYC' || g || '_DTF',
+                CASE WHEN slope > 0
+                     THEN GREATEST(0, FLOOR((lim - lpk * c_bs) / slope - (c_nd - lpkd))) END);
+            -- With the grade off (cyclic_min_cliffs = 0) the M9.3 reset
+            -- restarts at the last cliff: the window is the current rise,
+            -- exactly 2.5 GiB/day, and days_to_full counts along it.
+            INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('CYC' || g || '_LAST_CLIFF', v_base + lcl, lcl);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CYC' || g || '_RISE', c_gb * 5 / 2 * c_bs);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CYC' || g || '_LEGACY_N', c_nd - lcl + 1);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CYC' || g || '_LEGACY_DTF',
+                FLOOR((lim - ccur) / (c_gb * 5 / 2 * c_bs)));
+        END LOOP;
+    END;
+
+    -- ---- DRIFT expectations (slope_method = 2) ---------------------------
+    -- The rates of a window are its day-over-day steps, all one day apart
+    -- for these series. slope = MEDIAN (the mean of the two middle values
+    -- for an even count), sd = sample standard deviation, se = sd /
+    -- SQRT(n_rates), t = 1.96 + 2.4 / (n_rates - 1), CI = t * se, half_30 =
+    -- t * (sd * SQRT(30) + 30 * se). Windows: the forecast window i = 31 ..
+    -- 120 (89 rates, from day 32), FIX_PURGE's post-reset window 90 .. 120
+    -- (30 rates, the cliff day has no rate). The backtest twins use the
+    -- training window i = 3 .. 92 and score i = 93 .. 120.
+    DECLARE
+        v_r  SYS.ODCINUMBERLIST := SYS.ODCINUMBERLIST();
+        FUNCTION val(p_k VARCHAR2, p_i PLS_INTEGER) RETURN NUMBER IS
+        BEGIN
+            RETURN c_bs * CASE p_k
+                WHEN 'LINEAR' THEN 1280 * p_i + 12800
+                WHEN 'SPIKE'  THEN 640 * p_i + 6400 + CASE WHEN p_i >= c_spike THEN 262144 ELSE 0 END
+                WHEN 'ZIGZAG' THEN 12800 + 1280 * p_i + CASE WHEN MOD(p_i, 2) = 0 THEN 2560 ELSE -2560 END
+                WHEN 'PURGE'  THEN 1280 * p_i + 12800 - CASE WHEN p_i >= c_purge THEN c_purgeb ELSE 0 END
+            END;
+        END;
+        FUNCTION med RETURN NUMBER IS v NUMBER;
+        BEGIN
+            SELECT AVG(x) INTO v
+            FROM   (SELECT column_value AS x,
+                           ROW_NUMBER() OVER (ORDER BY column_value) AS rn,
+                           COUNT(*)     OVER ()                      AS c
+                    FROM   TABLE(v_r))
+            WHERE  rn IN (FLOOR((c + 1) / 2), CEIL((c + 1) / 2));
+            RETURN v;
+        END;
+        PROCEDURE drift(p_k VARCHAR2, p_from PLS_INTEGER) IS
+            n NUMBER; m NUMBER; s1 NUMBER := 0; s2 NUMBER := 0; sd NUMBER;
+            se NUMBER; t NUMBER; ci NUMBER; half NUMBER; cur NUMBER; hr NUMBER;
+        BEGIN
+            v_r.DELETE;
+            FOR i IN p_from + 1 .. c_nd LOOP
+                v_r.EXTEND; v_r(v_r.COUNT) := val(p_k, i) - val(p_k, i - 1);
+                s1 := s1 + v_r(v_r.COUNT);
+            END LOOP;
+            n  := v_r.COUNT;
+            m  := med;
+            FOR k IN 1 .. n LOOP s2 := s2 + POWER(v_r(k) - s1 / n, 2); END LOOP;
+            sd   := SQRT(s2 / (n - 1));
+            se   := sd / SQRT(n);
+            t    := 1.96 + 2.4 / (n - 1);
+            ci   := t * se;
+            half := t * (sd * SQRT(30) + 30 * se);
+            cur  := val(p_k, c_nd);
+            hr   := c_50g - cur;
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DR_' || p_k || '_N',      n);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DR_' || p_k || '_SLOPE',  m);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DR_' || p_k || '_SD',     sd);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DR_' || p_k || '_CI',     ci);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DR_' || p_k || '_P30',    cur + m * 30);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DR_' || p_k || '_P30_LO', cur + m * 30 - half);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DR_' || p_k || '_P30_HI', cur + m * 30 + half);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DR_' || p_k || '_DTF',    FLOOR(hr / m));
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DR_' || p_k || '_DTF_LO', FLOOR(hr / (m + ci)));
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DR_' || p_k || '_DTF_HI',
+                CASE WHEN m - ci > 0 THEN FLOOR(hr / (m - ci)) END);
+            INSERT INTO cap_fixture_meta (mkey, sval) VALUES ('DR_' || p_k || '_Q',
+                CASE WHEN m = 0 THEN 'FLAT' WHEN ABS(m) > ci THEN 'OK' ELSE 'LOW_CONFIDENCE' END);
+        END;
+        -- Backtest replay of FIX_ZIGZAG with slope p_slope, anchored at the
+        -- cutoff day's actual (i = 92).
+        PROCEDURE bt(p_tag VARCHAR2, p_slope NUMBER) IS
+            mape NUMBER := 0; bias NUMBER := 0; y NUMBER; pred NUMBER;
+        BEGIN
+            FOR i IN 93 .. 120 LOOP
+                y    := val('ZIGZAG', i);
+                pred := val('ZIGZAG', 92) + p_slope * (i - 92);
+                mape := mape + ABS(pred - y) / y;
+                bias := bias + (pred - y) / y;
+            END LOOP;
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_BT_' || p_tag || '_SLOPE', p_slope);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_BT_' || p_tag || '_MAPE', mape / 28 * 100);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_BT_' || p_tag || '_BIAS', bias / 28 * 100);
+        END;
+    BEGIN
+        drift('LINEAR', c_nd - 89);
+        drift('SPIKE',  c_nd - 89);
+        drift('ZIGZAG', c_nd - 89);
+        drift('PURGE',  c_purge);
+        -- Backtest DRIFT: median of the rates of i = 4 .. 92.
+        v_r.DELETE;
+        FOR i IN 4 .. 92 LOOP
+            v_r.EXTEND; v_r(v_r.COUNT) := val('ZIGZAG', i) - val('ZIGZAG', i - 1);
+        END LOOP;
+        bt('DR', med);
+        -- Backtest THEILSEN: median of the 4005 pairwise slopes of i = 3 .. 92.
+        v_r.DELETE;
+        FOR i IN 3 .. 91 LOOP
+            FOR j IN i + 1 .. 92 LOOP
+                v_r.EXTEND; v_r(v_r.COUNT) := (val('ZIGZAG', j) - val('ZIGZAG', i)) / (j - i);
+            END LOOP;
+        END LOOP;
+        bt('TS', med);
     END;
     COMMIT;
 

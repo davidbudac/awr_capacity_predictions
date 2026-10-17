@@ -419,6 +419,11 @@ WHERE  e.step_days = e.esm_horizon_days
 --                 Like the live CAPF_* projections it is anchored at the
 --                 last training day's actual value:
 --                 pred = anchor_val + slope * (day_n - anchor_day_n).
+--                 The slope follows slope_method, as the live fits do: OLS
+--                 (0), Theil-Sen over the window's pairs (1), or DRIFT, the
+--                 median day-over-day rate of the window (2). slope_method
+--                 says which one a row used, so the estimators can be
+--                 compared by flipping the knob. No CPU deseasoning here.
 --   engine ESM  : rows appear after EXEC cap_forecast_ml.train_backtest
 --                 (or train_all, which refreshes the twins of the series it
 --                 trains), which trains purpose=BACKTEST models through the
@@ -458,18 +463,58 @@ WITH act AS (
                                    a.series_kind, a.series_key) AS last_day
         FROM   act a
      ),
-     fit AS (
-        SELECT b.dbid, b.con_dbid, b.series_kind, b.series_key,
-               MAX(b.last_day) - cfg.backtest_holdout_days AS cutoff_day,
-               cfg.backtest_holdout_days                   AS holdout_days,
-               REGR_SLOPE(b.val, b.day_n)                  AS slope,
-               REGR_COUNT(b.val, b.day_n)                  AS n_train,
-               MAX(b.val) KEEP (DENSE_RANK LAST ORDER BY b.day_n) AS anchor_val,
-               MAX(b.day_n)                                AS anchor_day_n
+     -- The training window: the train_days days ending at the cutoff.
+     tw AS (
+        SELECT b.*,
+               b.last_day - cfg.backtest_holdout_days AS cutoff_day,
+               cfg.backtest_holdout_days              AS holdout_days,
+               (b.val - LAG(b.val) OVER (PARTITION BY b.dbid, b.con_dbid, b.series_kind, b.series_key
+                                         ORDER BY b.day_n))
+             / (b.day_n - LAG(b.day_n) OVER (PARTITION BY b.dbid, b.con_dbid, b.series_kind, b.series_key
+                                             ORDER BY b.day_n)) AS rate
         FROM   b CROSS JOIN cap_cfg cfg
         WHERE  b.day_dt <= b.last_day - cfg.backtest_holdout_days
           AND  b.day_dt >  b.last_day - cfg.backtest_holdout_days - cfg.train_days
-        GROUP  BY b.dbid, b.con_dbid, b.series_kind, b.series_key, cfg.backtest_holdout_days
+     ),
+     ols AS (
+        SELECT tw.dbid, tw.con_dbid, tw.series_kind, tw.series_key,
+               MAX(tw.cutoff_day)                          AS cutoff_day,
+               MAX(tw.holdout_days)                        AS holdout_days,
+               REGR_SLOPE(tw.val, tw.day_n)                AS slope,
+               REGR_COUNT(tw.val, tw.day_n)                AS n_train,
+               MEDIAN(tw.rate)                             AS drift,
+               MAX(tw.val) KEEP (DENSE_RANK LAST ORDER BY tw.day_n) AS anchor_val,
+               MAX(tw.day_n)                               AS anchor_day_n
+        FROM   tw
+        GROUP  BY tw.dbid, tw.con_dbid, tw.series_kind, tw.series_key
+     ),
+     -- Theil-Sen pairs, only when slope_method = 1 (as in ddl/30).
+     tws AS (
+        SELECT tw.* FROM tw CROSS JOIN cap_cfg cfg
+        WHERE  cfg.slope_method = 1
+     ),
+     tss AS (
+        SELECT i.dbid, i.con_dbid, i.series_kind, i.series_key,
+               MEDIAN((j.val - i.val) / (j.day_n - i.day_n)) AS ts_slope
+        FROM   tws i
+        JOIN   tws j ON j.dbid = i.dbid AND j.con_dbid = i.con_dbid
+                    AND j.series_kind = i.series_kind AND j.series_key = i.series_key
+                    AND j.day_n > i.day_n
+        GROUP  BY i.dbid, i.con_dbid, i.series_kind, i.series_key
+     ),
+     fit AS (
+        SELECT q.*,
+               CASE q.slope_method WHEN 'THEILSEN' THEN q.ts_slope
+                                   WHEN 'DRIFT'    THEN q.drift
+                                   ELSE q.slope END AS use_slope
+        FROM  (SELECT o.*, s.ts_slope,
+                      CASE WHEN cfg.slope_method = 1 AND s.ts_slope IS NOT NULL THEN 'THEILSEN'
+                           WHEN cfg.slope_method = 2 AND o.drift    IS NOT NULL THEN 'DRIFT'
+                           ELSE 'OLS' END AS slope_method
+               FROM   ols o
+               LEFT   JOIN tss s ON s.dbid = o.dbid AND s.con_dbid = o.con_dbid
+                                AND s.series_kind = o.series_kind AND s.series_key = o.series_key
+               CROSS  JOIN cap_cfg cfg) q
      )
 -- ---- REGR: score the truncated linear fit over the holdout actuals ----
 SELECT h.dbid, h.con_dbid, h.series_kind, h.series_key,
@@ -478,19 +523,20 @@ SELECT h.dbid, h.con_dbid, h.series_kind, h.series_key,
        f.holdout_days,
        f.n_train,
        COUNT(*)                                      AS n_days,
-       AVG(ABS(f.anchor_val + f.slope * (h.day_n - f.anchor_day_n) - h.val)
+       AVG(ABS(f.anchor_val + f.use_slope * (h.day_n - f.anchor_day_n) - h.val)
            / NULLIF(ABS(h.val), 0)) * 100            AS mape_pct,
-       AVG((f.anchor_val + f.slope * (h.day_n - f.anchor_day_n) - h.val)
+       AVG((f.anchor_val + f.use_slope * (h.day_n - f.anchor_day_n) - h.val)
            / NULLIF(ABS(h.val), 0)) * 100            AS bias_pct,
-       CAST(NULL AS VARCHAR2(20))                    AS model_type
+       CAST(NULL AS VARCHAR2(20))                    AS model_type,
+       f.slope_method
 FROM   b h
 JOIN   fit f
   ON   f.dbid = h.dbid AND f.con_dbid = h.con_dbid
  AND   f.series_kind = h.series_kind AND f.series_key = h.series_key
 WHERE  h.day_dt > f.cutoff_day
-  AND  f.slope IS NOT NULL
+  AND  f.use_slope IS NOT NULL
 GROUP  BY h.dbid, h.con_dbid, h.series_kind, h.series_key,
-          f.cutoff_day, f.holdout_days, f.n_train
+          f.cutoff_day, f.holdout_days, f.n_train, f.slope_method
 UNION ALL
 -- ---- ESM: the SELECTED candidate's holdout score (M9.4 / M10.4) ----
 -- CAPF_ESM_CANDIDATE already did the per-twin scoring; the pick is the twin
@@ -504,7 +550,8 @@ SELECT c.dbid, c.con_dbid, c.series_kind, c.series_key,
        c.n_days,
        c.mape_pct,
        c.bias_pct,
-       c.model_type
+       c.model_type,
+       CAST(NULL AS VARCHAR2(8))                     AS slope_method
 FROM   (SELECT cc.*,
                ROW_NUMBER() OVER (PARTITION BY cc.dbid, cc.con_dbid,
                                                cc.series_kind, cc.series_key

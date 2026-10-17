@@ -311,7 +311,9 @@ LEFT   JOIN capr_container c
 -- GiB / MiB-per-day conversions are numeric columns (not strings) so a
 -- consumer can still compare and threshold them.
 -- limit_below_used / is_current pass straight through from
--- CAPF_TBSPC_FORECAST ('Y'/'N'); nothing here filters on them.
+-- CAPF_TBSPC_FORECAST ('Y'/'N'); nothing here filters on them. So do the
+-- CYCLIC columns (cycle_n always, the rest only on CYCLIC rows), with the
+-- peak in GiB and the peak slope in MiB/day like cur_gb / slope_mb.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_tbspc_days_to_full AS
 SELECT f.dbid,
@@ -340,7 +342,12 @@ SELECT f.dbid,
        ROW_NUMBER() OVER (ORDER BY f.pct_used DESC NULLS LAST,
                                    f.con_dbid, f.tablespace_name)  AS rank_nearfull,
        f.limit_below_used,
-       f.is_current
+       f.is_current,
+       f.cycle_n,
+       f.cycle_days,
+       f.cycle_peak_bytes / 1024 / 1024 / 1024 AS cycle_peak_gb,
+       f.cycle_peak_pct,
+       f.peak_slope_bpd   / 1024 / 1024        AS peak_slope_mb
 FROM   capf_tbspc_forecast f
 CROSS  JOIN cap_cfg cfg
 LEFT   JOIN capr_container c
@@ -383,7 +390,9 @@ WHERE  a.anomaly_flag IS NOT NULL;
 -- CAPR_CPU_TREND -- report section 4. One row per (container, metric):
 -- BUSY_PCT / BUSY_P95 / BUSY_PEAK / DB_CPU_SEC / DB_CPU_PCT / DB_CPU_P95.
 -- sat_worst / sat_best are the M9.1 days-to-saturation range (lo = worst
--- case / soonest; hi NULL = might never saturate).
+-- case / soonest; hi NULL = might never saturate). slope_sig, deseasoned,
+-- anchor_value, recent_p95_med and hot_now pass straight through from
+-- CAPF_CPU_TREND (recent_p95_med / hot_now on BUSY_P95 and DB_CPU_P95 only).
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_cpu_trend AS
 SELECT t.dbid,
@@ -399,7 +408,12 @@ SELECT t.dbid,
        t.days_to_sat_lo                    AS sat_worst,
        t.days_to_sat_hi                    AS sat_best,
        t.quality,
-       t.is_current
+       t.is_current,
+       t.slope_sig,
+       t.deseasoned,
+       t.anchor_value,
+       t.recent_p95_med,
+       t.hot_now
 FROM   capf_cpu_trend t
 LEFT   JOIN capr_container c
   ON   c.dbid = t.dbid AND c.con_dbid = t.con_dbid;
@@ -661,7 +675,10 @@ LEFT   JOIN capr_container c
 -- limit_value is the saturation threshold (cpu_sat_pct), not 100.
 -- is_current (every kind) and limit_below_used (TBSPC only, NULL for CPU and
 -- SERIES) are the CAPF_ 'Y'/'N' flags as NUMBER 1/0, appended last so the
--- explicit column lists of the existing consumers keep working.
+-- explicit column lists of the existing consumers keep working. After them,
+-- the same way: the TBSPC CYCLIC columns (cycle_n, cycle_days,
+-- cycle_peak_pct, peak_slope_per_day in bytes/day), and the CPU flags
+-- slope_sig (every CPU row) and hot_now (BUSY_P95 / DB_CPU_P95 only) as 1/0.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_fit AS
 SELECT f.dbid,
@@ -689,7 +706,13 @@ SELECT f.dbid,
        f.limit_source,
        f.last_day,
        f.is_current,
-       f.limit_below_used
+       f.limit_below_used,
+       f.cycle_n,
+       f.cycle_days,
+       f.cycle_peak_pct,
+       f.peak_slope_per_day,
+       f.slope_sig,
+       f.hot_now
 FROM  (
         SELECT t.dbid, t.con_dbid, 'TBSPC' AS kind, t.tablespace_name AS series,
                'bytes' AS unit, t.slope_method AS method,
@@ -702,7 +725,11 @@ FROM  (
                     ELSE 'OK' END AS sev,
                t.limit_source, t.last_day,
                CASE t.is_current WHEN 'Y' THEN 1 ELSE 0 END       AS is_current,
-               CASE t.limit_below_used WHEN 'Y' THEN 1 ELSE 0 END AS limit_below_used
+               CASE t.limit_below_used WHEN 'Y' THEN 1 ELSE 0 END AS limit_below_used,
+               t.cycle_n, t.cycle_days, t.cycle_peak_pct,
+               t.peak_slope_bpd                                   AS peak_slope_per_day,
+               CAST(NULL AS NUMBER)                               AS slope_sig,
+               CAST(NULL AS NUMBER)                               AS hot_now
         FROM   capf_tbspc_forecast t
         LEFT   JOIN capr_tbspc_days_to_full r
           ON   r.dbid = t.dbid AND r.con_dbid = t.con_dbid
@@ -718,7 +745,10 @@ FROM  (
                NULL, t.train_n,
                CASE al.sev_rank WHEN 1 THEN 'CRIT' WHEN 2 THEN 'WARN' ELSE 'OK' END,
                NULL, t.last_day,
-               CASE t.is_current WHEN 'Y' THEN 1 ELSE 0 END, NULL
+               CASE t.is_current WHEN 'Y' THEN 1 ELSE 0 END, NULL,
+               NULL, NULL, NULL, NULL,
+               CASE t.slope_sig WHEN 'Y' THEN 1 ELSE 0 END,
+               CASE t.hot_now WHEN 'Y' THEN 1 WHEN 'N' THEN 0 END
         FROM   capf_cpu_trend t
         CROSS  JOIN cap_cfg cfg
         LEFT   JOIN (SELECT dbid, con_dbid, series_key, MIN(sev_rank) AS sev_rank
@@ -735,7 +765,8 @@ FROM  (
                NULL, t.train_n,
                NVL(UPPER(r.sev), 'OK'),
                NULL, t.last_day,
-               CASE t.is_current WHEN 'Y' THEN 1 ELSE 0 END, NULL
+               CASE t.is_current WHEN 'Y' THEN 1 ELSE 0 END, NULL,
+               NULL, NULL, NULL, NULL, NULL, NULL
         FROM   capf_series_forecast t
         LEFT   JOIN capr_series r
           ON   r.dbid = t.dbid AND r.con_dbid = t.con_dbid AND r.series = t.series

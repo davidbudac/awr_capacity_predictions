@@ -266,7 +266,8 @@ BEGIN
     SELECT COUNT(*) INTO v_n  FROM capf_esm_health;
     SELECT COUNT(*) INTO v_n2 FROM cap_ml_model;
     chk_num('CAPF_ESM_HEALTH lists every registry model', v_n, v_n2);
-    -- eligible = the train_tablespaces gate (8 on the fixture: 11 minus FLAT, NEARFULL, OVERFULL)
+    -- eligible = the train_tablespaces gate (8 on the fixture: 13 minus FLAT, NEARFULL,
+    -- OVERFULL and the two CYCLIC sawtooths)
     SELECT COUNT(*) INTO v_n2 FROM capf_tbspc_forecast
     WHERE  quality IN ('OK', 'LOW_CONFIDENCE') AND train_n >= v_min;
     SELECT NVL(SUM(n_ok), 0), NVL(SUM(n_failed), 0), NVL(SUM(n_stale), 0)
@@ -283,7 +284,7 @@ BEGIN
     ------------------------------------------------------------------
     -- train_all refreshes the CPU backtest twins of the CPU series it trains,
     -- so CAPF_BACKTEST scores both engines over the same holdout. Eligible CPU
-    -- series on the fixture: BUSY_PCT (root) + DB_CPU_SEC (root, FIXPDB1) = 3,
+    -- series on the fixture: BUSY_PCT (root) + DB_CPU_SEC (root, FIXPDB1, FIXPDB2) = 4,
     -- each twin trained through LAST_DAY - backtest_holdout_days.
     ------------------------------------------------------------------
     DBMS_OUTPUT.PUT_LINE('=== train_all: CPU models + CPU backtest twins ===');

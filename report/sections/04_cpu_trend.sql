@@ -10,6 +10,19 @@ PROMPT    DB_CPU_PCT / DB_CPU_P95 = this container's DB CPU as % of host core ca
 PROMPT    DAYS_SAT = projected days until the metric reaches &cpu_sat% (all but DB_CPU_SEC).
 PROMPT    WORST/BEST: days-to-saturation range from the 95% CI on the slope
 PROMPT    (BEST empty = might never saturate).
+PROMPT    ANCHOR = median of the last shift_days complete days, where projections and
+PROMPT    DAYS_SAT start. SIG = Y when the slope is outside its own 95% CI. HOT = Y when
+PROMPT    the busy-hour metric (BUSY_P95 / DB_CPU_P95) is at or above &cpu_sat% now.
+
+COLUMN trend_cfg  FORMAT A110         HEADING 'TREND SETTINGS'
+SELECT CASE WHEN cpu_deseason = 1
+            THEN 'fit on weekday / weekend demeaned values (cpu_deseason = 1)'
+            ELSE 'fit on raw daily values (cpu_deseason = 0)' END
+       || '; OK = '
+       || CASE WHEN cpu_quality_gate = 1
+               THEN 'slope significant (cpu_quality_gate = 1)'
+               ELSE 'R2 >= ' || TO_CHAR(r2_gate, 'FM0.00') || ' (cpu_quality_gate = 0)' END AS trend_cfg
+FROM   cap_cfg;
 
 COLUMN db_pdb     FORMAT A20          HEADING 'DB/PDB'
 COLUMN metric     FORMAT A12          HEADING 'METRIC'
@@ -21,6 +34,9 @@ COLUMN days_sat   FORMAT 99999990      HEADING 'DAYS_SAT'
 COLUMN sat_worst  FORMAT 99999990      HEADING 'WORST'
 COLUMN sat_best   FORMAT 99999990      HEADING 'BEST'
 COLUMN quality    FORMAT A20           HEADING 'QUALITY'
+COLUMN anchor     FORMAT 99999990.00  HEADING 'ANCHOR'
+COLUMN sig        FORMAT A3            HEADING 'SIG'
+COLUMN hot        FORMAT A3            HEADING 'HOT'
 
 SELECT db_pdb,
        metric,
@@ -31,6 +47,9 @@ SELECT db_pdb,
        days_to_sat   AS days_sat,
        sat_worst,
        sat_best,
-       quality
+       quality,
+       anchor_value  AS anchor,
+       slope_sig     AS sig,
+       hot_now       AS hot
 FROM   capr_cpu_trend
 ORDER  BY con_dbid, metric;

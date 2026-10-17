@@ -16,8 +16,10 @@
 --   AUDIT_TRAIL      growth tripled 32 days ago (a compliance-logging
 --                    release) and it is about to hit its maxsize -> CRIT,
 --                    with the recent-window acceleration ratio showing why.
---   SESSION_STORE    a 30-day purge cycle (sawtooth). The change-point reset
---                    fits only the post-purge leg instead of the cliff.
+--   SESSION_STORE    a 30-day purge cycle (sawtooth, 20 -> 92.5 GiB of 300).
+--                    Three cliffs in the 90-day window grade it CYCLIC:
+--                    judged on its flat peaks (30.8% of the limit), so no
+--                    days-to-full and no TBSPC_FULL, every day of the cycle.
 --   CUSTOMER_DATA    95% full RIGHT NOW but barely growing -> near-full
 --                    warning, no days-to-full panic.
 --   PRODUCT_CATALOG  flat, no autoextend -> FLAT, nothing to say.

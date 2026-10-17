@@ -82,7 +82,7 @@ USING (
     UNION ALL SELECT 'backtest_holdout_days',28,        'Holdout window (days) CAPF_BACKTEST fits before and scores against; <=30 lets ESM cover it on 19c.'    FROM dual
     UNION ALL SELECT 'report_min_gb',         1,        'Report sections 2/6a print a tablespace only if it is growing, near-full, or at least this many GiB used.' FROM dual
     UNION ALL SELECT 'accel_slope_floor_bpd', 1048576,  'Minimum |slope| (bytes/day, default 1 MiB) before accel_ratio is computed; below it a near-flat series gets NULL.' FROM dual
-    UNION ALL SELECT 'slope_method',           0,        'M9.2 slope estimator for the CAPF_* fits. NUMERIC ENCODING: 0 = OLS (REGR_SLOPE, default), 1 = THEILSEN (median pairwise slope, robust to steps).' FROM dual
+    UNION ALL SELECT 'slope_method',           0,        'Slope estimator for the CAPF_* fits. NUMERIC ENCODING: 0 = OLS (REGR_SLOPE, default), 1 = THEILSEN (median pairwise slope), 2 = DRIFT (median day-over-day rate, random-walk bands).' FROM dual
     UNION ALL SELECT 'reset_on_shrink',        1,        'M9.3: 1 = restart a tablespace training window at the most recent large negative used_bytes step (post-purge fit); 0 = fit across the cliff.' FROM dual
     UNION ALL SELECT 'shrink_mad_k',           6,        'M9.3 MAD multiplier: a daily delta below -GREATEST(k*MAD_sigma of the window deltas, abs_floor_bytes) is a shrink change-point.' FROM dual
     UNION ALL SELECT 'cpu_gap_hours',          12,       'M10.5: a snapshot interval LONGER than this many hours is an AWR gap/downtime. Its day gets gap_flag=Y, is skipped by the CPU anomaly + shift baselines, and is left out of busy_p95/max/peak.' FROM dual
@@ -93,6 +93,9 @@ USING (
     UNION ALL SELECT 'esm_max_age_days',        7,        'Tier 2: an ESM model trained more than this many days before its series'' last day is stale; CAPF_COMPARE drops it.' FROM dual
     UNION ALL SELECT 'esm_auto_tie_pct',        0.25,     'Tier 2 AUTO: candidate MAPEs closer than this many percentage points tie and EXSM_HOLT is kept (chosen_by AUTO_TIE).' FROM dual
     UNION ALL SELECT 'complete_day_pct',       80,        'Percent of a day (86400 s) of valid counter intervals a CPU / DB time / redo day needs for is_complete = Y. Partial, restart and outage days fall below it.' FROM dual
+    UNION ALL SELECT 'cyclic_min_cliffs',       2,        'A tablespace with at least this many shrink cliffs (the M9.3 rule) in its train_days window is graded CYCLIC and judged on its peaks. 0 = off (M9.3 reset only).' FROM dual
+    UNION ALL SELECT 'cpu_quality_gate',        1,        'CAPF_CPU_TREND quality gate: 1 = OK when |slope| > slope CI (slope significance), 0 = legacy R2 >= r2_gate.' FROM dual
+    UNION ALL SELECT 'cpu_deseason',            1,        'CAPF_CPU_TREND: 1 = subtract the weekday / weekend mean (and add back the window mean) before the fit, 0 = fit the raw daily values.' FROM dual
     UNION ALL SELECT 'stale_days',              3,        'A CAPF_* series whose last_day is more than this many days before the newest day of its daily source (same dbid) reads is_current = N: dropped tablespace, retired DBID, stopped collection.' FROM dual
     UNION ALL SELECT 'suite_version',          13,        'Suite release that built these objects (latest PLAN.md milestone). Set by every install; not a tuning knob.' FROM dual
 ) s
@@ -157,6 +160,9 @@ SELECT MAX(CASE WHEN cfg_name = 'train_days'             THEN cfg_value END) AS 
        MAX(CASE WHEN cfg_name = 'esm_auto_tie_pct'       THEN cfg_value END) AS esm_auto_tie_pct,
        MAX(CASE WHEN cfg_name = 'complete_day_pct'       THEN cfg_value END) AS complete_day_pct,
        MAX(CASE WHEN cfg_name = 'stale_days'             THEN cfg_value END) AS stale_days,
+       MAX(CASE WHEN cfg_name = 'cyclic_min_cliffs'      THEN cfg_value END) AS cyclic_min_cliffs,
+       MAX(CASE WHEN cfg_name = 'cpu_quality_gate'       THEN cfg_value END) AS cpu_quality_gate,
+       MAX(CASE WHEN cfg_name = 'cpu_deseason'           THEN cfg_value END) AS cpu_deseason,
        MAX(CASE WHEN cfg_name = 'suite_version'          THEN cfg_value END) AS suite_version
 FROM   cap_config;
 
@@ -180,7 +186,8 @@ WITH u AS (
                report_min_gb, accel_slope_floor_bpd, slope_method, reset_on_shrink,
                shrink_mad_k, cpu_gap_hours, shift_days, shift_baseline_days,
                shift_min_pct, series_sat_pct, esm_max_age_days, esm_auto_tie_pct,
-               complete_day_pct, stale_days, suite_version))
+               complete_day_pct, stale_days, cyclic_min_cliffs, cpu_quality_gate,
+               cpu_deseason, suite_version))
      ),
      r AS (
         SELECT u.knob, u.value,
@@ -203,8 +210,8 @@ WITH u AS (
                         THEN 'must be <= shift_baseline_days (' || c.shift_baseline_days || ')'
                    WHEN u.knob = 'esm_prediction_step' AND u.value NOT BETWEEN 1 AND 30
                         THEN 'must be between 1 and 30: Oracle 19c caps the ESM horizon at 30'
-                   WHEN u.knob = 'slope_method'        AND u.value NOT IN (0, 1)
-                        THEN 'must be 0 (OLS) or 1 (THEILSEN)'
+                   WHEN u.knob = 'slope_method'        AND u.value NOT IN (0, 1, 2)
+                        THEN 'must be 0 (OLS), 1 (THEILSEN) or 2 (DRIFT)'
                    WHEN u.knob = 'esm_tbspc_model'     AND u.value NOT IN (0, 1, 2)
                         THEN 'must be 0 (HOLT), 1 (ADDWINTERS) or 2 (AUTO)'
                    WHEN u.knob = 'esm_max_age_days'    AND u.value < 0
@@ -215,6 +222,12 @@ WITH u AS (
                         THEN 'must be between 1 and 100 (percent of a day)'
                    WHEN u.knob = 'stale_days'          AND u.value < 0
                         THEN 'must be >= 0'
+                   WHEN u.knob = 'cyclic_min_cliffs'   AND (u.value <> TRUNC(u.value) OR u.value = 1 OR u.value < 0)
+                        THEN 'must be 0 (off) or a whole number >= 2: one cliff is a purge, the M9.3 reset handles it'
+                   WHEN u.knob = 'cpu_quality_gate'    AND u.value NOT IN (0, 1)
+                        THEN 'must be 0 (R2 gate) or 1 (slope significance)'
+                   WHEN u.knob = 'cpu_deseason'        AND u.value NOT IN (0, 1)
+                        THEN 'must be 0 (off) or 1 (weekday / weekend demeaning)'
                    WHEN u.knob = 'suite_version'       AND u.value < 13
                         THEN 'older than this release (13): re-run install.sql'
                END AS reason
