@@ -46,13 +46,19 @@ Enumerations:
   the kinds `CPU_HOT`, `DBCPU_HOT`, `DATA_STALE`, `MODEL_HEALTH` and the
   columns `state_key` (stable across days), `direction` (LE/GE/ABS),
   `alarm_threshold` (the WARN level) and `is_current`, which the ORDS handler
-  does not select yet.
+  does not select yet. Likewise `CAPR_FIT` (the view behind `fit`) appends
+  columns the handler does not select yet: `is_current` and
+  `limit_below_used` as 1/0, the TBSPC cycle columns `cycle_n`, `cycle_days`,
+  `cycle_peak_pct`, `peak_slope_per_day`, the CPU flags `slope_sig` and
+  `hot_now` as 1/0, and the TBSPC sizing ask `need_gib_30` / `_90` / `_180`
+  and `add_by_day`.
 
 Semantics are the same as the ELK records (see `elk/README.md`): `series`
 rows are the observed daily points with the CAPA_* flag joined on
 (`anomaly=1` on a flagged day); `forecast` rows are the REGR anchors at
-horizons 0/30/90/180/365 (TBSPC) or 0/30/90 (CPU, SERIES) and the ESM +30
-point, `ts` = last observed day + horizon; `fit` is one row per series with
+horizons 0/30/90/180/365 (TBSPC) or 0/30/90 (CPU, SERIES) and the ESM point,
+`ts` = last observed day + horizon (for ESM the horizon is the model's furthest
+step minus its age: `esm_horizon_days - model_age_days`, at most 30); `fit` is one row per series with
 the latest fit; `anomalies` carries one row per flagged event and baseline
 mode (a day flagged by TRAILING and SAME_DOW is two rows; an HOUR_OF_WEEK row
 is one hour, `ts` at the end of the hour, `obs_day` its day), a level shift

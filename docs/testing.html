@@ -121,9 +121,9 @@
           </thead>
           <tbody>
             <tr><td class="def"><code>CREATE SESSION</code></td><td>obviously</td></tr>
-            <tr><td class="def"><code>CREATE TABLE</code></td><td>the ten <span class="inline">CAP_FIXTURE_*</span> tables, plus <span class="inline">CAP_CONFIG</span> / <span class="inline">CAP_TBSPC_OVERRIDE</span> / <span class="inline">CAP_ML_MODEL</span></td></tr>
+            <tr><td class="def"><code>CREATE TABLE</code></td><td>the thirteen <span class="inline">CAP_FIXTURE_*</span> tables, plus the seven persisted tables (<span class="inline">CAP_CONFIG</span>, <span class="inline">CAP_TBSPC_OVERRIDE</span>, <span class="inline">CAP_ML_MODEL</span> and the results layer <span class="inline">CAP_RUN</span> / <span class="inline">CAP_FIT_HIST</span> / <span class="inline">CAP_ALERT_STATE</span> / <span class="inline">CAP_ALERT_EVENT</span>)</td></tr>
             <tr><td class="def"><code>CREATE VIEW</code></td><td>every <span class="inline">CAPV_/CAPD_/CAPF_/CAPA_/CAPR_</span> view</td></tr>
-            <tr><td class="def"><code>CREATE PROCEDURE</code></td><td>the <span class="inline">cap_forecast_ml</span> package</td></tr>
+            <tr><td class="def"><code>CREATE PROCEDURE</code></td><td>the <span class="inline">cap_forecast_ml</span> and <span class="inline">cap_results</span> packages</td></tr>
             <tr><td class="def"><code>CREATE TYPE</code></td><td>the pipelined forecast row type used by <span class="inline">get_forecast</span></td></tr>
             <tr><td class="def"><code>CREATE MINING MODEL</code></td><td>Tier 2 only — <span class="inline">test/run_test_ml.sql</span>. Free in all editions since Dec 2019.</td></tr>
           </tbody>
@@ -200,7 +200,7 @@
         expectation a closed form.</p>
       </div>
 
-      <h3>Tablespace series (ten of them)</h3>
+      <h3>Tablespace series (sixteen of them)</h3>
       <p>All in the root container, 8&nbsp;KiB blocks, one usage row per day off the 18:00 snapshot.
         Each one exists to pin down exactly one behaviour:</p>
 
@@ -240,6 +240,24 @@
             <tr><td class="def">19</td><td><code>FIX_PURGE</code></td>
                 <td>10&nbsp;MiB/day, a <b>−600&nbsp;MiB</b> purge at day&nbsp;90, then 10&nbsp;MiB/day again</td>
                 <td>M9.3 — <code>reset_day</code> = the cliff, <code>train_n = 31</code> (the reset day is day&nbsp;1 of the new window), slope exactly 10&nbsp;MiB/day, and <code>days_to_full = 5050</code> off the post-purge line rather than the ~5&nbsp;MiB/day fiction fitted across it</td></tr>
+            <tr><td class="def">20</td><td><code>FIX_OVERFULL</code></td>
+                <td>flat 1.5&nbsp;GiB used, with a <code>CAP_TBSPC_OVERRIDE</code> ceiling of 1&nbsp;GiB</td>
+                <td>the ceiling sits under the usage: <code>limit_below_used = 'Y'</code>, <code>pct_used = 150</code>, FLAT so no <code>days_to_full</code>, and a <code>TBSPC_NEARFULL</code> CRIT</td></tr>
+            <tr><td class="def">21</td><td><code>FIX_DROPPED</code></td>
+                <td><code>FIX_LINEAR</code>'s 10&nbsp;MiB/day, but its rows stop 30 days before the spine ends</td>
+                <td>a dropped tablespace: it still fits (OK) but reads <code>is_current = 'N'</code> (<code>stale_days</code>) and raises no forecast alert; its exit is a <code>DB_SIZE_GB</code> gap day</td></tr>
+            <tr><td class="def">22</td><td><code>FIX_CYCLIC</code></td>
+                <td>a 30-day sawtooth: 20&nbsp;GiB after each purge, +2.5&nbsp;GiB/day to a 92.5&nbsp;GiB peak, of 300&nbsp;GiB</td>
+                <td>three cliffs in the window grade it <code>CYCLIC</code> (<code>cyclic_min_cliffs</code>): no reset, <code>cycle_days = 30</code>, judged on its flat peaks, so no <code>days_to_full</code>; each cliff is a LOW anomaly under both day modes</td></tr>
+            <tr><td class="def">23</td><td><code>FIX_CYCLIC_UP</code></td>
+                <td>the same sawtooth with floor and peak +1&nbsp;GiB per cycle</td>
+                <td><code>peak_slope_bpd</code> = 1&nbsp;GiB / 30 days and <code>days_to_full</code> off the peak line</td></tr>
+            <tr><td class="def">24</td><td><code>FIX_TEMP</code></td>
+                <td>TEMPORARY, 20&nbsp;GiB, no autoextend; the day's peak is the 06:00 sample, 19.5&nbsp;GiB on the last day</td>
+                <td>excluded from <code>CAPD_TBSPC_DAILY</code>, read by the <code>TEMP_PEAK:FIX_TEMP</code> series: 97.5% of its limit, the one <code>SERIES_NEARLIMIT</code></td></tr>
+            <tr><td class="def">25</td><td><code>FIX_UNDO</code></td>
+                <td>UNDO, 4&nbsp;GiB autoextending to 10&nbsp;GiB, peak 3&nbsp;GiB every day</td>
+                <td><code>UNDO_PEAK:FIX_UNDO</code> reads 3 of 10&nbsp;GiB, FLAT, silent</td></tr>
           </tbody>
         </table>
       </div>
@@ -250,7 +268,11 @@
         An exact-key row (2&nbsp;GiB on <code>FIX_OVERRIDE</code>), a <em>less specific</em>
         <code>(0,0)</code> 1&nbsp;GiB <b>decoy</b> for the same tablespace that must lose the
         specificity ranking, and a pure <code>(0,0)</code> wildcard exclusion for
-        <code>FIX_EXCLUDED</code>. The fixture creates the table itself — a chicken-and-egg, since
+        <code>FIX_EXCLUDED</code>. Two more rows came later: the 1&nbsp;GiB ceiling of
+        <code>FIX_OVERFULL</code>, and a row with no ceiling that gives <code>FIX_FILLING</code> its own
+        <code>dtf_crit</code> 25 / <code>dtf_warn</code> 60 (per-tablespace thresholds). <code>FIX_FILLING</code>
+        also carries three segments (70 / 20 / 10&nbsp;% of its growth) for "who is filling it", and
+        <code>FIX_GAP</code> a 3-day +256&nbsp;MiB burst, one anomaly episode. The fixture creates the table itself — a chicken-and-egg, since
         <span class="inline">ddl/05_config.sql</span> runs <em>after</em> the fixture install and
         <span class="inline">ddl/00_drop.sql</span> deliberately never drops it.</p>
       </div>
@@ -270,7 +292,7 @@
             <tr><td class="def">root — <code>FIXCDB</code> / <code>CDB$ROOT</code></td>
                 <td><code>42424242</code></td>
                 <td><b>OSSTAT + time model</b> (8 CPUs / 4 cores)</td>
-                <td>weekday 20% night / 60% day (daily average <b>40%</b>), weekend 10% / 30% (avg 20%), one injected Tuesday at 70% / 70%, one inverted Wednesday at 40% / 40%, the restart at day 60 and the Sunday AWR gap</td></tr>
+                <td>weekday 20% night / 60% day (daily average <b>40%</b>), weekend 10% / 30% (avg 20%), one injected Tuesday at 70% / 70%, one inverted Wednesday at 40% / 40%, the restart at day 60, a partial day (a weekday 14 to 20 days back restarts at noon and keeps only its 06:00 interval: <code>covered_sec = 43200</code>, <code>is_complete = 'N'</code>) and the Sunday AWR gap</td></tr>
             <tr><td class="def">PDB — <code>FIXCDB</code> / <code>FIXPDB1</code></td>
                 <td><code>42424243</code></td>
                 <td><b>time model only</b> — no OSSTAT</td>
@@ -363,11 +385,20 @@
             <tr><td class="def"><code>DB_SIZE_GB</code></td>
                 <td>no fixture table — derived from <code>CAPD_TBSPC_DAILY</code></td>
                 <td>asserted against a re-derived <code>SUM(used_bytes)</code>, plus a positive, fittable slope. Inherits that view's rules: UNDO/TEMPORARY excluded, M9.5 overrides and exclusions applied</td></tr>
+            <tr><td class="def"><code>ASM_DG:+DATA</code></td>
+                <td><code>CAP_FIXTURE_ASM_DISKGROUP</code>: 1000&nbsp;GiB, used 200 + 5i&nbsp;GiB at 18:00</td>
+                <td><code>cur = 800</code>, <code>days_to_limit</code> (90% of 1000) = 20 ⇒ a second <code>SERIES_LIMIT</code> CRIT. Diskgroup FRA sits flat at 50 of 200&nbsp;GiB</td></tr>
+            <tr><td class="def"><code>TEMP_PEAK</code> / <code>UNDO_PEAK</code></td>
+                <td><code>FIX_TEMP</code> / <code>FIX_UNDO</code> (tablespace table above)</td>
+                <td>the day's highest sample against maxsize, else size; <code>TEMP_PEAK:FIX_TEMP</code> is the one <code>SERIES_NEARLIMIT</code></td></tr>
+            <tr><td class="def">FRA days</td>
+                <td><code>CAP_FIXTURE_PARAMETER</code>: <code>db_recovery_file_dest_size</code> 100&nbsp;GiB, <code>cpu_count</code> 8</td>
+                <td>the <code>REDO_GB_DAY</code> row carries <code>fra_size_gb = 100</code> and <code>fra_days_at_cur = 50</code>; <code>cpu_count = NUM_CPUS</code>, so no CPU number moves (a caged knob flip asserts the <code>LEAST(num_cpus, cpu_count)</code> ceiling)</td></tr>
           </tbody>
         </table>
       </div>
 
-      <h3>The ten fixture tables</h3>
+      <h3>The thirteen fixture tables</h3>
       <div class="tablewrap">
         <table>
           <thead>
@@ -379,9 +410,12 @@
             <tr><td class="def"><code>CAP_FIXTURE_TABLESPACE</code></td><td><code>DBA_HIST_TABLESPACE</code> — names, contents, <code>block_size</code></td></tr>
             <tr><td class="def"><code>CAP_FIXTURE_DATAFILE</code></td><td><code>DBA_HIST_DATAFILE</code> — the block-size <em>fallback</em> only</td></tr>
             <tr><td class="def"><code>CAP_FIXTURE_OSSTAT</code></td><td><code>DBA_HIST_OSSTAT</code> — cumulative centiseconds, root container only</td></tr>
-            <tr><td class="def"><code>CAP_FIXTURE_TIME_MODEL</code></td><td><code>DBA_HIST_SYS_TIME_MODEL</code> — cumulative microseconds, <b>all three</b> containers</td></tr>
+            <tr><td class="def"><code>CAP_FIXTURE_TIME_MODEL</code></td><td><code>DBA_HIST_CON_SYS_TIME_MODEL</code> — cumulative microseconds, <b>all three</b> containers</td></tr>
             <tr><td class="def"><code>CAP_FIXTURE_RESOURCE_LIMIT</code></td><td><code>DBA_HIST_RESOURCE_LIMIT</code> (M11) — <code>processes</code> / <code>sessions</code></td></tr>
-            <tr><td class="def"><code>CAP_FIXTURE_SYSSTAT</code></td><td><code>DBA_HIST_SYSSTAT</code> (M11) — <code>redo size</code> + one decoy stat</td></tr>
+            <tr><td class="def"><code>CAP_FIXTURE_SYSSTAT</code></td><td><code>DBA_HIST_CON_SYSSTAT</code> (M11) — <code>redo size</code> + one decoy stat</td></tr>
+            <tr><td class="def"><code>CAP_FIXTURE_PARAMETER</code></td><td><code>DBA_HIST_PARAMETER</code> — the nine numeric init parameters, already as numbers</td></tr>
+            <tr><td class="def"><code>CAP_FIXTURE_ASM_DISKGROUP</code></td><td><code>DBA_HIST_ASM_DISKGROUP_STAT</code> + <code>DBA_HIST_ASM_DISKGROUP</code> — diskgroups DATA and FRA</td></tr>
+            <tr><td class="def"><code>CAP_FIXTURE_SEG_STAT</code></td><td><code>DBA_HIST_SEG_STAT</code> + <code>DBA_HIST_SEG_STAT_OBJ</code>, already joined to the names — three segments in <code>FIX_FILLING</code></td></tr>
             <tr><td class="def"><code>CAP_FIXTURE_CONTAINER</code></td><td><code>DBA_HIST_PDB_INSTANCE</code> (M7.2) — <code>FIXCDB</code>/<code>CDB$ROOT</code>, <code>FIXCDB</code>/<code>FIXPDB1</code> and <code>FIXCDB</code>/<code>FIXPDB2</code>, so both <code>db_pdb</code> label branches are asserted</td></tr>
             <tr><td class="def"><code>CAP_FIXTURE_META</code></td><td>nothing in AWR — the <b>expectations</b>, see below</td></tr>
           </tbody>
@@ -404,7 +438,11 @@
             <tr><td class="def">M9.1 / M9.2 / M9.4</td><td><code>ZZ_SLOPE</code>, <code>ZZ_P30</code>, <code>ZZ_P30_LO</code>, <code>ZZ_P30_HI</code>, <code>ZZ_DTF</code>, <code>ZZ_DTF_LO</code>, <code>ZZ_DTF_HI</code>, <code>ZZ_BT_MAPE</code>, <code>ZZ_BT_BIAS</code>, <code>ZZ_TS_SLOPE</code>, <code>ZZ_TS_PAIRS</code></td></tr>
             <tr><td class="def">CPU (M10.1 / M10.2)</td><td><code>CPU_PROBE_AVG</code>, <code>CPU_PROBE_P95</code>, <code>CPU_PROBE_MAX</code>, <code>CPU_PROBE_PEAK</code>, <code>CPU_PROBE_HOST_BUSY_SEC</code>, <code>DBCPU_PROBE_SEC</code>, <code>DBCPU_PROBE_PCT</code>, <code>DBCPU_PROBE_PEAK_PCT</code>, <code>DBCPU_PROBE_HOST_SHARE</code></td></tr>
             <tr><td class="def">Gap + shift (M10.5 / M10.3)</td><td><code>CPUGAP_DAY</code>, <code>CPUGAP_NEXT</code>, <code>CPUGAP_HOURS</code>&nbsp;(36), <code>CPUGAP_DAYGAP</code>, <code>CPUGAP_BUSY_PCT</code>&nbsp;(30), <code>CPUGAP_P95</code>&nbsp;(60), <code>PDB_CON_DBID</code>, <code>SHIFT_EXPECTED_PTS</code>&nbsp;(18), <code>SHIFT_BASE_MED</code>, <code>SHIFT_RECENT_MED</code>, <code>SHIFT_BASE_SIGMA</code></td></tr>
-            <tr><td class="def">Fixed-ceiling (M11)</td><td><code>SESS_CUR</code>, <code>SESS_LIMIT</code>, <code>SESS_DTL</code>, <code>PROC_CUR</code>, <code>PROC_LIMIT</code>, <code>REDO_PROBE_GB</code></td></tr>
+            <tr><td class="def">Fixed-ceiling (M11)</td><td><code>SESS_CUR</code>, <code>SESS_LIMIT</code>, <code>SESS_DTL</code>, <code>PROC_CUR</code>, <code>PROC_LIMIT</code>, <code>REDO_PROBE_GB</code>, <code>SESS_TRAIN_N</code>, <code>REDO_TRAIN_N</code>, <code>REDO_PARTIAL_GB</code></td></tr>
+            <tr><td class="def">Day coverage and logical CPUs (M17)</td><td><code>NUM_CPUS</code>, <code>NUM_CPU_CORES</code>, <code>PARTIAL_DAY</code>, <code>PARTIAL_COVERED_SEC</code>, <code>PARTIAL_BUSY_PCT</code>, <code>PARTIAL_DBCPU_PCT</code>, <code>FULL_COVERED_SEC</code>, <code>CPUGAP_COVERED_SEC</code>, <code>CPUGAP_DBCPU_PCT</code>, <code>DBCPU_PROBE_PCT_CORES</code>, <code>DBCPU_PROBE_PER_CORE</code>, <code>PDB_PROBE_PCT</code>, <code>PDB_PARTIAL_PCT</code>, <code>PDB_GAP_PCT</code>, <code>CPU_TRAIN_N</code></td></tr>
+            <tr><td class="def">Forecasts (M18)</td><td><code>ZZ_CUR</code>, <code>ZZ_P30_FIT</code>, <code>ZZ_ACC7_SLOPE</code>, <code>ZZ_ACC7_ERR</code>, <code>ZZ_BT_*</code>, <code>LINEAR_DTF7</code>, <code>OVERFULL_CUR</code>, <code>OVERFULL_LIMIT</code>, <code>OVERFULL_PCT</code>, <code>DROPPED_CUR</code>, <code>DROPPED_LAST_DAY</code>, <code>DROPPED_STALE_GAP</code>, <code>DROPPED_TRAIN_N</code>, <code>DROPPED_DTF</code>, <code>DR_*</code> (DRIFT closed forms), <code>CYC1_*</code> / <code>CYC2_*</code> (<code>_N</code>, <code>_NPK</code>, <code>_DAYS</code>, <code>_PEAK</code>, <code>_PCT</code>, <code>_CUR</code>, <code>_PSLOPE</code>, <code>_DTF</code>)</td></tr>
+            <tr><td class="def">Alerts and anomalies (M15, M19)</td><td><code>INVERTED_WED</code>, <code>SPIKE_Z</code>, <code>BURST_FIRST</code>, <code>BURST_LAST</code>, <code>BURST_DAYS</code>, <code>BURST_Z</code>, <code>FILLING_OVR_DTF_WARN</code>, <code>FILLING_OVR_DTF_CRIT</code></td></tr>
+            <tr><td class="def">Seam extensions (M20, M21)</td><td><code>CPU_COUNT</code>, <code>CPU_COUNT_CAGED</code>, <code>DBCPU_PROBE_PCT_CAGED</code>, <code>DBCPU_PROBE_PEAK_PCT_CAGED</code>, <code>FRA_SIZE_GB</code>, <code>FRA_DAYS</code>, <code>ASM_DATA_*</code> (<code>_CUR</code>, <code>_LIMIT</code>, <code>_PCT</code>, <code>_SLOPE</code>, <code>_DTL</code>, <code>_P30</code>, <code>_PROBE</code>), <code>ASM_FRA_CUR</code>, <code>ASM_FRA_LIMIT</code>, <code>TEMP_*</code> (<code>_CUR</code>, <code>_LIMIT</code>, <code>_PCT</code>, <code>_SLOPE</code>, <code>_R2</code>, <code>_Q</code>, <code>_PROBE</code>), <code>UNDO_CUR</code>, <code>UNDO_LIMIT</code>, <code>UNDO_PCT</code>, <code>FILLING_NEED_30</code> / <code>_90</code> / <code>_180</code>, <code>SEG_WINDOW_DAYS</code>, <code>SEG_ORDERS_BYTES</code>, <code>SEG_ORDERS_PK_BYTES</code>, <code>SEG_EVENTS_BYTES</code>, <code>SEG_LEDGER_BYTES</code></td></tr>
           </tbody>
         </table>
       </div>
@@ -477,7 +515,7 @@ sqlplus captest/&lt;password&gt;@localhost:1521/pdb1.world</pre>
           <div class="step__rail"><div class="step__n">3</div><div class="step__line"></div></div>
           <div class="step__body">
             <h4>Load the fixtures</h4>
-            <p>Creates and fills the ten <span class="inline">CAP_FIXTURE_*</span> tables described
+            <p>Creates and fills the thirteen <span class="inline">CAP_FIXTURE_*</span> tables described
               <a href="#fixture">above</a> — ten tablespace series, a three-container CPU series and the
               three fixed-ceiling series — and seeds the three
               <span class="inline">CAP_TBSPC_OVERRIDE</span> rows. Every value is hand-calculated and
@@ -565,8 +603,8 @@ M11 fixtures loaded: sessions 200..440 of 500, processes 150 of 300,
           <div class="step__body">
             <h4>Run the Tier 1 self-check</h4>
             <p>Every assertion over the fake data compares a result to its closed-form answer. The
-              number of assertions grows with each milestone (659 at M15), so check the closing
-              <span class="inline">RESULT: N passed, M failed</span> line for M = 0 rather than for a
+              number of assertions grows with each milestone, so these pages never quote it: check the
+              closing <span class="inline">RESULT: N passed, M failed</span> line for M = 0 rather than for a
               particular N. It prints PASS/FAIL per check and <b>exits with an error code on any failure</b>
               (<span class="inline">WHENEVER SQLERROR EXIT FAILURE</span> plus a final
               <span class="inline">RAISE_APPLICATION_ERROR</span>), so you can wire it straight into CI
@@ -663,6 +701,14 @@ All fixture assertions passed.</pre>
               The full log is <span class="inline">/tmp/dbmint_harness_&lt;SCHEMA&gt;.log</span>. Give each
               concurrent run its own schema: two runs reinstalling one schema fail each other with
               ORA-04063 or ORA-00942.</p>
+              <p><strong>Running in a throwaway schema by hand.</strong> Create a user with the privileges
+              above (no password needed if only a SYSDBA uses it), then in one SQL*Plus session as SYSDBA:
+              <span class="inline">ALTER SESSION SET CONTAINER = PDB1;</span>
+              <span class="inline">ALTER SESSION SET CURRENT_SCHEMA = CAPX1;</span>, then steps 3 to 6 as written.
+              Every object, job and OML model lands in that schema. <span class="inline">USER_OBJECTS</span>
+              follows the session user, so check validity with
+              <span class="inline">SELECT object_name, status FROM all_objects WHERE owner = 'CAPX1' AND status &lt;&gt; 'VALID'</span>.
+              Drop the user when you are done.</p>
             </div>
             <div class="callout tip">
               <span class="ico">▸</span>

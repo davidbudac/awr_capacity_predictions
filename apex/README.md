@@ -142,23 +142,29 @@ already have for the suite. Put ORDS behind TLS outside a lab.
   fleet (the demo schema: 3,500 series points). For hundreds of tablespaces
   times a year of history the first page load of a session grows with the
   data; if that matters, materialize the `CAPR_*` views by a job and point
-  the app's parsing schema at the copies (the open "results layer" item in
-  the project's todo list).
-- **Horizon 0 is the actual value**, horizons 30 and beyond are the fitted
-  line. On a stepped series the dashed projection can start below today's
-  value; that is the suite's forecast, not a drawing error.
-- **ESM points are optional.** The +30 ESM marker appears only when a model
-  is fresh (`cap_forecast_ml.train_all`, weekly retrain, 30-step cap); the
-  charts never depend on it.
+  the app's parsing schema at the copies. The suite's results layer (ddl/60)
+  now keeps such copies for the fits and alerts: `CAPR_FIT_HISTORY` and
+  `CAPR_ALERTS_LATEST`, refreshed by `cap_results.refresh`; the app does not
+  read them yet.
+- **Horizon 0 is the anchor**: the current value (for CPU the smoothed
+  `anchor_value`), and since M18.1 every REGR horizon in
+  `CAPR_FORECAST_POINTS` is `anchor + slope x h`, so the dashed projection
+  starts at today's value.
+- **ESM points are optional.** The ESM marker appears only when a model
+  is fresh (`cap_forecast_ml.train_all`, 30-step cap); the charts never
+  depend on it. Its `CAPR_FORECAST_POINTS.horizon_days` is now the model's
+  furthest step minus its age (`esm_horizon_days - model_age_days`), not
+  always 30.
 - **CPU reference lines.** The saturation line is `cpu_sat_pct` from
   `CAP_CONFIG` (80 by default). `CAPR_FIT` and the point feeds all carry it
   as the CPU `limit_value` (and `pct` as a percent of it); the app draws the
   line from the config value.
 - **Host CPU is a root-container series.** OSSTAT records under the CDB's
   own `con_dbid`, so with a PDB selected the host CPU chart shows its CDB
-  root's rows (the same host) rather than nothing. Local mode has no per-PDB
-  DB CPU, sessions or redo either (see `CLAUDE.md`); fixture and warehouse
-  data may.
+  root's rows (the same host) rather than nothing. Local mode reads per-PDB
+  DB CPU and redo from the `DBA_HIST_CON_*` views (`CAPV_TIME_MODEL`,
+  `CAPV_SYSSTAT`); sessions and processes stay CDB-wide under the root (see
+  `CLAUDE.md`).
 - **Tablespace filter values are `database|tablespace`**, because tablespace
   names repeat across databases; "All tablespaces" draws only the observed
   lines (the projection, band and ceiling need one tablespace).
@@ -169,9 +175,12 @@ already have for the suite. Put ORDS behind TLS outside a lab.
   filters list whatever values the data has.
 - **A level shift is dated at the start of its window** (`ts`), with the
   window's last day in `obs_day`; the DB CPU chart shades that span.
-- **Alerts are stateless.** `CAPR_ALERTS` is the current evaluation: no ids,
-  no acknowledgement, no new/resolved. The alert tables are "what pages right
-  now".
+- **Alerts are stateless in the app.** `CAPR_ALERTS` is the current
+  evaluation. It now carries a stable `state_key`, `direction`,
+  `alarm_threshold` and `is_current`, and the suite's results layer adds
+  acknowledgement and new / resolved events (`CAPR_ALERTS_LATEST`,
+  `CAPR_ALERT_EVENTS`, `cap_results.ack`); the app reads none of them yet,
+  so its alert tables are "what pages right now".
 - **Region SQL keeps the suite's 19c floor** (inline window clauses, explicit
   formats), so the same export runs against a 19c database that hosts APEX
   26.2.

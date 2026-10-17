@@ -159,6 +159,16 @@ prunes everything else.
 - Forecast points key on (series, method, horizon), so each run overwrites
   the previous run's points. A series whose forecast disappears (quality
   drops to INSUFFICIENT_HISTORY) keeps its last points until it comes back.
+- Columns the export does not carry yet: `CAPR_ALERTS.state_key`,
+  `direction`, `alarm_threshold` and `is_current`, and the appended
+  `CAPR_FIT` columns (`is_current`, `limit_below_used`, the cycle columns,
+  `slope_sig`, `hot_now`, the sizing ask `need_gib_*` / `add_by_day`). The
+  results layer (`CAPR_ALERTS_LATEST`, `CAPR_ALERT_EVENTS`,
+  `CAPR_WEEKLY_DIGEST`) is not exported either.
+- An ESM forecast point's horizon is the model's furthest step minus its age,
+  so it moves as the model ages between retrains; the document id hashes it,
+  so an aging model adds a point instead of replacing it until the next
+  retrain.
 - The Logstash file must sort after `oracle.conf` in the pipeline directory
   (it does, `_` > `.`); its prune runs after that pipeline's common filters.
 - A DB CPU level shift is dated at the start of its recent window

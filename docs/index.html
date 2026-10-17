@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>Introduction — AWR Capacity Predictions</title>
-<meta name="description" content="In-database capacity forecasting, alerting and deterministic anomaly detection for Oracle 19c, driven entirely by AWR history — no external ML stack, no agent, no data export.">
+<meta name="description" content="In-database capacity forecasting, alerting and deterministic anomaly detection for Oracle 19c, driven entirely by AWR history — no external ML stack, no agent.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23b06a0d'/><path d='M16 8L24 23L8 23Z' fill='%23fff'/></svg>">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="assets/style.css">
@@ -53,9 +53,10 @@
         <span class="eyebrow">In-database · Oracle 19c floor · read-only</span>
         <h1>Capacity forecasting that lives inside the database.</h1>
         <p class="lead">SQL-level growth forecasting, pollable alerts and deterministic anomaly
-          detection driven entirely by AWR history, with <strong>no external ML stack, no agent, no data
-          export</strong>. Just views, three small tables of its own, an OML package, and read-only
-          SQL*Plus reports in text and HTML.</p>
+          detection driven entirely by AWR history, with <strong>no external ML stack and no
+          agent</strong>. Just views, a few small tables of its own, two PL/SQL packages, and read-only
+          SQL*Plus reports in text, HTML and CSV. Optional Kibana, Grafana and APEX paths read the
+          same views.</p>
         <p class="cta">
           <a class="btn" href="demo/cap_report_demo.html" target="_blank" rel="noopener">See a sample report ↗</a>
           <a class="btn btn--ghost" href="start.html">Get started →</a>
@@ -128,8 +129,8 @@
           <thead><tr><th scope="col">Question</th><th scope="col">What it produces</th><th scope="col">Source</th></tr></thead>
           <tbody>
             <tr><td><b>Tablespace growth</b></td><td>Projected size at +30 / +90 / +180 / +365 days with 95% prediction bands, and <code>days_to_full</code> with a worst/best-case range</td><td class="def">DBA_HIST_TBSPC_SPACE_USAGE</td></tr>
-            <tr><td><b>CPU headroom</b></td><td>Host busy% (daily average, p95 "busy hour" and peak-window) plus DB CPU as a percent of core capacity, days-to-saturation, and level shifts</td><td class="def">DBA_HIST_OSSTAT · SYS_TIME_MODEL</td></tr>
-            <tr><td><b>Fixed-ceiling series</b></td><td>Peak <code>processes</code> / <code>sessions</code> against the init parameters, redo GiB/day, and total DB size against the summed tablespace ceilings, each with days-to-limit</td><td class="def">DBA_HIST_RESOURCE_LIMIT · SYSSTAT · tablespace usage</td></tr>
+            <tr><td><b>CPU headroom</b></td><td>Host busy% (daily average, p95 "busy hour" and peak-window) plus DB CPU per container as a percent of the host's logical CPUs, days-to-saturation, level shifts, and a host already at the saturation line</td><td class="def">DBA_HIST_OSSTAT · CON_SYS_TIME_MODEL</td></tr>
+            <tr><td><b>Fixed-ceiling series</b></td><td>Peak <code>processes</code> / <code>sessions</code> against the init parameters, redo GiB/day with days of FRA, total DB size against the summed tablespace ceilings, ASM diskgroups and TEMP / UNDO peaks, each with days-to-limit</td><td class="def">DBA_HIST_RESOURCE_LIMIT · CON_SYSSTAT · PARAMETER · ASM_DISKGROUP_STAT · tablespace usage</td></tr>
             <tr><td><b>Anomalies</b></td><td>Median + MAD flags against three baselines side by side (the last 28 days, the same weekday, and for CPU the same weekday and hour), each reproducible by hand (value, median, k·σ, robust z)</td><td class="def">daily values · hourly CPU</td></tr>
             <tr><td><b>Which engine to trust</b></td><td>A holdout backtest that replays the recent past and scores each engine's MAPE and bias against what actually happened</td><td class="def">CAPF_BACKTEST</td></tr>
           </tbody>
@@ -210,7 +211,7 @@
           <p>One Oracle Machine Learning model per series via <code>DBMS_DATA_MINING</code>. CPU uses
             additive Winters; tablespaces default to AUTO, which picks Holt or additive Winters by
             holdout accuracy. Shown against Tier 1 in the report.</p>
-          <div class="meta"><span><b>Reaches:</b> +30 only; 19c hard-caps the horizon at 30 steps</span>
+          <div class="meta"><span><b>Reaches:</b> its furthest step, at most +30; 19c hard-caps the horizon at 30 steps</span>
             <span><b>Needs:</b> <span class="inline">CREATE MINING MODEL</span></span></div>
         </div>
       </div>
@@ -252,7 +253,7 @@
           <ul>
             <li>runs inside the database, plain SQL*Plus</li>
             <li>reads the AWR you already collect</li>
-            <li>read-only: three tables of its own, zero DML on your data</li>
+            <li>read-only: writes only its own <code>CAP_*</code> tables, zero DML on your data</li>
             <li>one script to install, one report to run</li>
           </ul>
         </div>
@@ -268,10 +269,13 @@
         <span class="ico">i</span>
         <p><strong>Read-only against your data.</strong> The reports and all
         <span class="inline">CAPV / CAPD / CAPF / CAPA / CAPR</span> views only ever <code>SELECT</code>.
-        The suite writes exactly three tables of its own, <span class="inline">CAP_CONFIG</span>
-        (tuning knobs), <span class="inline">CAP_TBSPC_OVERRIDE</span> (operator-set ceilings and
-        exclusions) and <span class="inline">CAP_ML_MODEL</span> (the Tier 2 registry), and nothing
-        else.</p>
+        The suite writes only to <code>CAP_*</code> tables it owns, and nothing
+        else: <span class="inline">CAP_CONFIG</span> (tuning knobs),
+        <span class="inline">CAP_TBSPC_OVERRIDE</span> (operator-set ceilings, exclusions and
+        thresholds), <span class="inline">CAP_ML_MODEL</span> (the Tier 2 registry) and the optional
+        results layer (<span class="inline">CAP_RUN</span>, <span class="inline">CAP_FIT_HIST</span>,
+        <span class="inline">CAP_ALERT_STATE</span>, <span class="inline">CAP_ALERT_EVENT</span>),
+        written only by <span class="inline">cap_results.refresh</span> and the ack calls.</p>
       </div>
       <div class="callout tip">
         <span class="ico">▸</span>
@@ -320,7 +324,7 @@
 
       <footer class="foot">
         AWR Capacity Predictions · in-database capacity forecasting · Oracle 19c floor<br>
-        Documentation generated from <span class="inline">README.md</span> and
+        Hand-maintained documentation. Design rationale lives in
         <span class="inline">docs/design.md</span>.
       </footer>
 

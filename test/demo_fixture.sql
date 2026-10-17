@@ -34,8 +34,10 @@
 --                    anomaly), and an instance restart 95 days ago (a counter
 --                    reset the guard must skip).
 --   SHOP_PDB DB CPU  its share of host CPU jumps from 50% to 85% 12 days ago
---                    (a release) -> a sustained level shift, not an outlier,
---                    which CAPA_CPU_SHIFT reports.
+--                    (a release). As a percent of the 32 logical CPUs that
+--                    step is about +11 points, under shift_min_pct (15), so
+--                    CAPA_CPU_SHIFT does not flag it; the step days arrive as
+--                    one DBCPU_ANOM episode (SAME_DOW) instead.
 --   sessions / processes (SHOP_PDB)  sessions high-water creeping toward
 --                    the 90% line (~40 days), processes flat.
 --   redo             ~45 GiB/day weekdays, less at weekends.

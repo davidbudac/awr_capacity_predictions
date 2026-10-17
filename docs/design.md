@@ -125,7 +125,7 @@ other twelve present (see the last bullet).
   `CAP_FIXTURE_PARAMETER` / `CAP_FIXTURE_ASM_DISKGROUP` and falls back to the
   same stubs when a table is missing, because `test/demo_fixture.sql` does
   not build them.
-- `CAPV_SEG_STAT` (U9) reads `DBA_HIST_SEG_STAT` joined to
+- `CAPV_SEG_STAT` (M21) reads `DBA_HIST_SEG_STAT` joined to
   `DBA_HIST_SEG_STAT_OBJ` on `(dbid, con_dbid, ts#, obj#, dataobj#)`: one
   row per snapshot, instance and segment with `tablespace_id` (`TS#`),
   `tablespace_name`, `owner`, `object_name`, `subobject_name`, `object_type`
@@ -163,7 +163,7 @@ row per day.
   records is only a promise the *storage* may not be able to keep — a 32 GiB
   maxsize on a 10 GiB filesystem or ASM diskgroup is not 32 GiB of headroom,
   and a days-to-full computed against it is a comfortable lie. So this view
-  left-joins `CAP_TBSPC_OVERRIDE` (the third persisted table): a matching row's
+  left-joins `CAP_TBSPC_OVERRIDE` (an operator table, persisted like `CAP_CONFIG`): a matching row's
   `limit_bytes` replaces the computed limit, and `exclude_flag='Y'` drops the
   tablespace from the series entirely — the way a staging / scratch / import
   tablespace stops generating noise. Matching is on the exact
@@ -1120,14 +1120,14 @@ three read `CAPF_COMPARE` / `CAPF_BACKTEST`, which `ddl/50_ml.sql` creates
 `CAPD_*` history points, the anomaly dots and the timeline. The
 whole-database hero used to run its own regression (always OLS, no reset, its
 own gap fill, days to 100%), so the shipped demo said "5 mo" in the hero and
-"7 mo" in section 7. Since U9 it reads `CAPR_SERIES` `DB_SIZE_GB`, the row
+"7 mo" in section 7. Since M21.2 it reads `CAPR_SERIES` `DB_SIZE_GB`, the row
 section 7 prints, with its history from `CAPR_SERIES_POINTS` and its
 projection and band from `CAPR_FORECAST_POINTS`; every chart draws the
 projections and band knots the views anchor, with no re-anchoring in the
 driver. The ESM marker sits at `last_day + esm_horizon_days -
 esm_age_days`, the offset `CAPR_FORECAST_POINTS` gives it.
 
-`CAPR_SEGMENT_GROWTH` (U9, ddl/45) answers "which segment is filling this
+`CAPR_SEGMENT_GROWTH` (M21, ddl/45) answers "which segment is filling this
 tablespace": one row per (dbid, con_dbid, tablespace, owner, object,
 subobject) with `grown_bytes` = `SUM(space_allocated_delta)` and
 `used_grown_bytes` = `SUM(space_used_delta)` over the last `seg_window_days`
@@ -1274,7 +1274,7 @@ resulting bound in the section header ("Showing 7 of 8 tablespace(s) …"); the
 views keep every row for other consumers.
 
 **M7.6 — positional arguments.** `@report/report.sql [top_n] [anomaly_days]
-[show_esm]` and the same for `report_html.sql` (U9 adds `[dbid] [con_dbid]
+[show_esm]` and the same for `report_html.sql` (M21 adds `[dbid] [con_dbid]
 [source]`, below). `report/defaults.sql` stays the
 fallback source of truth: both drivers load it, then override each value with
 its argument if one was passed. Unset `&1..&3` cannot prompt (a prompt would
@@ -1283,7 +1283,7 @@ hang a non-interactive run and swallow the next heredoc line) because a
 empty, while an argument that *was* passed survives — SQL*Plus only reassigns a
 `NEW_VALUE` on a fetched row. Both scripts `UNDEFINE 1 2 3` at the end, so a
 second script in the same session does not inherit the first one's arguments
-(`UNDEFINE 1 .. 6` since U9).
+(`UNDEFINE 1 .. 6` since M21).
 
 **M7.5 — drill-down.** `report/drill_tbspc.sql <tablespace> [con_dbid]` and its
 CPU twin `report/drill_cpu.sql [metric] [con_dbid]` answer the question a
@@ -1300,7 +1300,7 @@ spelled-out arithmetic line per flagged (day, mode). `drill_cpu.sql` scores
 operational: the M9.1 bands can be checked with a calculator. Both arguments are
 optional and, like the report drivers, never prompt.
 
-**U9 — scope, source, CSV, cron.** Both drivers take three more optional
+**M21 — scope, source, CSV, cron.** Both drivers take three more optional
 positional arguments: `[top_n] [anomaly_days] [show_esm] [dbid] [con_dbid]
 [source]`. A `-` skips any of them. With a dbid and/or con_dbid every
 section filters on them and the header prints the scope with the container
@@ -1323,7 +1323,7 @@ the repo root without prompts, exits non-zero when a spool is missing or holds
 an `ORA-` / `SP2-` line, prints each path and rotates old reports only after
 a clean run; its header has a cron line.
 
-**U9 — HTML resilience.** `report_html.sql` renders the header and each of
+**M21 — HTML resilience.** `report_html.sql` renders the header and each of
 sections 0 to 7 inside its own `BEGIN ... EXCEPTION WHEN OTHERS` block. A
 failing query closes any open table, prints a red "Section N failed:
 <SQLERRM>" block where the section would be, and the page carries on; the
@@ -1331,7 +1331,7 @@ footer says how many sections failed. The healthy-chip groups of section 0
 (tablespaces, series, hosts) each stop at 30 chips and print "+N more", so
 a fleet cannot overflow the 32000-byte accumulator.
 
-**U9 — Prometheus.** `grafana/ords/awrcap_module.sql` publishes a PL/SQL GET
+**M21 — Prometheus.** `grafana/ords/awrcap_module.sql` publishes a PL/SQL GET
 handler `metrics` next to the JSON ones: the text exposition format over
 `CAPR_ALERTS` (`awrcap_alert`), `CAPR_FIT` (`awrcap_days_to_full`,
 `awrcap_pct_used`), `CAPR_FRESHNESS` (`awrcap_data_through_days`) and an
@@ -1347,7 +1347,7 @@ with a plain-English explanation of why forecasts would read
 `INSUFFICIENT_HISTORY`. It queries `ALL_*` filtered on
 `SYS_CONTEXT('USERENV','CURRENT_SCHEMA')` rather than `USER_OBJECTS`, because
 the latter follows the *session* user and would report nothing useful when
-testing as SYSDBA with `CURRENT_SCHEMA` set elsewhere. Section 10 (U9)
+testing as SYSDBA with `CURRENT_SCHEMA` set elsewhere. Section 10 (M21)
 covers the results layer and the live seam contract: the last `CAPR_RUNS`
 row and `stale_run`, FAILED runs of the last 7 days with the first error
 line, RUNNING runs older than an hour, `CAP_REFRESH_JOB` (enabled, last
@@ -1365,9 +1365,10 @@ The fixture seam is the correctness gate: since we can't `INSERT` into
 `DBA_HIST_*`, `CAPV_*` are pointed at `CAP_FIXTURE_*` tables filled with exact,
 anchored, deterministic series. Every asserted number is a closed form recorded
 in `CAP_FIXTURE_META` (so `run_test.sql` reads expectations rather than
-re-deriving dates). `run_test.sql` prints PASS/FAIL over **659** assertions and
-exits non-zero on any failure (CI-able); `run_test_ml.sql` adds **86** more
-behind the `CREATE MINING MODEL` privilege (counts at M15). The harness needs
+re-deriving dates). `run_test.sql` prints PASS/FAIL per check and a closing
+`RESULT:` line, and exits non-zero on any failure (CI-able); `run_test_ml.sql`
+adds the Tier 2 checks behind the `CREATE MINING MODEL` privilege. The count
+grows with every milestone, so the docs never quote it. The harness needs
 `CREATE TABLE/VIEW/TYPE/PROCEDURE` (+ `CREATE MINING MODEL` for Tier 2) and no
 `V$` access at all — report identity comes from `SYS_CONTEXT`.
 
@@ -1399,8 +1400,10 @@ closed forms for all three:
   and the probe weekday is chosen to avoid it.
 - The FIXPDB1 level-shift step is 18 points over its same-weekday priors on
   each of its 7 days, so SAME_DOW flags all 7 (floored sigma, threshold 9,
-  z 6) and `DBCPU_ANOM` raises 7 WARNs, while TRAILING flags only the 3 days
-  whose deviation clears its sawtooth-widened threshold.
+  z 6), while TRAILING flags only the 3 days whose deviation clears its
+  sawtooth-widened threshold. Since M19.3 `CAPR_ALERTS` collapses the 7
+  flagged days into one `DBCPU_ANOM` episode, downgraded to INFO because the
+  FIXPDB1 level shift is active.
 - The injected Tuesday always falls on one of those step days, so a CPU
   anomaly lookup by day alone returns several rows. Every lookup in
   `run_test.sql` names the full key (`anom_flag(kind, series, mode, ts,
@@ -1445,5 +1448,12 @@ AWR history. See `bench/README.md`.
   five capacity tables are the only warehouse objects keyed on `(dbid, con_dbid)`
   (TS# restarts per container); shipped for existing warehouses as
   `migrate/002_capacity_facts.sql`.
-- **v2** — memory forecasting; cross-DBID series stitching (non-CDB → PDB
-  migrations) keyed on a stable warehouse `target_id`.
+- **M7–M21 — done.** `PLAN.md` carries each milestone with its commit: the
+  report and integration work (M7, M8), forecast quality (M9), CPU (M10), the
+  fixed-ceiling series (M11), the three visual paths (M12–M14), the anomaly
+  modes (M15) and the 2026-10-17 review program (M16 config and install, M17
+  seam and daily, M18 forecasts, M19 alerts and results layer, M20 seam
+  extensions, M21 consumers and docs).
+- **v2** — memory forecasting (SGA / PGA from `DBA_HIST_MEM_DYNAMIC_COMP`, the
+  19c view name, and `DBA_HIST_PGASTAT`); cross-DBID series stitching
+  (non-CDB → PDB migrations) keyed on a stable warehouse `target_id`.

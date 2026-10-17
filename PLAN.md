@@ -86,7 +86,7 @@ every new number (see `test/run_test.sql`).
       byte-identical to before on the fixture.
 - [x] **M8.3 Jobs.** Done: `install_jobs.sql` / `uninstall_jobs.sql` (opt-in,
       repo root, not in `install.sql`) create `CAP_ML_RETRAIN` (weekly
-      `cap_forecast_ml.train_all`) and `CAP_REPORT_SPOOL_JOB` (daily
+      `cap_forecast_ml.train_all`; daily since M18.3) and `CAP_REPORT_SPOOL_JOB` (daily
       `cap_report_spool(p_dir)` → `UTL_FILE` snapshot of `CAPR_ALERTS` into a
       `report_dir` DEFINE, default `CAP_REPORTS`), both DISABLED and
       idempotent; jobs share the schema namespace with procedures, hence the
@@ -122,7 +122,9 @@ every new number (see `test/run_test.sql`).
       the median of all 4005 pairwise slopes, enumerated and sorted in the
       installer), `FIX_SPIKE` (TS within 1% of the true 5 MiB/day while OLS is
       3.9× off), plus a knob-flip test that switches to THEILSEN mid-run and
-      back.
+      back. Since M18.1 the Theil-Sen self-joins run only when
+      `slope_method = 1` (the `ts_*` columns are NULL otherwise), and M18.2
+      adds `slope_method = 2` (DRIFT).
 - [x] **M9.3 Change-point reset.** Done: knobs `reset_on_shrink` (1) and
       `shrink_mad_k` (6). `CAPF_TBSPC_FORECAST` restarts the training window at
       the most recent day whose day-over-day delta is below
@@ -175,7 +177,8 @@ every new number (see `test/run_test.sql`).
       `db_cpu_pct`, `db_cpu_p95_pct`, `db_cpu_max_pct`, `db_cpu_peak_pct`,
       `host_share_pct` (per-PDB share of host busy seconds); `CAPF_CPU_TREND`
       metrics `DB_CPU_PCT` / `DB_CPU_P95` with `days_to_sat`; new alert kind
-      `DBCPU_SAT`.
+      `DBCPU_SAT`. Since M17.2 the denominator is logical CPUs (`NUM_CPUS`),
+      not cores.
 - [x] **M10.3 Level-shift detection.** Done: `CAPA_CPU_SHIFT`
       (`ddl/40_anomaly_views.sql`) — per (dbid, con_dbid, metric ∈ `BUSY_PCT` /
       `BUSY_P95` / `DB_CPU_PCT`) the median of the last `shift_days` (7) days
@@ -319,8 +322,9 @@ new report section 7 (text + HTML), new fixture tables
       `apex/test/apex_smoke.sql` (every region query inside a scripted APEX
       session).
 - [ ] **M14.4 Follow-ups.** Collections hold whole views (fine for one
-      database; a results layer per the M18 todo for fleets); multi-select
-      filters; an acknowledgement table once alerts have identity.
+      database); multi-select filters. The results layer and alert
+      acknowledgement now exist (M19.3) but the app does not read
+      `CAPR_ALERTS_LATEST` or call `cap_results.ack` yet.
 
 ## M15 — Anomaly baseline modes (done)
 
@@ -373,25 +377,162 @@ z-score and flag rule are shared.
 - [x] **M15.6 Tests.** The fixture gains `INVERTED_WED` (40% / 40%: invisible
       to the day modes, HOUR_OF_WEEK 06:00 HIGH and 18:00 LOW). Every
       `run_test.sql` anomaly lookup names the full key (`anom_flag` /
-      `anom_n`); new mode closed forms, key-uniqueness checks and knob flips
-      (659 assertions, ML 86). `test/lint_anom_joins.sh` rejects any
+      `anom_n`); new mode closed forms, key-uniqueness checks and knob
+      flips. `test/lint_anom_joins.sh` rejects any
       `CAPA_ANOM` read outside ddl/40, ddl/45, test/, bench/ and the drill
       scripts; `test/dbmint_harness.sh` runs it first. Parity gate before the
       legacy views were deleted: `CAPA_TBSPC_ANOM` vs TRAILING (1068 rows) and
       `CAPA_CPU_ANOM` vs SAME_DOW `BUSY_PCT` (112 rows), zero differences
       apart from rows the legacy views omitted (`n_hist` 0) and `robust_z` on
       flat tablespace baselines (finite now).
-- [ ] **M15.7 Follow-ups.** Regenerate `docs/demo/` from
-      `test/demo_fixture.sql` (a manual lab step). Shift suppression and
-      episode collapsing in `CAPR_ALERTS` (owned by the review program's
-      alert-policy unit). Hourly observation docs are not exported to ELK
+- [ ] **M15.7 Follow-ups.** Hourly observation docs are not exported to ELK
       (`CAPR_HOURLY_POINTS` is ORDS-only). Warehouse mode has no per-source
-      timezone, so a fleet spanning timezones compares wall clocks.
+      timezone, so a fleet spanning timezones compares wall clocks. Done
+      since: shift suppression and episode collapsing in `CAPR_ALERTS`
+      (M19.3), `docs/demo/` regenerated (M21.4).
+
+## M16 — Config access and install hygiene (done)
+
+The 2026-10-17 review program (M16–M21) implemented every finding of a
+whole-repo review, one unit per commit, each verified on 19c with the
+fixture harness and both reports.
+
+- [x] **M16.1 One config access path.** `CAP_CFG` (one row, one NUMBER
+      column per knob, no defaults inlined) replaces the 14 pasted `cfg`
+      CTEs in ddl/20..55, the report drivers and the drill scripts.
+      `CAP_CONFIG.cfg_default`; the seed MERGE inserts missing keys and
+      refreshes only `cfg_default` / `cfg_desc`; reset is `UPDATE ... SET
+      cfg_value = cfg_default`. `CAP_CFG_CHECK` reports each knob OK /
+      MISSING / BAD with its range rule. (8b57bc8)
+- [x] **M16.2 Schema-aware install, uninstall and doctor.** `install.sql`
+      prints the target schema, warns on SYS, recompiles INVALID `CAP*`
+      objects in two passes and checks `ALL_OBJECTS` on `CURRENT_SCHEMA`;
+      `WHENEVER SQLERROR EXIT FAILURE`. `suite_version` is the one MERGE row
+      overwritten on every install. New `create_owner.sql` (dedicated owner
+      with direct DBA_HIST_* grants). `doctor.sql`: all DBA_HIST_* views the
+      seam reads, direct grants, `STATISTICS_LEVEL`, newest snapshot age, a
+      readiness table, `CAP_CFG_CHECK`, `cap_doctor_mode` in and
+      `cap_doctor_fail` out; `quickstart.sql` stops on a FAIL unless
+      `force_install = Y`. Drivers create `reports/` before spooling.
+      (abe891b)
+
+## M17 — Seam and daily layer (done)
+
+- [x] **M17.1 Per-container sources.** In CDB$ROOT the SYS_ time model and
+      sysstat are CDB-wide, so `CAPV_TIME_MODEL` / `CAPV_SYSSTAT` read
+      `DBA_HIST_CON_SYS_TIME_MODEL` / `DBA_HIST_CON_SYSSTAT` (PDB$SEED
+      dropped, SYS_ fallback for a non-CDB). `CAPV_RESOURCE_LIMIT` documented
+      as root-only. New `CAPV_CONTRACT` diagnostic in all three seams.
+      (82e8a42)
+- [x] **M17.2 One counter-delta view and the logical-CPU denominator.**
+      `CAPD_COUNTER_DELTA` holds the LAG + restart rule once for OSSTAT, time
+      model and sysstat. `db_cpu_pct` and its twins divide by `NUM_CPUS x
+      ivl_sec` per interval (cores read 2x on SMT); the fixture host is
+      NUM_CPUS 8 / cores 4. (82e8a42)
+- [x] **M17.3 Day coverage.** `covered_sec` / `is_complete` on the CPU, DB
+      time and series daily views (knob `complete_day_pct` 80); a fixture
+      partial day. (82e8a42)
+
+## M18 — Forecasts (done)
+
+- [x] **M18.1 Anchored, clamped, current.** Projections are `cur_value +
+      slope x h` with the OLS half-widths around that anchor (+30 and
+      days_to_full agree); days_to_full clamps at 0 and `limit_below_used`
+      flags a ceiling under usage; `newest_day` / `is_current` on every CAPF
+      view (knob `stale_days` 3); CPU and REDO fit complete days only;
+      Theil-Sen on demand; drill footers on `train_start`. Fixtures
+      `FIX_OVERFULL`, `FIX_DROPPED`. (4eb8e9e)
+- [x] **M18.2 CYCLIC, DRIFT, CPU gate, hot now.** `cyclic_min_cliffs` (2)
+      grades a sawtooth tablespace CYCLIC, judged on its peaks; `slope_method
+      = 2` (DRIFT) with random-walk bands; `cpu_quality_gate` and
+      `cpu_deseason` (both on by default: a deliberate default change) with
+      `slope_sig` / `deseasoned`; the CPU anchor is the median of the last
+      `shift_days` complete days; `recent_p95_med` / `hot_now`. Fixtures
+      `FIX_CYCLIC`, `FIX_CYCLIC_UP`, `FIXPDB2`. The demo SESSION_STORE false
+      page is gone. (0e63b84)
+- [x] **M18.3 Tier 2 that shows up and fails loudly.** The ESM row of
+      `CAPF_COMPARE` is the model's furthest step (<= 30, `esm_horizon_days`)
+      and counts while `model_age_days <= esm_max_age_days` (7); builds use
+      a temp name and `RENAME_MODEL`, a failure keeps the old model and
+      records FAILED / `last_error`, `train_*` raise ORA-20060 after the
+      batch; `CAPF_ESM_HEALTH` / `_SUMMARY`; `train_all` refreshes the
+      backtest twins (CPU too); `train_tablespace(name)`; AUTO ties within
+      `esm_auto_tie_pct` keep HOLT; `CAP_ML_RETRAIN` daily by default.
+      (6e4a045)
+
+## M19 — Alerts and results layer (done)
+
+- [x] **M19.1 How much more than usual.** Anomaly rows carry
+      `pct_vs_median` / `pct_vs_avg` (and the trailing average rate for
+      tablespaces); the alert messages say "+N% vs ..." next to the z-score.
+      (08cdb95)
+- [x] **M19.2 One alert surface.** `CAPR_ALERTS` (moved to ddl/55) gains
+      `state_key`, `direction`, `alarm_threshold`, `is_current`;
+      `CAPR_SEVERITY` computes every forecast severity once (section 1a GATE
+      column); forecast kinds need `is_current = 'Y'`; TBSPC_FULL on the peak
+      line of a CYCLIC tablespace; new kinds DATA_STALE (`stale_hours`),
+      CPU_HOT / DBCPU_HOT and MODEL_HEALTH; per-tablespace thresholds in
+      `CAP_TBSPC_OVERRIDE`; each fit view read once. (c96e6a5)
+- [x] **M19.3 Results layer.** ddl/60: `CAP_RUN`, `CAP_FIT_HIST`,
+      `CAP_ALERT_STATE`, `CAP_ALERT_EVENT` (persisted like `CAP_CONFIG`) and
+      `cap_results` (refresh / ack / unack / purge / reset), the only writer;
+      `CAPR_ALERTS_LATEST`, `CAPR_ALERT_EVENTS`, `CAPR_RUNS`,
+      `CAPR_FIT_HISTORY`, `CAPR_WEEKLY_DIGEST`, `CAPR_FORECAST_ACCURACY`,
+      `CAPR_COVERAGE`; anomaly episodes and shift suppression in
+      `CAPR_ALERTS`; retired dbids (`data_stale_max_days`);
+      `CAP_REFRESH_JOB`. Knobs `resolve_grace_runs`, `refresh_stale_hours`,
+      `digest_days`. (d451151)
+
+## M20 — Seam extensions (done)
+
+- [x] **M20.1 Parameters and ASM.** `CAPV_PARAMETER` (nine init
+      parameters as numbers, root rows) and `CAPV_ASM_DISKGROUP`; zero-row
+      stubs in warehouse mode and when the demo fixture lacks the tables.
+      `db_cpu_pct` divides by `LEAST(num_cpus, cpu_count)`. (10eee46)
+- [x] **M20.2 New series.** `ASM_DG:+<group>`, `TEMP_PEAK:<ts>`,
+      `UNDO_PEAK:<ts>` through the generic series model; FRA days on
+      `REDO_GB_DAY`; the sizing ask `need_gib_30/90/180` and `add_by_day`.
+      Fixtures `FIX_TEMP`, `FIX_UNDO`, `CAP_FIXTURE_PARAMETER`,
+      `CAP_FIXTURE_ASM_DISKGROUP`. (10eee46)
+
+## M21 — Consumers (done)
+
+- [x] **M21.1 Scoped and snapshot reports.** Both drivers take `[dbid]
+      [con_dbid] [LIVE|SNAPSHOT]` after the three presentation arguments,
+      `-` skips one; SNAPSHOT reads the last refresh run. New
+      `report/report_csv.sql` and `report/run_report.sh` (cron, exit codes).
+      (55e496c)
+- [x] **M21.2 Resilient HTML.** Every section in its own exception block;
+      the hero reads the suite's `DB_SIZE_GB` fit, so it matches section 7.
+      (55e496c)
+- [x] **M21.3 Who is filling it, metrics, doctor.** `CAPV_SEG_STAT` +
+      `CAPR_SEGMENT_GROWTH` (`seg_window_days`) in `drill_tbspc.sql`; the ORDS
+      `metrics` handler (Prometheus text); doctor prints the results layer
+      and the live `CAPV_CONTRACT` check. `suite_version` 16. (55e496c)
+- [x] **M21.4 Docs.** README, CLAUDE.md, PLAN.md and the docs site describe
+      M16–M21; `docs/demo/` regenerated from `test/demo_fixture.sql`;
+      `test/docs_lint.sh` checks the knob table, the object index and the
+      alert kinds against the DDL, and rejects assertion counts and
+      "generated" claims. (branch rf/u10-docs)
+- [ ] **M21.5 Follow-ups.** `suite_version` is 16 while the latest milestone
+      is M21 (bump it with its `CAP_CFG_CHECK` rule). Tier 2 still trains on
+      incomplete days (`is_complete` not applied in ml/, `CAPF_BACKTEST`
+      input, `CAPF_ESM_CANDIDATE`, `CAPF_ESM_HEALTH`).
+      `test/fixture_remove.sql` does not drop `CAP_FIXTURE_SEG_STAT`.
+      `CAP_TBSPC_OVERRIDE` does not apply to the TEMP / UNDO peak series;
+      PDB-level `cpu_count` is unused. ELK forecast doc ids hash
+      `horizon_days`, which moves as an ESM model ages; ORDS / ELK do not
+      select the new `CAPR_ALERTS` columns (`state_key`, `direction`,
+      `alarm_threshold`, `is_current`). `CAPR_ALERTS` costs seconds per query
+      on the fixture and the live demo reports take minutes: snapshot
+      `CAPR_COVERAGE` per run, and consider a run_test snapshot of
+      `CAPR_ALERTS`. The warehouse collector should gather the CON_ views,
+      parameters, ASM and segment facts (sibling repo).
 
 ## v2 (unchanged)
 
-- [ ] Memory forecasting (SGA/PGA from `DBA_HIST_MEM_DYNAMIC_COMPONENTS` /
-      `DBA_HIST_PGASTAT`).
+- [ ] Memory forecasting (SGA/PGA from `DBA_HIST_MEM_DYNAMIC_COMP` (the
+      19c view name) / `DBA_HIST_PGASTAT`).
 - [ ] Cross-DBID series stitching (non-CDB → PDB migrations) keyed on a stable
       warehouse `target_id`.
 
