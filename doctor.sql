@@ -103,7 +103,12 @@ DECLARE
         'DBA_HIST_PDB_INSTANCE',
         'DBA_HIST_DATABASE_INSTANCE',
         'DBA_HIST_RESOURCE_LIMIT',
-        'DBA_HIST_SYSSTAT');
+        'DBA_HIST_SYSSTAT',
+        'DBA_HIST_CON_SYS_TIME_MODEL',
+        'DBA_HIST_CON_SYSSTAT',
+        'DBA_HIST_PARAMETER',
+        'DBA_HIST_ASM_DISKGROUP_STAT',
+        'DBA_HIST_ASM_DISKGROUP');
 
     v_privs t_names := t_names(
         'CREATE TABLE',

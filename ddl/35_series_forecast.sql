@@ -2,8 +2,9 @@
 -- ddl/35_series_forecast.sql -- CAPF_SERIES_FORECAST: fixed-ceiling series (M11).
 -- =====================================================================
 -- The Tier 1 (pure-SQL OLS) forecast for CAPD_SERIES_DAILY, i.e. for
--- PROCESSES / SESSIONS (M11.1), REDO_GB_DAY (M11.2) and DB_SIZE_GB (M11.3).
--- One row per (dbid, con_dbid, series).
+-- PROCESSES / SESSIONS (M11.1), REDO_GB_DAY (M11.2), DB_SIZE_GB (M11.3) and
+-- the ASM_DG / TEMP_PEAK / UNDO_PEAK series. One row per
+-- (dbid, con_dbid, series).
 --
 -- It is deliberately the SAME arithmetic as CAPF_CPU_TREND -- REGR_* fit over
 -- the last `train_days` days, the M9.1 residual-SE prediction bands, the same
@@ -47,6 +48,19 @@
 -- bands t * (sd * SQRT(h) + h * se), no R^2 gate. slope_method = 1 does not:
 -- this view never computes Theil-Sen, and the slope_method column says OLS.
 -- drift_slope_per_day / drift_sd_per_day are exposed under every setting.
+--
+-- FRA days (REDO_GB_DAY rows only, NULL on every other series):
+--   fra_size_gb     = db_recovery_file_dest_size / 2^30 at the dbid's newest
+--                     snapshot that carries it (CAPV_PARAMETER), NULL when
+--                     unset or 0.
+--   fra_days_at_cur = fra_size_gb / the dbid's current redo rate: the days
+--                     of redo the FRA holds at today's rate. The log stream
+--                     is shared, so the rate is the SUM of cur_val over the
+--                     dbid's current (is_current = 'Y') REDO_GB_DAY rows, one
+--                     per container in local mode, and every REDO row of the
+--                     dbid carries the same number. NULL when either side is
+--                     NULL or 0. It is an upper bound: the FRA also holds
+--                     flashback logs and backups.
 --
 -- 19c note: inline OVER (...) on every window call; no 21c WINDOW clause.
 --
@@ -171,6 +185,26 @@ WITH src AS (
                MAX(val)         KEEP (DENSE_RANK LAST ORDER BY day_dt) AS cur_val,
                MAX(limit_value) KEEP (DENSE_RANK LAST ORDER BY day_dt) AS cur_limit
         FROM   d GROUP BY dbid, con_dbid, series
+     ),
+     -- db_recovery_file_dest_size is database-wide: MAX across instances at
+     -- the newest snapshot.
+     fra AS (
+        SELECT dbid,
+               MAX(value_num) KEEP (DENSE_RANK LAST ORDER BY snap_id) AS fra_bytes
+        FROM   capv_parameter
+        WHERE  parameter_name = 'db_recovery_file_dest_size'
+        GROUP  BY dbid
+     ),
+     -- The dbid's redo rate today: its current REDO_GB_DAY rows summed.
+     redo_db AS (
+        SELECT b.dbid, SUM(c.cur_val) AS redo_gb_day
+        FROM   b
+        JOIN   cur c ON c.dbid = b.dbid AND c.con_dbid = b.con_dbid AND c.series = b.series
+        JOIN   nd  n ON n.dbid = b.dbid
+        CROSS  JOIN cap_cfg cfg
+        WHERE  b.series = 'REDO_GB_DAY'
+          AND  b.last_day >= n.newest_day - cfg.stale_days
+        GROUP  BY b.dbid
      )
 SELECT f.dbid,
        f.con_dbid,
@@ -230,8 +264,16 @@ SELECT f.dbid,
             THEN 'Y' ELSE 'N' END                   AS is_current,
        f.slope_method,
        f.drift                                      AS drift_slope_per_day,
-       f.drift_sd                                   AS drift_sd_per_day
+       f.drift_sd                                   AS drift_sd_per_day,
+       CASE WHEN f.series = 'REDO_GB_DAY' AND r.fra_bytes > 0
+            THEN r.fra_bytes / 1073741824
+       END                                          AS fra_size_gb,
+       CASE WHEN f.series = 'REDO_GB_DAY' AND r.fra_bytes > 0 AND x.redo_gb_day > 0
+            THEN r.fra_bytes / 1073741824 / x.redo_gb_day
+       END                                          AS fra_days_at_cur
 FROM   est f
 JOIN   cur c ON c.dbid = f.dbid AND c.con_dbid = f.con_dbid AND c.series = f.series
 JOIN   nd  n ON n.dbid = f.dbid
+LEFT   JOIN fra     r ON r.dbid = f.dbid
+LEFT   JOIN redo_db x ON x.dbid = f.dbid
 CROSS  JOIN cap_cfg cfg;

@@ -21,6 +21,8 @@ PROMPT     (WORST = plausibly fastest fill; BEST empty = might never fill).
 PROMPT     CYCLIC = a recurring purge cycle (CYC_D days apart), always listed and judged
 PROMPT     on its peaks: PEAK% = highest fill in the window, DAYS_FULL = when the peak
 PROMPT     line reaches the limit (empty when the peaks do not grow).
+PROMPT     NEED_90_GIB = space to add so the worst case (upper 95% band) stays under the
+PROMPT     limit for 90 days. ADD_BY = the worst-case fill date (last day + WORST).
 
 COLUMN db_pdb          FORMAT A20           HEADING 'DB/PDB'
 COLUMN tablespace_name FORMAT A18           HEADING 'TABLESPACE'
@@ -36,6 +38,8 @@ COLUMN quality         FORMAT A20           HEADING 'QUALITY'
 COLUMN accel           FORMAT 990.00        HEADING 'ACCEL'
 COLUMN cycle_days      FORMAT 9990          HEADING 'CYC_D'
 COLUMN cycle_peak_pct  FORMAT 990.0         HEADING 'PEAK%'
+COLUMN need_gib_90     FORMAT 9999990.00    HEADING 'NEED_90_GIB'
+COLUMN add_by          FORMAT A10           HEADING 'ADD_BY'
 
 SELECT db_pdb,
        tablespace_name,
@@ -50,7 +54,9 @@ SELECT db_pdb,
        quality,
        accel,
        cycle_days,
-       cycle_peak_pct
+       cycle_peak_pct,
+       need_gib_90,
+       TO_CHAR(add_by_day, 'YYYY-MM-DD') AS add_by
 FROM   capr_tbspc_days_to_full
 WHERE  (days_to_full IS NOT NULL AND rank_dtf <= &top_n)
    OR  quality = 'CYCLIC'

@@ -470,7 +470,9 @@ LEFT   JOIN capr_container c
 -- limit_below_used / is_current pass straight through from
 -- CAPF_TBSPC_FORECAST ('Y'/'N'); nothing here filters on them. So do the
 -- CYCLIC columns (cycle_n always, the rest only on CYCLIC rows), with the
--- peak in GiB and the peak slope in MiB/day like cur_gb / slope_mb.
+-- peak in GiB and the peak slope in MiB/day like cur_gb / slope_mb. And the
+-- sizing ask: need_gib_30 / _90 / _180 (GiB to add so the worst case stays
+-- under the ceiling through +h) and add_by_day (the worst-case fill date).
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_tbspc_days_to_full AS
 SELECT f.dbid,
@@ -504,7 +506,11 @@ SELECT f.dbid,
        f.cycle_days,
        f.cycle_peak_bytes / 1024 / 1024 / 1024 AS cycle_peak_gb,
        f.cycle_peak_pct,
-       f.peak_slope_bpd   / 1024 / 1024        AS peak_slope_mb
+       f.peak_slope_bpd   / 1024 / 1024        AS peak_slope_mb,
+       f.need_gib_30,
+       f.need_gib_90,
+       f.need_gib_180,
+       f.add_by_day
 FROM   capf_tbspc_forecast f
 CROSS  JOIN cap_cfg cfg
 LEFT   JOIN capr_container c
@@ -659,8 +665,8 @@ WHERE  s.shift_flag IS NOT NULL;
 
 -- --------------------------------------------------------------------
 -- CAPR_SERIES (M11) -- report section 7: the fixed-ceiling series
--- (PROCESSES / SESSIONS / REDO_GB_DAY / DB_SIZE_GB), one row per
--- (container, series). Same contract as the other CAPR_ views: db_pdb is
+-- (PROCESSES / SESSIONS / REDO_GB_DAY / DB_SIZE_GB / ASM_DG:+<group> /
+-- TEMP_PEAK:<ts> / UNDO_PEAK:<ts>), one row per (container, series). Same contract as the other CAPR_ views: db_pdb is
 -- already resolved, every severity marker is computed here, and rank_series
 -- lets a driver bound the list with a plain WHERE.
 --   sev keys off days_to_limit (dtf_crit/dtf_warn) when the fit is OK, and
@@ -669,7 +675,9 @@ WHERE  s.shift_flag IS NOT NULL;
 --   limit_worst / limit_best are the M9.1 days-to-limit range (lo = worst
 --   case / soonest; best empty = might never get there).
 -- Series with no ceiling (REDO_GB_DAY) simply carry NULL limit columns and
--- an 'ok' severity: they are a trend, not a countdown.
+-- an 'ok' severity: they are a trend, not a countdown. REDO_GB_DAY rows pass
+-- fra_size_gb / fra_days_at_cur through (the days of redo the FRA holds at
+-- today's rate), NULL on every other series.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_series AS
 SELECT s.dbid,
@@ -701,7 +709,9 @@ SELECT s.dbid,
        ROW_NUMBER() OVER (ORDER BY s.days_to_limit NULLS LAST,
                                    s.pct_of_limit DESC NULLS LAST,
                                    s.con_dbid, s.series) AS rank_series,
-       s.is_current
+       s.is_current,
+       s.fra_size_gb,
+       s.fra_days_at_cur
 FROM   capf_series_forecast s
 CROSS  JOIN cap_cfg cfg
 LEFT   JOIN capr_container c
@@ -964,6 +974,8 @@ LEFT   JOIN capr_container c
 -- the same way: the TBSPC CYCLIC columns (cycle_n, cycle_days,
 -- cycle_peak_pct, peak_slope_per_day in bytes/day), and the CPU flags
 -- slope_sig (every CPU row) and hot_now (BUSY_P95 / DB_CPU_P95 only) as 1/0.
+-- Then the TBSPC sizing ask (need_gib_30 / _90 / _180, add_by_day), NULL for
+-- CPU and SERIES.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_fit AS
 SELECT f.dbid,
@@ -997,7 +1009,11 @@ SELECT f.dbid,
        f.cycle_peak_pct,
        f.peak_slope_per_day,
        f.slope_sig,
-       f.hot_now
+       f.hot_now,
+       f.need_gib_30,
+       f.need_gib_90,
+       f.need_gib_180,
+       f.add_by_day
 FROM  (
         SELECT t.dbid, t.con_dbid, 'TBSPC' AS kind, t.tablespace_name AS series,
                'bytes' AS unit, t.slope_method AS method,
@@ -1014,7 +1030,8 @@ FROM  (
                t.cycle_n, t.cycle_days, t.cycle_peak_pct,
                t.peak_slope_bpd                                   AS peak_slope_per_day,
                CAST(NULL AS NUMBER)                               AS slope_sig,
-               CAST(NULL AS NUMBER)                               AS hot_now
+               CAST(NULL AS NUMBER)                               AS hot_now,
+               t.need_gib_30, t.need_gib_90, t.need_gib_180, t.add_by_day
         FROM   capf_tbspc_forecast t
         LEFT   JOIN capr_tbspc_days_to_full r
           ON   r.dbid = t.dbid AND r.con_dbid = t.con_dbid
@@ -1033,7 +1050,8 @@ FROM  (
                CASE t.is_current WHEN 'Y' THEN 1 ELSE 0 END, NULL,
                NULL, NULL, NULL, NULL,
                CASE t.slope_sig WHEN 'Y' THEN 1 ELSE 0 END,
-               CASE t.hot_now WHEN 'Y' THEN 1 WHEN 'N' THEN 0 END
+               CASE t.hot_now WHEN 'Y' THEN 1 WHEN 'N' THEN 0 END,
+               NULL, NULL, NULL, CAST(NULL AS DATE)
         FROM   capf_cpu_trend t
         CROSS  JOIN cap_cfg cfg
         LEFT   JOIN (SELECT dbid, con_dbid, series_key, MIN(sev_rank) AS sev_rank
@@ -1051,7 +1069,8 @@ FROM  (
                NVL(UPPER(r.sev), 'OK'),
                NULL, t.last_day,
                CASE t.is_current WHEN 'Y' THEN 1 ELSE 0 END, NULL,
-               NULL, NULL, NULL, NULL, NULL, NULL
+               NULL, NULL, NULL, NULL, NULL, NULL,
+               NULL, NULL, NULL, CAST(NULL AS DATE)
         FROM   capf_series_forecast t
         LEFT   JOIN capr_series r
           ON   r.dbid = t.dbid AND r.con_dbid = t.con_dbid AND r.series = t.series

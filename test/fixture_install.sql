@@ -80,6 +80,21 @@
 --                  ('user commits') stat name is present purely so the
 --                  downstream 'redo size' filter is exercised.
 --   CONTAINER    : FIXCDB root row + FIXPDB1 and FIXPDB2 rows (M7.2 labels).
+--   PARAMETER    : the nine CAPV_PARAMETER names on every snapshot, cpu_count
+--                  8 = NUM_CPUS (no CPU number moves) and
+--                  db_recovery_file_dest_size 100 GiB -> FRA days at the
+--                  2 GiB/day redo rate = 50.
+--   ASM          : diskgroup DATA, 1000 GiB, used 200 + 5*i GiB at the 18:00
+--                  sample (2.5 GiB less at 06:00) -> ASM_DG:+DATA cur 800,
+--                  days_to_limit (90% of 1000) = 20, a SERIES_LIMIT CRIT.
+--                  Diskgroup FRA: 50 of 200 GiB, flat.
+--   FIX_TEMP     : TEMPORARY, 20 GiB allocated, no autoextend. The 06:00
+--                  sample is the day's peak, 6 - i/64 GiB, then 19.5 GiB on
+--                  the last day; the 18:00 sample reads 1 GiB. TEMP_PEAK
+--                  reads the peak, 97.5% of the limit now (SERIES_NEARLIMIT
+--                  CRIT), slope negative, LOW_CONFIDENCE.
+--   FIX_UNDO     : UNDO, 4 GiB allocated, autoextend to 10 GiB, peak 3 GiB at
+--                  18:00 every day: UNDO_PEAK 3 of 10 GiB, FLAT.
 --
 -- Run this BEFORE @install.sql with seam_mode=fixture (the seam views need the
 -- tables to exist), then run test/run_test.sql.
@@ -94,7 +109,8 @@ DECLARE
     v nl := nl('CAP_FIXTURE_SNAPSHOT','CAP_FIXTURE_TBSPC_USAGE','CAP_FIXTURE_TABLESPACE',
               'CAP_FIXTURE_DATAFILE','CAP_FIXTURE_OSSTAT','CAP_FIXTURE_TIME_MODEL',
               'CAP_FIXTURE_CONTAINER','CAP_FIXTURE_META',
-              'CAP_FIXTURE_RESOURCE_LIMIT','CAP_FIXTURE_SYSSTAT');
+              'CAP_FIXTURE_RESOURCE_LIMIT','CAP_FIXTURE_SYSSTAT',
+              'CAP_FIXTURE_PARAMETER','CAP_FIXTURE_ASM_DISKGROUP');
 BEGIN
     FOR i IN 1 .. v.COUNT LOOP
         BEGIN EXECUTE IMMEDIATE 'DROP TABLE ' || v(i) || ' PURGE';
@@ -133,6 +149,14 @@ CREATE TABLE cap_fixture_resource_limit (
 CREATE TABLE cap_fixture_sysstat (
     dbid NUMBER, con_dbid NUMBER, instance_number NUMBER, snap_id NUMBER,
     stat_name VARCHAR2(64), value NUMBER);
+-- value_num is a NUMBER here (the local seam converts DBA_HIST_PARAMETER's
+-- VARCHAR2), group_name has no '+' (AWR stores the bare name).
+CREATE TABLE cap_fixture_parameter (
+    dbid NUMBER, con_dbid NUMBER, instance_number NUMBER, snap_id NUMBER,
+    parameter_name VARCHAR2(64), value_num NUMBER);
+CREATE TABLE cap_fixture_asm_diskgroup (
+    dbid NUMBER, con_dbid NUMBER, snap_id NUMBER, group_name VARCHAR2(128),
+    total_mb NUMBER, free_mb NUMBER, usable_file_mb NUMBER);
 
 DECLARE
     c_dbid   CONSTANT NUMBER := 42424242;
@@ -1316,6 +1340,183 @@ BEGIN
         || TO_CHAR(200 + 2 * c_nd) || ' of ' || TO_CHAR(c_sesslim)
         || ', processes 150 of ' || TO_CHAR(c_proclim)
         || ', redo 2 GiB/day, probe day index ' || TO_CHAR(v_probe));
+END;
+/
+
+-- =====================================================================
+-- Parameters, ASM diskgroups, TEMP / UNDO peaks (seam extensions).
+-- =====================================================================
+-- A separate block, like M11's: it only reuses the snapshot spine (2000+2i
+-- ends 06:00, 2001+2i ends 18:00, no 06:00 snapshot on the restart day).
+--
+-- Closed forms (shipped knobs: train_days 90, series_sat_pct 90,
+-- nearfull_warn_pct 90, nearfull_crit_pct 97, r2_gate 0.60):
+--   PARAMETER  cpu_count 8 on every snapshot = NUM_CPUS, so cpu_ceiling = 8
+--              and no db_cpu_pct moves. run_test.sql sets it to 4 on the
+--              probe day (db_cpu_pct doubles there) and rolls back.
+--              db_recovery_file_dest_size 100 GiB -> fra_size_gb 100 and
+--              fra_days_at_cur = 100 / 2.0 GiB/day = 50.
+--   ASM DATA   1000 GiB. Used 200 + 5*i GiB at 18:00, 197.5 + 5*i at 06:00,
+--              so the day's last sample is 200 + 5*i: slope exactly 5,
+--              cur 800 = 80% (under nearfull_warn_pct) and
+--              days_to_limit = FLOOR((1000 * 0.90 - 800) / 5) = 20 -> CRIT.
+--   ASM FRA    50 of 200 GiB on every sample -> FLAT, 25%.
+--   FIX_TEMP   20 GiB allocated, maxsize 0 (limit = allocated). The day's
+--              peak p(i) = 6 - i/64 GiB sits on the 06:00 sample (on the
+--              restart day, which has no 06:00 snapshot, on the 18:00 one),
+--              19.5 GiB on the last day. Every other sample reads 1 GiB, so
+--              the last sample of the last day is 1 GiB and only a MAX finds
+--              19.5. pct now 97.5 -> SERIES_NEARLIMIT CRIT. The OLS over
+--              i = 31..120 is computed below: slope < 0 (no days_to_limit)
+--              and R^2 about 0.005 (LOW_CONFIDENCE).
+--   FIX_UNDO   4 GiB allocated, autoextend to 10 GiB (limit = maxsize).
+--              1 GiB at 06:00, 3 GiB at 18:00 -> value 3 of 10, FLAT.
+-- CAPD_TBSPC_DAILY excludes both by contents, so no tablespace number moves.
+DECLARE
+    c_dbid    CONSTANT NUMBER      := 42424242;
+    c_con     CONSTANT NUMBER      := 42424242;
+    c_inst    CONSTANT NUMBER      := 1;
+    c_nd      CONSTANT PLS_INTEGER := 120;
+    c_restart CONSTANT PLS_INTEGER := 60;
+    c_bs      CONSTANT NUMBER      := 8192;
+    c_gb      CONSTANT NUMBER      := 131072;          -- 1 GiB in 8 KiB blocks
+    c_satpct  CONSTANT NUMBER      := 90;               -- shipped series_sat_pct
+    c_r2gate  CONSTANT NUMBER      := 0.60;             -- shipped r2_gate
+    -- 100 GiB as a bare NUMBER literal (100*1024*1024*1024 overflows
+    -- PLS_INTEGER, see c_50g above).
+    c_fra     CONSTANT NUMBER      := 107374182400;
+    c_ncpu    CONSTANT NUMBER      := 8;
+    c_asmtot  CONSTANT NUMBER      := 1024000;          -- DATA: 1000 GiB in MB
+    c_frtot   CONSTANT NUMBER      := 204800;           -- FRA: 200 GiB in MB
+    c_frused  CONSTANT NUMBER      := 51200;            -- FRA: 50 GiB in MB
+    v_probe   PLS_INTEGER;
+    -- temp_peak() is a local function, not callable inside SQL (PLS-00231).
+    v_tcur    NUMBER;
+    v_tprobe  NUMBER;
+
+    -- FIX_TEMP's daily peak in blocks.
+    FUNCTION temp_peak(p_i PLS_INTEGER) RETURN NUMBER IS
+    BEGIN
+        RETURN CASE WHEN p_i = c_nd THEN 39 * c_gb / 2 ELSE 6 * c_gb - 2048 * p_i END;
+    END;
+    PROCEDURE params(p_snap NUMBER) IS
+        PROCEDURE one(p_name VARCHAR2, p_val NUMBER) IS
+        BEGIN
+            INSERT INTO cap_fixture_parameter
+            VALUES (c_dbid, c_con, c_inst, p_snap, p_name, p_val);
+        END;
+    BEGIN
+        one('cpu_count',                  c_ncpu);
+        one('processes',                  300);          -- = the PROCESSES limit
+        one('sessions',                   500);          -- = the SESSIONS limit
+        one('db_recovery_file_dest_size', c_fra);
+        one('sga_target',                 4294967296);
+        one('sga_max_size',               4294967296);
+        one('pga_aggregate_target',       1073741824);
+        one('pga_aggregate_limit',        2147483648);
+        one('memory_target',              0);
+    END;
+    PROCEDURE asm(p_snap NUMBER, p_data_gib NUMBER) IS
+    BEGIN
+        INSERT INTO cap_fixture_asm_diskgroup
+        VALUES (c_dbid, c_con, p_snap, 'DATA', c_asmtot, c_asmtot - p_data_gib * 1024, NULL);
+        INSERT INTO cap_fixture_asm_diskgroup
+        VALUES (c_dbid, c_con, p_snap, 'FRA', c_frtot, c_frtot - c_frused, NULL);
+    END;
+    PROCEDURE tusage(p_snap NUMBER, p_ts NUMBER, p_size NUMBER, p_max NUMBER, p_used NUMBER) IS
+    BEGIN
+        INSERT INTO cap_fixture_tbspc_usage
+        VALUES (c_dbid, c_con, p_snap, p_ts, p_size, p_max, p_used);
+    END;
+BEGIN
+    SELECT nval INTO v_probe FROM cap_fixture_meta WHERE mkey = 'PROBE_DAY';
+
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 24, 'FIX_TEMP', 'TEMPORARY', c_bs);
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 25, 'FIX_UNDO', 'UNDO',      c_bs);
+    -- An UNDO tablespace has datafiles. A TEMPORARY one has only tempfiles,
+    -- which DBA_HIST_DATAFILE does not list, so FIX_TEMP gets no row.
+    INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 25, c_bs);
+
+    FOR i IN 0 .. c_nd LOOP
+        IF i <> c_restart THEN
+            params(2000 + 2 * i);
+            asm(2000 + 2 * i, 197.5 + 5 * i);
+            tusage(2000 + 2 * i, 24, 20 * c_gb, 0,         temp_peak(i));
+            tusage(2000 + 2 * i, 25,  4 * c_gb, 10 * c_gb, c_gb);
+        END IF;
+        params(2001 + 2 * i);
+        asm(2001 + 2 * i, 200 + 5 * i);
+        tusage(2001 + 2 * i, 24, 20 * c_gb, 0,
+               CASE WHEN i = c_restart THEN temp_peak(i) ELSE c_gb END);
+        tusage(2001 + 2 * i, 25,  4 * c_gb, 10 * c_gb, 3 * c_gb);
+    END LOOP;
+
+    -- ---- expected values for run_test.sql ----
+    v_tcur   := temp_peak(c_nd);
+    v_tprobe := temp_peak(v_probe);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_COUNT',      c_ncpu);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_COUNT_CAGED', c_ncpu / 2);
+    -- Probe day under cpu_count 4: 400 s of DB CPU over 4 CPUs * 86400 s,
+    -- and the 18:00 peak interval's 300 s over 4 * 43200 s.
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_PCT_CAGED',      100 * 400 / (c_ncpu / 2 * 86400));
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_PEAK_PCT_CAGED', 100 * 300 / (c_ncpu / 2 * 43200));
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('FRA_SIZE_GB', c_fra / 1073741824);       -- 100
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('FRA_DAYS',    c_fra / 1073741824 / 2);   -- 50 (redo 2 GiB/day)
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ASM_DATA_CUR',   200 + 5 * c_nd);        -- 800
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ASM_DATA_LIMIT', c_asmtot / 1024);       -- 1000
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ASM_DATA_SLOPE', 5);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ASM_DATA_PCT',
+        ROUND(100 * (200 + 5 * c_nd) / (c_asmtot / 1024), 1));                                  -- 80
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ASM_DATA_DTL',
+        FLOOR((c_asmtot / 1024 * c_satpct / 100 - (200 + 5 * c_nd)) / 5));                      -- 20
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ASM_DATA_P30', 200 + 5 * c_nd + 5 * 30); -- 950
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ASM_DATA_PROBE', 200 + 5 * v_probe);     -- last sample, not 06:00
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ASM_FRA_CUR',    c_frused / 1024);       -- 50
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ASM_FRA_LIMIT',  c_frtot / 1024);        -- 200
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('TEMP_CUR',   v_tcur / c_gb);             -- 19.5
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('TEMP_LIMIT', 20);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('TEMP_PCT',
+        ROUND(100 * v_tcur / (20 * c_gb), 1));                                                  -- 97.5
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('TEMP_PROBE', v_tprobe / c_gb);           -- 06:00 peak
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('UNDO_CUR',   3);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('UNDO_LIMIT', 10);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('UNDO_PCT',   30);
+    -- Sizing ask for FIX_FILLING (10 MiB/day = 1280 blocks/day from 12800
+    -- blocks, 192000-block maxsize, zero residuals so the band collapses on
+    -- the anchored line): need_h = (cur + h * slope - limit) / 2^30.
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('FILLING_NEED_30',
+        GREATEST(0, (1280 * c_nd + 12800 + 30  * 1280 - 192000) * c_bs) / 1073741824);    -- 0.09765625
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('FILLING_NEED_90',
+        GREATEST(0, (1280 * c_nd + 12800 + 90  * 1280 - 192000) * c_bs) / 1073741824);    -- 0.68359375
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('FILLING_NEED_180',
+        GREATEST(0, (1280 * c_nd + 12800 + 180 * 1280 - 192000) * c_bs) / 1073741824);    -- 1.5625
+    -- FIX_TEMP's OLS over the forecast window, in GiB, i-space (day_n is i +
+    -- a constant: slope and R^2 are shift-invariant).
+    DECLARE
+        n NUMBER := 0; sx NUMBER := 0; sy NUMBER := 0; sxx NUMBER := 0;
+        sxy NUMBER := 0; syy NUMBER := 0; y NUMBER;
+        bxx NUMBER; bxy NUMBER; byy NUMBER; slope NUMBER; r2 NUMBER;
+    BEGIN
+        FOR i IN c_nd - 89 .. c_nd LOOP
+            y := temp_peak(i) / c_gb;
+            n := n + 1; sx := sx + i; sy := sy + y;
+            sxx := sxx + i * i; sxy := sxy + i * y; syy := syy + y * y;
+        END LOOP;
+        bxx   := sxx - sx * sx / n;
+        bxy   := sxy - sx * sy / n;
+        byy   := syy - sy * sy / n;
+        slope := bxy / bxx;
+        r2    := bxy * bxy / (bxx * byy);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('TEMP_SLOPE', slope);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('TEMP_R2',    r2);
+        INSERT INTO cap_fixture_meta (mkey, sval) VALUES ('TEMP_Q',
+            CASE WHEN slope = 0 THEN 'FLAT' WHEN r2 < c_r2gate THEN 'LOW_CONFIDENCE' ELSE 'OK' END);
+    END;
+    COMMIT;
+
+    DBMS_OUTPUT.PUT_LINE('Seam-extension fixtures loaded: cpu_count ' || c_ncpu
+        || ', FRA 100 GiB, ASM DATA 200..' || TO_CHAR(200 + 5 * c_nd) || ' of 1000 GiB'
+        || ', FIX_TEMP peak 19.5 of 20 GiB, FIX_UNDO 3 of 10 GiB');
 END;
 /
 

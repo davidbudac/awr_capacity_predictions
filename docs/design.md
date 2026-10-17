@@ -36,11 +36,11 @@ This document explains *why* each layer is shaped the way it is. For usage see
 
 ## Layer 1 — the seam (`CAPV_*`)
 
-Nine views re-present the AWR dictionary in a stable shape. Everything
+Eleven views re-present the AWR dictionary in a stable shape. Everything
 downstream depends only on these, so swapping `ddl/10_seam_local.sql` for `11`
 (warehouse) or `12` (fixture) re-points the whole stack. Every view carries
-`(dbid, con_dbid)`. A tenth view, `CAPV_CONTRACT`, describes what the other
-nine present (see the last bullet).
+`(dbid, con_dbid)`. A twelfth view, `CAPV_CONTRACT`, describes what the other
+eleven present (see the last bullet).
 
 - `DBA_HIST_SNAPSHOT` has no `CON_DBID`, so `CAPV_SNAPSHOT` sets
   `con_dbid := dbid`. The tablespace / OS / time-model views expose the **real**
@@ -101,12 +101,33 @@ nine present (see the last bullet).
   `ddl/11_seam_warehouse.sql` emits `CAPV_RESOURCE_LIMIT` with the exact
   column contract and `WHERE 1 = 0`: the stack stays valid in warehouse mode
   and the `PROCESSES` / `SESSIONS` series simply have no rows there.
+- `CAPV_PARAMETER` / `CAPV_ASM_DISKGROUP`. `CAPV_PARAMETER` reads
+  `DBA_HIST_PARAMETER` for nine names (`cpu_count`, `processes`, `sessions`,
+  `db_recovery_file_dest_size`, `sga_target`, `sga_max_size`,
+  `pga_aggregate_target`, `pga_aggregate_limit`, `memory_target`), one row
+  per snapshot, instance and name, `value_num` converted from the `VARCHAR2`
+  `VALUE` with the `REGEXP_LIKE` guard (sizes are in bytes). Parameters are
+  instance level, so `con_dbid := dbid`. In `CDB$ROOT` the source also holds
+  rows under a PDB's `con_dbid` for parameters set at PDB level (verified on
+  19.27: `sga_target` for the root, the seed and PDB1 in one snapshot); only
+  the root row is kept. `CAPV_ASM_DISKGROUP` joins
+  `DBA_HIST_ASM_DISKGROUP_STAT` (`TOTAL_MB`, `FREE_MB` per snapshot) to
+  `DBA_HIST_ASM_DISKGROUP` (the `NAME`, no leading `+`) on
+  `(dbid, group_number, con_dbid)`. The 19c view has no `USABLE_FILE_MB`
+  (verified), so `usable_file_mb` is NULL; sizes are raw MB, before
+  mirroring. A database without ASM has no rows. Neither source is collected
+  by the warehouse yet: `ddl/11` emits both as `WHERE 1 = 0` contract stubs
+  (sibling-repo TODO in its header). The fixture seam reads
+  `CAP_FIXTURE_PARAMETER` / `CAP_FIXTURE_ASM_DISKGROUP` and falls back to the
+  same stubs when a table is missing, because `test/demo_fixture.sql` does
+  not build them.
 - `CAPV_CONTRACT` is a diagnostic over the seam itself, the same body in all
   three seam files: one row per fact source (`SNAPSHOT`, `TBSPC_USAGE`,
-  `OSSTAT`, `TIME_MODEL`, `SYSSTAT`, `RESOURCE_LIMIT`) with `n_rows`,
-  `n_con_dbid`, `min_snap_id` / `max_snap_id`, `max_end_time` and
-  `per_container_expected` (`Y` for tablespace usage, time model and sysstat,
-  `N` for the host, instance and spine sources). `n_con_dbid = 1` against a
+  `OSSTAT`, `TIME_MODEL`, `SYSSTAT`, `RESOURCE_LIMIT`, `PARAMETER`,
+  `ASM_DISKGROUP`) with `n_rows`, `n_con_dbid`, `min_snap_id` /
+  `max_snap_id`, `max_end_time` and `per_container_expected` (`Y` for
+  tablespace usage, time model and sysstat, `N` for the host, instance and
+  spine sources). `n_con_dbid = 1` against a
   `Y` says the per-PDB series are missing, which is what a warehouse with the
   old collector shows. It full-scans every source, so no analytic view reads
   it. It is meant for `doctor.sql`.
@@ -204,9 +225,29 @@ row per day.
   instances). `host_share_pct = 100·db_cpu_sec / host busy seconds` (host busy
   summed over the `dbid`, since OSSTAT records under the CDB's `con_dbid`) is
   the per-PDB share of what the host was actually doing.
+  **cpu_count ceiling.** The denominator is really
+  `cpu_ceiling = LEAST(num_cpus, cpu_count)`, with `cpu_count` from
+  `CAPV_PARAMETER`, read at the interval's end snapshot in
+  `CAPD_DBTIME_INTERVAL` (a NULL on either side leaves the other), which
+  also exposes `cpu_count` / `cpu_ceiling` per interval and builds `cap_sec`
+  from the ceiling. It is not carried forward like `num_cpus`: AWR records
+  the parameters at every snapshot, and carrying a second column through the
+  windowed `ncpu` step made the optimizer push the interval join into it
+  (minutes per query on the 150-day demo). With a Resource
+  Manager plan active, `cpu_count` cages the instance, so an instance at
+  `cpu_count` 4 on a 16-CPU host saturates at 4 CPUs and `db_cpu_pct` and its
+  p95 / max / peak twins read against 4. Without a plan the cage is not
+  enforced and `db_cpu_pct` can pass 100. `cpu_count` defaults to the logical
+  CPU count, so on most systems `cpu_ceiling = num_cpus` and nothing moves;
+  the identity with `busy_pct · host_share_pct / 100` holds only then. Per
+  day the view exposes `cpu_count` and `cpu_ceiling` (MAX per instance,
+  summed across instances). Only the root's `cpu_count` is read: a PDB-level
+  `CPU_COUNT` is in `DBA_HIST_PARAMETER` under the PDB's `con_dbid` but is not
+  used. The fixture keeps `cpu_count = NUM_CPUS = 8`; `run_test.sql` sets it
+  to 4 on the probe day and asserts that day's `db_cpu_pct` doubles.
 - **`CAPD_CPU_HOURLY` (M15)** has one row per `(dbid, con_dbid, metric,
   hour_ts)`: host `BUSY_PCT` (OSSTAT, so only under the CDB `con_dbid`) and
-  per-container `DB_CPU_PCT` (logical-CPU denominator, as in
+  per-container `DB_CPU_PCT` (CPU-ceiling denominator, as in
   `CAPD_DBTIME_DAILY`) per END-hour bucket, with `n_intervals`, `ivl_hours`
   and `gap_flag`. `day_dt` is carried from the interval views, not
   `TRUNC(hour_ts)`: a bucket labelled 00:00 that holds an interval ending
@@ -310,6 +351,20 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   fit's own x̄ as before, but the band is drawn around the anchored projection:
   `proj_h ± half_h`. A perfectly linear or flat series has SSE = 0, so its
   bands collapse onto the point projection.
+- **Sizing ask** (`CAPF_TBSPC_FORECAST`): `need_gib_h = GREATEST(0,
+  proj_h_hi − limit_bytes) / 2³⁰` for h ∈ {30, 90, 180}, the space to add so
+  the **upper** edge of the 95% band stays under the ceiling through day h,
+  and `add_by_day = last_day + days_to_full_lo`, the worst-case fill date.
+  `need_gib_h` is 0 when the band stays under, NULL when the band is NULL or
+  the row is CYCLIC (its band follows the sawtooth, not the peaks), and at
+  least the overage when the ceiling is already under the usage.
+  `add_by_day` is NULL when `days_to_full_lo` is. `CAPR_TBSPC_DAYS_TO_FULL`
+  and `CAPR_FIT` pass the four columns; section 1a prints `NEED_90_GIB` and
+  `ADD_BY`, and the HTML report says "add X GiB by <date>". Fixture:
+  `FIX_FILLING` (zero residuals) needs `(cur + h · 10 MiB − limit) / 2³⁰` and
+  is added by `last_day + days_to_full_lo` (20, or 19 when a rounding
+  epsilon floors it), `FIX_LINEAR` needs 0 at every horizon, `FIX_OVERFULL`
+  needs its 0.5 GiB overage at every horizon with no date.
 - **Robust slope (M9.2)** — knob `slope_method` (`CAP_CONFIG` is numeric:
   **0 = OLS**, the default, **1 = THEILSEN**, **2 = DRIFT**, next bullet). OLS minimises *squared* error, so
   a single step — a bulk load, an import, a partition drop — drags the whole
@@ -462,10 +517,10 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
 
 ## Layer 2b / 3b — fixed-ceiling series (M11)
 
-Three more series share one property with tablespaces: a value approaching a
-**hard ceiling that is not a byte count**. Rather than a view per series they
-land in one generic pair keyed by a `series` name, so the report, the alert
-view and any future series need no extra code.
+More series share one property with tablespaces: a value approaching a
+**hard ceiling that is not a tablespace's own**. Rather than a view per series
+they land in one generic pair keyed by a `series` name, so the report, the
+alert view, the point feeds and any future series need no extra code.
 
 `CAPD_SERIES_DAILY (dbid, con_dbid, series, day_dt, value, limit_value, unit,
 n_samples, covered_sec, is_complete, day_gap, max_interval_hours, gap_flag)` — `ddl/25_series_daily.sql`, a UNION ALL of:
@@ -475,6 +530,8 @@ n_samples, covered_sec, is_complete, day_gap, max_interval_hours, gap_flag)` —
 | `PROCESSES` / `SESSIONS` | daily `MAX(max_utilization)` per instance, **summed** across instances | the `processes` / `sessions` parameter, summed across instances | `COUNT` |
 | `REDO_GB_DAY` | `SUM('redo size' deltas)/2³⁰` for the day | NULL — no ceiling | `GIB_PER_DAY` |
 | `DB_SIZE_GB` | `SUM(used_bytes)/2³⁰` over `CAPD_TBSPC_DAILY` | `SUM(limit_bytes)/2³⁰` | `GIB` |
+| `ASM_DG:+<group>` | `(total_mb − free_mb)/1024` at the day's **last** sample (`CAPV_ASM_DISKGROUP`) | `total_mb/1024` | `GIB` |
+| `TEMP_PEAK:<ts>` / `UNDO_PEAK:<ts>` | the day's **MAX** of used blocks · block size / 2³⁰ for a `TEMPORARY` / `UNDO` tablespace | the day's MAX of (maxsize when autoextend, else size) · block size / 2³⁰ | `GIB` |
 
 - `MAX_UTILIZATION` is a **high-water mark since instance startup**, so within
   one startup epoch it is monotone and the daily MAX is the end-of-day HWM —
@@ -498,6 +555,26 @@ n_samples, covered_sec, is_complete, day_gap, max_interval_hours, gap_flag)` —
 - `DB_SIZE_GB` inherits everything `CAPD_TBSPC_DAILY` already decided: **UNDO
   and TEMPORARY are excluded**, and M9.5 overrides / exclusions are applied. So
   "total DB size" means permanent-tablespace bytes actually used.
+- `ASM_DG:+<group>`: autoextend `maxsize` is often fiction (on 19c every
+  autoextend smallfile datafile reports 4,194,302 blocks, the 32 GiB cap), so
+  the diskgroup under the datafiles is the real ceiling. Raw MB before
+  mirroring: the percent is right for any redundancy, the GiB are raw. AWR
+  stores the name without the `+`; the series name adds it. A dismounted
+  group (`total_mb = 0`) is skipped.
+- `TEMP_PEAK:<ts>` / `UNDO_PEAK:<ts>`: `CAPD_TBSPC_DAILY` drops these
+  contents because their level is not growth, and it still does. But running
+  out of them is an outage (ORA-01652, ORA-30036), so this branch reads
+  `CAPV_TBSPC_USAGE` + `CAPV_TABLESPACE` directly and keeps the day's peak. A
+  peak is the highest **sampled** value: usage between two snapshots is not
+  seen. `CAP_TBSPC_OVERRIDE` does not apply to them.
+- All three are level series (`covered_sec` NULL, `is_complete` `'Y'`), and
+  their names are unique per container, so `CAPF_SERIES_FORECAST`,
+  `SERIES_LIMIT` / `SERIES_NEARLIMIT`, `CAPR_SERIES`, section 7 and the
+  point feeds handle them with no code of their own. A TEMP peak at 97% of
+  its size raises `SERIES_NEARLIMIT` CRIT whatever its (usually FLAT or
+  noisy) forecast says. They are not in the anomaly engine's series registry
+  (`sreg` in `CAPA_OBS`), so they produce no `SERIES_ANOM` rows: a TEMP or
+  UNDO peak jumps by construction, and an ASM fill is a forecast question.
 
 `CAPF_SERIES_FORECAST` — `ddl/35_series_forecast.sql`, the same REGR fit, the
 same M9.1 prediction bands (`t ≈ 1.96 + 2.4/df`) and the same quality ladder as
@@ -521,10 +598,20 @@ arithmetic is **copied**, not shared, on purpose: `CAPF_TBSPC_FORECAST` and
 `CAPF_CPU_TREND` grow robust slopes and change-point resets on their own
 schedule, while this view stays a plain, hand-auditable OLS fit.
 
+**FRA days.** `REDO_GB_DAY` rows also carry `fra_size_gb`
+(`db_recovery_file_dest_size / 2³⁰` at the dbid's newest snapshot, from
+`CAPV_PARAMETER`, NULL when unset or 0) and `fra_days_at_cur = fra_size_gb /
+the dbid's current redo rate`, the days of redo the FRA holds at today's
+rate. The log stream is shared, so the rate is the sum of `cur_val` over the
+dbid's current `REDO_GB_DAY` rows (one per container in local mode), and
+every REDO row of the dbid carries the same number. It is an upper bound:
+the FRA also holds flashback logs and backups. NULL on every other series.
+Fixture: 100 GiB / 2.0 GiB/day = 50.
+
 Two alert kinds and one report view ride on it: `SERIES_LIMIT` (quality `OK`,
 `days_to_limit <= dtf_warn`), `SERIES_NEARLIMIT` (`pct_of_limit >=
 nearfull_warn_pct` now, at **any** quality — the M7.1 rule again) and
-`CAPR_SERIES` (report section 7).
+`CAPR_SERIES` (report section 7, which prints `FRA_DAYS` on the REDO row).
 
 ## Layer 4 — anomalies (`CAPA_*`)
 

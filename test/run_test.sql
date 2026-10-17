@@ -1221,11 +1221,21 @@ BEGIN
         SELECT value INTO v_num FROM capr_alerts
           WHERE kind = 'SERIES_LIMIT' AND series_key = 'SESSIONS';
         chk_int('SERIES_LIMIT value = days_to_limit', v_num, meta_n('SESS_DTL'));
+        -- ASM_DG:+DATA (20 days to 90%) is the one other SERIES_LIMIT and
+        -- TEMP_PEAK:FIX_TEMP (97.5% now) the one SERIES_NEARLIMIT. Both are
+        -- asserted in the seam-extension block below.
         SELECT COUNT(*) INTO v_n FROM capr_alerts
-          WHERE kind = 'SERIES_LIMIT' AND series_key <> 'SESSIONS';
+          WHERE kind = 'SERIES_LIMIT' AND series_key IN ('PROCESSES','REDO_GB_DAY','DB_SIZE_GB');
         chk_int('no SERIES_LIMIT for PROCESSES / REDO_GB_DAY / DB_SIZE_GB', v_n, 0);
-        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'SERIES_NEARLIMIT';
-        chk_int('no SERIES_NEARLIMIT (sessions at 88%, under 90)', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+          WHERE kind = 'SERIES_LIMIT' AND series_key NOT IN ('SESSIONS','ASM_DG:+DATA');
+        chk_int('SERIES_LIMIT only for SESSIONS and ASM_DG:+DATA', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+          WHERE kind = 'SERIES_NEARLIMIT' AND series_key = 'SESSIONS';
+        chk_int('no SERIES_NEARLIMIT for SESSIONS (88%, under 90)', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+          WHERE kind = 'SERIES_NEARLIMIT' AND series_key <> 'TEMP_PEAK:FIX_TEMP';
+        chk_int('SERIES_NEARLIMIT only for TEMP_PEAK:FIX_TEMP', v_n, 0);
         SELECT COUNT(*) INTO v_n   FROM capr_series;
         SELECT COUNT(*) INTO v_num FROM capf_series_forecast;
         chk_int('CAPR_SERIES row count = CAPF_SERIES_FORECAST', v_n, v_num);
@@ -1235,6 +1245,317 @@ BEGIN
         chk_int('CAPR_SERIES SESSIONS ranks first', v_num, 1);
         SELECT COUNT(*) INTO v_n FROM capr_series WHERE db_pdb <> 'FIXCDB';
         chk_int('CAPR_SERIES resolves db_pdb', v_n, 0);
+    END;
+
+    -- Seam extensions: CAPV_PARAMETER and the cpu_count ceiling, FRA days on
+    -- REDO_GB_DAY, the ASM_DG / TEMP_PEAK / UNDO_PEAK series and the
+    -- tablespace sizing ask. Closed forms recorded by fixture_install.sql.
+    DECLARE
+        d_last  DATE   := meta_d('LAST_DAY');
+        n_probe NUMBER := meta_n('PROBE_DAY');
+        n_caged NUMBER := meta_n('CPU_COUNT_CAGED');
+        n_pdbc  NUMBER := meta_n('PDB_CON_DBID');
+        n_snaps NUMBER := 2 * (meta_d('LAST_DAY') - meta_d('BASE_DAY') + 1) - 1;
+        n_days  NUMBER := meta_d('LAST_DAY') - meta_d('BASE_DAY') + 1;
+        v_c     VARCHAR2(1);
+        v_q     VARCHAR2(30);
+        v_dt    DATE;
+        v_dt2   DATE;
+        v_a     NUMBER;
+        v_b     NUMBER;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('=== CAPV_PARAMETER and the cpu_count ceiling ===');
+        SELECT COUNT(*) INTO v_n FROM capv_parameter WHERE parameter_name = 'cpu_count';
+        chk_int('CAPV_PARAMETER cpu_count rows (one per snapshot)', v_n, n_snaps);
+        SELECT COUNT(DISTINCT parameter_name) INTO v_n FROM capv_parameter;
+        chk_int('CAPV_PARAMETER parameter names', v_n, 9);
+        SELECT COUNT(*) INTO v_n FROM capv_parameter WHERE con_dbid <> dbid;
+        chk_int('CAPV_PARAMETER rows with con_dbid <> dbid', v_n, 0);
+        SELECT cpu_count, cpu_ceiling, num_cpus, db_cpu_pct INTO v_num, v_num2, v_num3, v_a
+          FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_probe;
+        chk_int  ('DBTIME probe cpu_count', v_num, meta_n('CPU_COUNT'));
+        chk_int  ('DBTIME probe cpu_ceiling = LEAST(num_cpus 8, cpu_count 8)', v_num2, meta_n('NUM_CPUS'));
+        chk_int  ('DBTIME probe num_cpus stays the host count', v_num3, meta_n('NUM_CPUS'));
+        chk_close('DBTIME probe db_cpu_pct unchanged (cpu_count = NUM_CPUS)',
+                  v_a, meta_n('DBCPU_PROBE_PCT'), 0.000001);
+        SELECT COUNT(*) INTO v_n FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND (cpu_ceiling IS NULL OR cpu_ceiling <> num_cpus);
+        chk_int('DBTIME cpu_ceiling = num_cpus on every day (all containers)', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capd_dbtime_interval
+          WHERE dbid = v_dbid
+            AND (cpu_ceiling IS NULL OR cpu_ceiling <> num_cpus OR cap_sec <> num_cpus * ivl_sec);
+        chk_int('DBTIME_INTERVAL cpu_ceiling = num_cpus, cap_sec = num_cpus * ivl_sec', v_n, 0);
+        -- A cage of half the host on the probe day: both of its intervals
+        -- end on a snapshot with cpu_count 4, so every percentage doubles.
+        SAVEPOINT u8_cage;
+        BEGIN
+            UPDATE cap_fixture_parameter SET value_num = n_caged
+             WHERE parameter_name = 'cpu_count'
+               AND snap_id IN (2000 + 2 * n_probe, 2001 + 2 * n_probe);
+            SELECT cpu_count, cpu_ceiling, num_cpus INTO v_num, v_num2, v_num3
+              FROM capd_dbtime_daily
+              WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_probe;
+            chk_int('caged probe day cpu_count', v_num, n_caged);
+            chk_int('caged probe day cpu_ceiling = LEAST(8, 4)', v_num2, n_caged);
+            chk_int('caged probe day num_cpus unchanged', v_num3, meta_n('NUM_CPUS'));
+            SELECT db_cpu_pct, db_cpu_peak_pct, db_cpu_max_pct INTO v_num, v_num2, v_num3
+              FROM capd_dbtime_daily
+              WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_probe;
+            chk_close('caged probe day db_cpu_pct (400 s over 4 CPUs)',
+                      v_num, meta_n('DBCPU_PROBE_PCT_CAGED'), 0.000001);
+            chk_close('caged probe day db_cpu_pct = 2 x uncaged',
+                      v_num, 2 * meta_n('DBCPU_PROBE_PCT'), 0.000001);
+            chk_close('caged probe day db_cpu_peak_pct (300 s over 4 * 43200)',
+                      v_num2, meta_n('DBCPU_PROBE_PEAK_PCT_CAGED'), 0.000001);
+            chk_close('caged probe day db_cpu_max_pct (the 18:00 interval)',
+                      v_num3, meta_n('DBCPU_PROBE_PEAK_PCT_CAGED'), 0.000001);
+            SELECT COUNT(*) INTO v_n FROM capd_dbtime_daily
+              WHERE dbid = v_dbid AND con_dbid = v_dbid AND cpu_ceiling = n_caged;
+            chk_int('only the probe day is caged', v_n, 1);
+            -- The cage lives in CAPD_DBTIME_INTERVAL, so the hour grain (and
+            -- the HOUR_OF_WEEK baseline) reads against it too, and it serves
+            -- every container: cpu_count is instance level.
+            SELECT cpu_count, cpu_ceiling, cap_sec INTO v_num, v_num2, v_num3
+              FROM capd_dbtime_interval
+              WHERE dbid = v_dbid AND con_dbid = v_dbid AND snap_id = 2001 + 2 * n_probe;
+            chk_int  ('caged probe 18:00 interval cpu_count', v_num, n_caged);
+            chk_int  ('caged probe 18:00 interval cpu_ceiling', v_num2, n_caged);
+            chk_close('caged probe 18:00 interval cap_sec = 4 * 43200', v_num3, n_caged * 43200, 0.000001);
+            SELECT value INTO v_num FROM capd_cpu_hourly
+              WHERE dbid = v_dbid AND con_dbid = v_dbid AND metric = 'DB_CPU_PCT' AND hour_ts = d_probe + 18/24;
+            chk_close('caged probe 18:00 root hourly DB_CPU_PCT (300 s over 4 * 43200)',
+                      v_num, meta_n('DBCPU_PROBE_PEAK_PCT_CAGED'), 0.000001);
+            SELECT MIN(value), MAX(value) INTO v_num, v_num2 FROM capd_cpu_hourly
+              WHERE dbid = v_dbid AND con_dbid = n_pdbc AND metric = 'DB_CPU_PCT'
+                AND hour_ts IN (d_probe + 6/24, d_probe + 18/24);
+            chk_close('caged probe PDB hourly DB_CPU_PCT 06:00 = 2 x pdb_pct(probe)',
+                      v_num,  2 * meta_n('PDB_PROBE_PCT'), 0.000001);
+            chk_close('caged probe PDB hourly DB_CPU_PCT 18:00 = 2 x pdb_pct(probe)',
+                      v_num2, 2 * meta_n('PDB_PROBE_PCT'), 0.000001);
+            SELECT db_cpu_pct INTO v_num FROM capd_dbtime_daily
+              WHERE dbid = v_dbid AND con_dbid = n_pdbc AND day_dt = d_probe;
+            chk_close('caged probe PDB db_cpu_pct = 2 x pdb_pct(probe)',
+                      v_num, 2 * meta_n('PDB_PROBE_PCT'), 0.000001);
+            -- cpu_count over the host: the host stays the ceiling.
+            v_b := 2 * meta_n('NUM_CPUS');
+            UPDATE cap_fixture_parameter SET value_num = v_b
+             WHERE parameter_name = 'cpu_count'
+               AND snap_id IN (2000 + 2 * n_probe, 2001 + 2 * n_probe);
+            SELECT cpu_count, cpu_ceiling, db_cpu_pct INTO v_num, v_num2, v_num3
+              FROM capd_dbtime_daily
+              WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_probe;
+            chk_int  ('cpu_count 16 on the probe day', v_num, 2 * meta_n('NUM_CPUS'));
+            chk_int  ('cpu_count 16 -> cpu_ceiling = num_cpus 8', v_num2, meta_n('NUM_CPUS'));
+            chk_close('cpu_count 16 -> db_cpu_pct unchanged', v_num3, meta_n('DBCPU_PROBE_PCT'), 0.000001);
+        EXCEPTION
+            WHEN OTHERS THEN ROLLBACK TO SAVEPOINT u8_cage; RAISE;
+        END;
+        ROLLBACK TO SAVEPOINT u8_cage;
+
+        DBMS_OUTPUT.PUT_LINE('=== FRA days on REDO_GB_DAY ===');
+        SELECT fra_size_gb, fra_days_at_cur INTO v_num, v_num2
+          FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'REDO_GB_DAY';
+        chk_close('REDO fra_size_gb (100 GiB)', v_num, meta_n('FRA_SIZE_GB'), 0.000001);
+        chk_close('REDO fra_days_at_cur (100 GiB / 2.0 GiB/day)', v_num2, meta_n('FRA_DAYS'), 0.000001);
+        SELECT COUNT(*) INTO v_n FROM capf_series_forecast
+          WHERE series <> 'REDO_GB_DAY' AND (fra_size_gb IS NOT NULL OR fra_days_at_cur IS NOT NULL);
+        chk_int('FRA columns NULL off REDO_GB_DAY', v_n, 0);
+        SELECT fra_size_gb, fra_days_at_cur INTO v_num, v_num2
+          FROM capr_series WHERE dbid = v_dbid AND series = 'REDO_GB_DAY';
+        chk_close('CAPR_SERIES passes fra_size_gb',     v_num,  meta_n('FRA_SIZE_GB'), 0.000001);
+        chk_close('CAPR_SERIES passes fra_days_at_cur', v_num2, meta_n('FRA_DAYS'),    0.000001);
+        SAVEPOINT u8_fra;
+        BEGIN
+            UPDATE cap_fixture_parameter SET value_num = 0
+             WHERE parameter_name = 'db_recovery_file_dest_size';
+            SELECT COUNT(*) INTO v_n FROM capf_series_forecast
+              WHERE dbid = v_dbid AND series = 'REDO_GB_DAY'
+                AND fra_size_gb IS NULL AND fra_days_at_cur IS NULL;
+            chk_int('FRA size 0 -> fra_size_gb and fra_days_at_cur NULL', v_n, 1);
+        EXCEPTION
+            WHEN OTHERS THEN ROLLBACK TO SAVEPOINT u8_fra; RAISE;
+        END;
+        ROLLBACK TO SAVEPOINT u8_fra;
+        -- FIXPDB1 writes redo too, 1 GiB per interval on the last day only:
+        -- the FRA holds the dbid's summed rate, so both REDO rows read
+        -- 100 / (2 + 2) = 25 days.
+        SAVEPOINT u8_fra2;
+        BEGIN
+            v_a := meta_n('PDB_CON_DBID');
+            v_b := meta_n('FRA_SIZE_GB') / (2 * meta_n('REDO_PROBE_GB'));
+            INSERT INTO cap_fixture_sysstat VALUES (v_dbid, v_a, 1, 2001 + 2 * (n_days - 2), 'redo size', 0);
+            INSERT INTO cap_fixture_sysstat VALUES (v_dbid, v_a, 1, 2000 + 2 * (n_days - 1), 'redo size', 1073741824);
+            INSERT INTO cap_fixture_sysstat VALUES (v_dbid, v_a, 1, 2001 + 2 * (n_days - 1), 'redo size', 2147483648);
+            SELECT cur_val INTO v_num FROM capf_series_forecast
+              WHERE dbid = v_dbid AND con_dbid = v_a AND series = 'REDO_GB_DAY';
+            chk_close('FIXPDB1 REDO_GB_DAY cur_val (two 1 GiB intervals)', v_num, meta_n('REDO_PROBE_GB'), 0.000001);
+            SELECT COUNT(*) INTO v_n FROM capf_series_forecast
+              WHERE dbid = v_dbid AND series = 'REDO_GB_DAY' AND ABS(fra_days_at_cur - v_b) < 0.000001;
+            chk_int('two containers: both REDO rows fra_days_at_cur = 100 / (2 + 2)', v_n, 2);
+        EXCEPTION
+            WHEN OTHERS THEN ROLLBACK TO SAVEPOINT u8_fra2; RAISE;
+        END;
+        ROLLBACK TO SAVEPOINT u8_fra2;
+
+        DBMS_OUTPUT.PUT_LINE('=== ASM diskgroups (ASM_DG series) ===');
+        SELECT COUNT(*) INTO v_n FROM capv_asm_diskgroup;
+        chk_int('CAPV_ASM_DISKGROUP rows (2 groups x every snapshot)', v_n, 2 * n_snaps);
+        SELECT value, limit_value, unit, covered_sec, is_complete INTO v_num, v_num2, v_str, v_num3, v_c
+          FROM capd_series_daily WHERE dbid = v_dbid AND series = 'ASM_DG:+DATA' AND day_dt = d_last;
+        chk_close('ASM_DG:+DATA last-day value (GiB used)', v_num,  meta_n('ASM_DATA_CUR'),   0.000001);
+        chk_close('ASM_DG:+DATA limit_value (total GiB)',   v_num2, meta_n('ASM_DATA_LIMIT'), 0.000001);
+        chk_str  ('ASM_DG:+DATA unit', v_str, 'GIB');
+        chk_true ('ASM_DG:+DATA covered_sec NULL, is_complete Y (level series)',
+                  v_num3 IS NULL AND v_c = 'Y');
+        SELECT value INTO v_num FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'ASM_DG:+DATA' AND day_dt = d_probe;
+        chk_close('ASM_DG:+DATA probe day = the 18:00 (last) sample, not 06:00',
+                  v_num, meta_n('ASM_DATA_PROBE'), 0.000001);
+        SELECT slope_per_day, days_to_limit, quality, pct_of_limit, proj_30
+          INTO v_num, v_n, v_str, v_num2, v_num3
+          FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'ASM_DG:+DATA';
+        chk_close('ASM_DG:+DATA slope (GiB/day)', v_num, meta_n('ASM_DATA_SLOPE'), 0.000001);
+        chk_int  ('ASM_DG:+DATA days_to_limit (90% of 1000 GiB)', v_n, meta_n('ASM_DATA_DTL'));
+        chk_str  ('ASM_DG:+DATA quality', v_str, 'OK');
+        chk_close('ASM_DG:+DATA pct_of_limit', v_num2, meta_n('ASM_DATA_PCT'), 0.000001);
+        chk_close('ASM_DG:+DATA proj_30 = 800 + 5 * 30', v_num3, meta_n('ASM_DATA_P30'), 0.000001);
+        SELECT COUNT(*), MAX(value), MAX(severity) INTO v_n, v_num, v_str
+          FROM capr_alerts WHERE kind = 'SERIES_LIMIT' AND series_key = 'ASM_DG:+DATA';
+        chk_int('ASM_DG:+DATA raises one SERIES_LIMIT', v_n, 1);
+        chk_int('ASM_DG:+DATA SERIES_LIMIT value = days_to_limit', v_num, meta_n('ASM_DATA_DTL'));
+        chk_str('ASM_DG:+DATA SERIES_LIMIT severity (20 <= dtf_crit)', v_str, 'CRIT');
+        SELECT sev INTO v_str FROM capr_series WHERE dbid = v_dbid AND series = 'ASM_DG:+DATA';
+        chk_str('CAPR_SERIES ASM_DG:+DATA sev', v_str, 'CRIT');
+        SELECT COUNT(*) INTO v_n FROM capr_series_points
+          WHERE kind = 'SERIES' AND series = 'ASM_DG:+DATA';
+        chk_int('CAPR_SERIES_POINTS one ASM_DG:+DATA point per day', v_n, n_days);
+        SELECT value INTO v_num FROM capr_forecast_points
+          WHERE kind = 'SERIES' AND series = 'ASM_DG:+DATA' AND method = 'REGR' AND horizon_days = 30;
+        chk_close('CAPR_FORECAST_POINTS ASM_DG:+DATA +30', v_num, meta_n('ASM_DATA_P30'), 0.000001);
+        SELECT cur_val, cur_limit, quality, days_to_limit INTO v_num, v_num2, v_str, v_n
+          FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'ASM_DG:+FRA';
+        chk_close('ASM_DG:+FRA cur_val',   v_num,  meta_n('ASM_FRA_CUR'),   0.000001);
+        chk_close('ASM_DG:+FRA cur_limit', v_num2, meta_n('ASM_FRA_LIMIT'), 0.000001);
+        chk_str  ('ASM_DG:+FRA quality (constant -> FLAT)', v_str, 'FLAT');
+        chk_true ('ASM_DG:+FRA days_to_limit IS NULL', v_n IS NULL);
+
+        DBMS_OUTPUT.PUT_LINE('=== TEMP / UNDO peaks ===');
+        SELECT value, limit_value, unit INTO v_num, v_num2, v_str
+          FROM capd_series_daily WHERE dbid = v_dbid AND series = 'TEMP_PEAK:FIX_TEMP' AND day_dt = d_last;
+        chk_close('TEMP_PEAK last day = the 06:00 peak (the 18:00 sample reads 1 GiB)',
+                  v_num, meta_n('TEMP_CUR'), 0.000001);
+        chk_close('TEMP_PEAK limit_value (allocated, no autoextend)', v_num2, meta_n('TEMP_LIMIT'), 0.000001);
+        chk_str  ('TEMP_PEAK unit', v_str, 'GIB');
+        SELECT value INTO v_num FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'TEMP_PEAK:FIX_TEMP' AND day_dt = d_probe;
+        chk_close('TEMP_PEAK probe day peak', v_num, meta_n('TEMP_PROBE'), 0.000001);
+        SELECT cur_val, pct_of_limit, slope_per_day, r2, quality, days_to_limit
+          INTO v_num, v_num2, v_num3, v_r2, v_q, v_n
+          FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'TEMP_PEAK:FIX_TEMP';
+        chk_close('TEMP_PEAK cur_val', v_num, meta_n('TEMP_CUR'), 0.000001);
+        chk_close('TEMP_PEAK pct_of_limit', v_num2, meta_n('TEMP_PCT'), 0.000001);
+        chk_close('TEMP_PEAK slope (OLS, i = 31..120)', v_num3, meta_n('TEMP_SLOPE'), 0.000001);
+        chk_close('TEMP_PEAK r2', v_r2, meta_n('TEMP_R2'), 0.000001);
+        SELECT sval INTO v_str FROM cap_fixture_meta WHERE mkey = 'TEMP_Q';
+        chk_str  ('TEMP_PEAK quality', v_q, v_str);
+        chk_true ('TEMP_PEAK days_to_limit IS NULL (slope < 0)', v_n IS NULL AND meta_n('TEMP_SLOPE') < 0);
+        SELECT COUNT(*), MAX(value), MAX(severity) INTO v_n, v_num, v_str
+          FROM capr_alerts WHERE kind = 'SERIES_NEARLIMIT' AND series_key = 'TEMP_PEAK:FIX_TEMP';
+        chk_int  ('TEMP_PEAK raises one SERIES_NEARLIMIT', v_n, 1);
+        chk_close('TEMP_PEAK SERIES_NEARLIMIT value = pct_of_limit', v_num, meta_n('TEMP_PCT'), 0.000001);
+        chk_str  ('TEMP_PEAK SERIES_NEARLIMIT severity (97.5 >= nearfull_crit_pct)', v_str, 'CRIT');
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+          WHERE kind = 'SERIES_LIMIT' AND series_key LIKE 'TEMP!_PEAK:%' ESCAPE '!';
+        chk_int('TEMP_PEAK raises no SERIES_LIMIT (not growing)', v_n, 0);
+        SELECT cur_val, cur_limit, pct_of_limit, quality INTO v_num, v_num2, v_num3, v_str
+          FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'UNDO_PEAK:FIX_UNDO';
+        chk_close('UNDO_PEAK cur_val (18:00 peak)',             v_num,  meta_n('UNDO_CUR'),   0.000001);
+        chk_close('UNDO_PEAK cur_limit (autoextend maxsize)',   v_num2, meta_n('UNDO_LIMIT'), 0.000001);
+        chk_close('UNDO_PEAK pct_of_limit',                     v_num3, meta_n('UNDO_PCT'),   0.000001);
+        chk_str  ('UNDO_PEAK quality (constant -> FLAT)', v_str, 'FLAT');
+        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE series_key = 'UNDO_PEAK:FIX_UNDO';
+        chk_int('UNDO_PEAK raises no alert', v_n, 0);
+        -- CAPD_TBSPC_DAILY keeps its contents exclusion: neither tablespace
+        -- reaches the tablespace layers, DB_SIZE_GB included.
+        SELECT COUNT(*) INTO v_n FROM capd_tbspc_daily WHERE tablespace_name IN ('FIX_TEMP','FIX_UNDO');
+        chk_int('no FIX_TEMP / FIX_UNDO rows in CAPD_TBSPC_DAILY', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast WHERE tablespace_name IN ('FIX_TEMP','FIX_UNDO');
+        chk_int('no FIX_TEMP / FIX_UNDO rows in CAPF_TBSPC_FORECAST', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capr_series_points
+          WHERE kind = 'SERIES' AND series IN ('TEMP_PEAK:FIX_TEMP','UNDO_PEAK:FIX_UNDO');
+        chk_int('CAPR_SERIES_POINTS one TEMP / UNDO point per day each', v_n, 2 * n_days);
+        SELECT COUNT(*) INTO v_n FROM capd_series_daily
+          WHERE (series LIKE 'ASM!_DG:%' ESCAPE '!' OR series LIKE 'TEMP!_PEAK:%' ESCAPE '!'
+                 OR series LIKE 'UNDO!_PEAK:%' ESCAPE '!')
+            AND (covered_sec IS NOT NULL OR is_complete <> 'Y' OR unit <> 'GIB');
+        chk_int('ASM / TEMP / UNDO series: unit GIB, covered_sec NULL, is_complete Y', v_n, 0);
+        -- The anomaly engine scores only the series in its registry (sreg in
+        -- CAPA_OBS: the four M11 names), so the new series are never scored:
+        -- no observation, no SERIES_ANOM, no verdict on their points.
+        SELECT COUNT(*) INTO v_n FROM capa_obs
+          WHERE kind = 'SERIES'
+            AND (series LIKE 'ASM!_DG:%' ESCAPE '!' OR series LIKE 'TEMP!_PEAK:%' ESCAPE '!'
+                 OR series LIKE 'UNDO!_PEAK:%' ESCAPE '!');
+        chk_int('ASM / TEMP / UNDO series have no CAPA_OBS rows (not in the registry)', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+          WHERE kind = 'SERIES_ANOM'
+            AND (series_key LIKE 'ASM!_DG:%' ESCAPE '!' OR series_key LIKE 'TEMP!_PEAK:%' ESCAPE '!'
+                 OR series_key LIKE 'UNDO!_PEAK:%' ESCAPE '!');
+        chk_int('ASM / TEMP / UNDO series raise no SERIES_ANOM', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capr_series_points
+          WHERE kind = 'SERIES'
+            AND (series LIKE 'ASM!_DG:%' ESCAPE '!' OR series LIKE 'TEMP!_PEAK:%' ESCAPE '!'
+                 OR series LIKE 'UNDO!_PEAK:%' ESCAPE '!')
+            AND (anomaly_flag IS NOT NULL OR z IS NOT NULL OR expected IS NOT NULL
+                 OR anomaly_modes IS NOT NULL);
+        chk_int('ASM / TEMP / UNDO points carry no anomaly verdict', v_n, 0);
+
+        DBMS_OUTPUT.PUT_LINE('=== sizing ask (need_gib_h, add_by_day) ===');
+        SELECT need_gib_30, need_gib_90, need_gib_180 INTO v_num, v_num2, v_num3
+          FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_FILLING';
+        chk_close('FILLING need_gib_30',  v_num,  meta_n('FILLING_NEED_30'),  0.000001);
+        chk_close('FILLING need_gib_90',  v_num2, meta_n('FILLING_NEED_90'),  0.000001);
+        chk_close('FILLING need_gib_180', v_num3, meta_n('FILLING_NEED_180'), 0.000001);
+        SELECT add_by_day, last_day, days_to_full_lo INTO v_dt, v_dt2, v_a
+          FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_FILLING';
+        chk_true('FILLING add_by_day = last_day + days_to_full_lo', v_dt = v_dt2 + v_a);
+        -- headroom / slope is exactly 20.0, so a rounding epsilon on the
+        -- collapsed slope CI may FLOOR the worst case to 19 (as for FIX_LINEAR).
+        chk_true('FILLING add_by_day in last_day + [19, 20] (got +' || (v_dt - v_dt2) || ')',
+                 v_dt - v_dt2 BETWEEN meta_n('FILLING_DTF') - 1 AND meta_n('FILLING_DTF'));
+        SELECT need_gib_30, need_gib_90, need_gib_180 INTO v_num, v_num2, v_num3
+          FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
+        chk_int('LINEAR need_gib_30 (4990 days of headroom)', v_num,  0);
+        chk_int('LINEAR need_gib_90',                         v_num2, 0);
+        chk_int('LINEAR need_gib_180',                        v_num3, 0);
+        -- A ceiling under the usage asks for the overage at every horizon,
+        -- with no date (FLAT: no days_to_full_lo).
+        SELECT need_gib_30, need_gib_180, add_by_day INTO v_num, v_num2, v_dt
+          FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_OVERFULL';
+        chk_close('OVERFULL need_gib_30 = (1.5 - 1) GiB', v_num,
+                  (meta_n('OVERFULL_CUR') - meta_n('OVERFULL_LIMIT')) / 1073741824, 0.000001);
+        chk_close('OVERFULL need_gib_180 = (1.5 - 1) GiB', v_num2,
+                  (meta_n('OVERFULL_CUR') - meta_n('OVERFULL_LIMIT')) / 1073741824, 0.000001);
+        chk_true ('OVERFULL add_by_day IS NULL (FLAT)', v_dt IS NULL);
+        SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+          WHERE quality = 'CYCLIC' AND (need_gib_90 IS NOT NULL OR add_by_day IS NOT NULL);
+        chk_int('CYCLIC rows carry no sizing ask', v_n, 0);
+        SELECT need_gib_90, add_by_day INTO v_num, v_dt
+          FROM capr_tbspc_days_to_full WHERE tablespace_name = 'FIX_FILLING';
+        chk_close('CAPR_TBSPC_DAYS_TO_FULL passes need_gib_90', v_num, meta_n('FILLING_NEED_90'), 0.000001);
+        chk_true ('CAPR_TBSPC_DAYS_TO_FULL passes add_by_day', v_dt = v_dt2 + v_a);
+        SELECT need_gib_90, add_by_day INTO v_num, v_dt
+          FROM capr_fit WHERE kind = 'TBSPC' AND series = 'FIX_FILLING';
+        chk_close('CAPR_FIT passes need_gib_90', v_num, meta_n('FILLING_NEED_90'), 0.000001);
+        chk_true ('CAPR_FIT passes add_by_day', v_dt = v_dt2 + v_a);
+        SELECT COUNT(*) INTO v_n FROM capr_fit
+          WHERE kind <> 'TBSPC' AND (need_gib_30 IS NOT NULL OR need_gib_90 IS NOT NULL
+                                     OR need_gib_180 IS NOT NULL OR add_by_day IS NOT NULL);
+        chk_int('CAPR_FIT sizing ask NULL for CPU / SERIES', v_n, 0);
+    EXCEPTION
+        WHEN OTHERS THEN
+            fail('seam-extension block raised ' || SQLERRM);
     END;
 
     DECLARE
@@ -1573,11 +1894,21 @@ BEGIN
 
         DBMS_OUTPUT.PUT_LINE('=== CAPV_CONTRACT ===');
         SELECT COUNT(*) INTO v_n FROM capv_contract;
-        chk_int('CAPV_CONTRACT one row per seam source', v_n, 6);
+        chk_int('CAPV_CONTRACT one row per seam source', v_n, 8);
         SELECT COUNT(*) INTO v_n FROM capv_contract
           WHERE (source_name IN ('TBSPC_USAGE','TIME_MODEL','SYSSTAT')       AND per_container_expected = 'Y')
-             OR (source_name IN ('OSSTAT','RESOURCE_LIMIT','SNAPSHOT')       AND per_container_expected = 'N');
-        chk_int('CAPV_CONTRACT per_container_expected as specified', v_n, 6);
+             OR (source_name IN ('OSSTAT','RESOURCE_LIMIT','SNAPSHOT',
+                                 'PARAMETER','ASM_DISKGROUP')                AND per_container_expected = 'N');
+        chk_int('CAPV_CONTRACT per_container_expected as specified', v_n, 8);
+        -- PARAMETER: 9 names on every snapshot. ASM_DISKGROUP: 2 groups.
+        SELECT n_rows, n_con_dbid INTO v_num, v_num2
+          FROM capv_contract WHERE source_name = 'PARAMETER';
+        chk_int('CAPV_CONTRACT PARAMETER n_rows', v_num, 9 * n_snaps);
+        chk_int('CAPV_CONTRACT PARAMETER n_con_dbid (instance level)', v_num2, 1);
+        SELECT n_rows, n_con_dbid INTO v_num, v_num2
+          FROM capv_contract WHERE source_name = 'ASM_DISKGROUP';
+        chk_int('CAPV_CONTRACT ASM_DISKGROUP n_rows', v_num, 2 * n_snaps);
+        chk_int('CAPV_CONTRACT ASM_DISKGROUP n_con_dbid (host level)', v_num2, 1);
         -- 121 days x 2 snapshots, minus the restart day's missing 06:00.
         SELECT n_rows, max_snap_id, CAST(max_end_time AS DATE) INTO v_num, v_num2, v_ts
           FROM capv_contract WHERE source_name = 'SNAPSHOT';

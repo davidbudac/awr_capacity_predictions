@@ -20,8 +20,9 @@
 --   CAPD_DBTIME_INTERVAL -- the same for the time model, per container.
 --   CAPD_DBTIME_DAILY  -- DB CPU / DB time / bg CPU seconds per day per
 --                         container over CAPD_DBTIME_INTERVAL; DB CPU as % of
---                         logical-CPU capacity + share of host (M10.2); the
---                         same gap and coverage columns.
+--                         the CPU ceiling (logical CPUs, or cpu_count when
+--                         lower) + share of host (M10.2); the same gap and
+--                         coverage columns.
 --   CAPD_CPU_HOURLY    -- (M15) host BUSY_PCT and per-container DB_CPU_PCT per
 --                         END-hour bucket over the two interval views; feeds
 --                         the HOUR_OF_WEEK anomaly baseline.
@@ -453,8 +454,15 @@ CROSS  JOIN cap_cfg cfg;
 --                   matched on (dbid, instance, snap_id) and serves every
 --                   container. A snapshot with no OSSTAT row uses the
 --                   instance's last earlier value.
---   cap_sec       = num_cpus * ivl_sec, the logical-CPU seconds the interval
---                   offered; NULL when unknown.
+--   cpu_count     = the cpu_count init parameter (CAPV_PARAMETER) at the
+--                   interval's end snapshot; NULL when AWR has no row there
+--                   (not carried forward).
+--   cpu_ceiling   = LEAST(num_cpus, cpu_count), the one that is known when
+--                   the other is NULL. See CAPD_DBTIME_DAILY.
+--   cap_sec       = cpu_ceiling * ivl_sec, the CPU seconds the interval
+--                   offered the instance; NULL when unknown. cpu_count
+--                   defaults to the logical CPU count, so this is
+--                   num_cpus * ivl_sec unless the instance is caged.
 --   total_cores   = host cores summed across instances (MAX over the dbid's
 --                   history, NUM_CPU_CORES falling back to NUM_CPUS).
 --   ivl_cpu_pct   = DB CPU seconds / cap_sec, NULL for an interval longer
@@ -502,23 +510,39 @@ WITH ivl AS (
                GROUP  BY dbid, instance_number )
         GROUP BY dbid
      ),
+     -- cpu_count at the interval's end snapshot, like num_cpus. Joined here
+     -- and not carried forward inside ncpu: a second windowed column there
+     -- made the optimizer push the interval join into ncpu and re-run it per
+     -- interval (the 150-day demo: minutes instead of a second).
+     ivc AS (
+        SELECT i.*,
+               n.num_cpus, n.num_cpu_cores, pc.cpu_count,
+               COALESCE(LEAST(n.num_cpus, pc.cpu_count), n.num_cpus, pc.cpu_count) AS cpu_ceiling
+        FROM   ivl i
+        LEFT   JOIN ncpu n
+          ON   n.dbid = i.dbid AND n.instance_number = i.instance_number AND n.snap_id = i.snap_id
+        LEFT   JOIN ( SELECT dbid, instance_number, snap_id,
+                             MAX(CASE WHEN value_num > 0 THEN value_num END) AS cpu_count
+                      FROM   capv_parameter
+                      WHERE  parameter_name = 'cpu_count'
+                      GROUP  BY dbid, instance_number, snap_id ) pc
+          ON   pc.dbid = i.dbid AND pc.instance_number = i.instance_number AND pc.snap_id = i.snap_id
+        WHERE  i.db_cpu_d IS NOT NULL AND i.db_time_d IS NOT NULL
+          AND  i.is_restart = 'N'
+     ),
      valid AS (
         SELECT i.dbid, i.con_dbid, i.instance_number, i.snap_id, i.end_time,
                TRUNC(i.end_time)                                       AS day_dt,
                TRUNC(CAST(i.end_time AS DATE) - 5/1440, 'HH24') + 1/24 AS hour_ts,
                i.db_cpu_d, i.db_time_d, i.bg_cpu_d, i.ivl_sec,
                i.ivl_sec / 3600                                        AS ivl_hours,
-               n.num_cpus, n.num_cpu_cores,
-               CASE WHEN n.num_cpus > 0 AND i.ivl_sec > 0
-                    THEN n.num_cpus * i.ivl_sec
+               i.num_cpus, i.num_cpu_cores, i.cpu_count, i.cpu_ceiling,
+               CASE WHEN i.cpu_ceiling > 0 AND i.ivl_sec > 0
+                    THEN i.cpu_ceiling * i.ivl_sec
                END                                                     AS cap_sec,
                c.total_cores
-        FROM   ivl i
-        LEFT   JOIN ncpu n
-          ON   n.dbid = i.dbid AND n.instance_number = i.instance_number AND n.snap_id = i.snap_id
+        FROM   ivc i
         LEFT   JOIN cores c ON c.dbid = i.dbid
-        WHERE  i.db_cpu_d IS NOT NULL AND i.db_time_d IS NOT NULL
-          AND  i.is_restart = 'N'
      )
 SELECT v.dbid,
        v.con_dbid,
@@ -549,7 +573,9 @@ SELECT v.dbid,
        CASE WHEN EXTRACT(HOUR FROM CAST(v.end_time AS TIMESTAMP)) >  cfg.peak_hour_from
              AND EXTRACT(HOUR FROM CAST(v.end_time AS TIMESTAMP)) <= cfg.peak_hour_to
              AND v.ivl_hours <= cfg.cpu_gap_hours
-            THEN 1 ELSE 0 END                                               AS in_peak
+            THEN 1 ELSE 0 END                                               AS in_peak,
+       v.cpu_count,
+       v.cpu_ceiling
 FROM   valid v
 CROSS  JOIN cap_cfg cfg;
 
@@ -560,16 +586,19 @@ CROSS  JOIN cap_cfg cfg;
 -- One GROUP BY over CAPD_DBTIME_INTERVAL (cumulative MICROSECOND counters),
 -- summed across instances per day and divided by 1e6 to seconds.
 --   db_cpu_pct      = 100 * db_cpu_sec / SUM over the day's valid intervals
---                     of (num_cpus * ivl_sec): the share of the host's
---                     logical-CPU seconds this container's foreground DB CPU
---                     used while the counters were recording.
+--                     of (cpu_ceiling * ivl_sec): the share of the CPU
+--                     seconds the instance may use that this container's
+--                     foreground DB CPU used while the counters were
+--                     recording. cpu_ceiling is num_cpus unless cpu_count is
+--                     lower (below).
 --                     Why logical CPUs: Oracle accrues CPU time per logical
 --                     CPU (a thread on an SMT host), OSSTAT BUSY_TIME /
 --                     IDLE_TIME are summed over NUM_CPUS, and the AWR report's
 --                     own %Total CPU divides by NUM_CPUS. Dividing by cores
 --                     read 2x on 2-way SMT (4-8x on POWER / SPARC) and fired
---                     DBCPU_SAT at half load. Now db_cpu_pct = busy_pct *
---                     host_share_pct / 100, the same scale as host busy%.
+--                     DBCPU_SAT at half load. With cpu_ceiling = num_cpus,
+--                     db_cpu_pct = busy_pct * host_share_pct / 100, the same
+--                     scale as host busy%.
 --                     num_cpus is read per interval at its end snapshot
 --                     (NUM_CPUS, else NUM_CPU_CORES), so a host resize does
 --                     not rewrite history. OSSTAT is host level and recorded
@@ -579,9 +608,27 @@ CROSS  JOIN cap_cfg cfg;
 --                     earlier value.
 --                     The denominator is the covered time, not 86400, so a
 --                     partial, restart or gap day reads its true average.
+--   cpu_count / cpu_ceiling
+--                   = the cpu_count init parameter (CAPV_PARAMETER) and
+--                     LEAST(num_cpus, cpu_count). With a Resource Manager
+--                     plan active, cpu_count cages the instance (instance
+--                     caging), so an instance with cpu_count 4 on a 16-CPU
+--                     host saturates at 4 CPUs and db_cpu_pct reads against
+--                     4. With no plan the cage is not enforced and
+--                     db_cpu_pct can pass 100, which says the instance uses
+--                     more CPU than it is configured for. cpu_count
+--                     defaults to the logical CPU count, so on most systems
+--                     cpu_ceiling = num_cpus and nothing changes. Read at
+--                     the interval's end snapshot. Unlike num_cpus it is not
+--                     carried forward (AWR records the parameters at every
+--                     snapshot), so an interval with no cpu_count row uses
+--                     num_cpus alone, and a NULL num_cpus uses cpu_count.
+--                     The day columns are the day's MAX per instance, summed
+--                     across instances. Root-level cpu_count only: a
+--                     PDB-level CPU_COUNT is not read.
 --   db_cpu_p95_pct / db_cpu_max_pct / db_cpu_peak_pct
 --                   = the per-INTERVAL version of db_cpu_pct (DB CPU seconds
---                     over the interval's num_cpus * ivl_sec), then p95 / max
+--                     over the interval's cpu_ceiling * ivl_sec), then p95 / max
 --                     over the day / time-weighted over the peak window (same
 --                     (peak_hour_from, peak_hour_to] rule as CAPD_CPU_DAILY).
 --                     Per-PDB "busy hour".
@@ -622,10 +669,14 @@ WITH ivl AS (
      cpus_day AS (
         SELECT dbid, con_dbid, day_dt,
                SUM(num_cpus)      AS num_cpus,
-               SUM(num_cpu_cores) AS num_cpu_cores
+               SUM(num_cpu_cores) AS num_cpu_cores,
+               SUM(cpu_count)     AS cpu_count,
+               SUM(cpu_ceiling)   AS cpu_ceiling
         FROM ( SELECT dbid, con_dbid, day_dt, instance_number,
                       MAX(num_cpus)      AS num_cpus,
-                      MAX(num_cpu_cores) AS num_cpu_cores
+                      MAX(num_cpu_cores) AS num_cpu_cores,
+                      MAX(cpu_count)     AS cpu_count,
+                      MAX(cpu_ceiling)   AS cpu_ceiling
                FROM   ivl
                GROUP  BY dbid, con_dbid, day_dt, instance_number )
         GROUP  BY dbid, con_dbid, day_dt
@@ -682,7 +733,9 @@ SELECT a.dbid,
        c.num_cpu_cores,
        a.covered_sec,
        CASE WHEN a.covered_sec >= cfg.complete_day_pct / 100 * 86400
-            THEN 'Y' ELSE 'N' END                                  AS is_complete
+            THEN 'Y' ELSE 'N' END                                  AS is_complete,
+       c.cpu_count,
+       c.cpu_ceiling
 FROM   agg a
 JOIN   cpus_day c
   ON   c.dbid = a.dbid AND c.con_dbid = a.con_dbid AND c.day_dt = a.day_dt
@@ -702,7 +755,7 @@ CROSS  JOIN cap_cfg cfg;
 --               CAPD_CPU_DAILY counts it.
 --   value     = BUSY: 100 * SUM(busy_d) / SUM(busy_d + idle_d).
 --               DB_CPU: 100 * DB CPU seconds / SUM(cap_sec), the hourly
---               version of CAPD_DBTIME_DAILY.db_cpu_pct (logical CPUs).
+--               version of CAPD_DBTIME_DAILY.db_cpu_pct (CPU ceiling).
 --   gap_flag  = 'Y' when any interval in the bucket is_gap_hour: a long or
 --               non-positive interval says nothing about this hour, so it is
 --               neither scored nor used as a baseline.

@@ -1,7 +1,7 @@
 --
 -- ddl/10_seam_local.sql -- CAPV_* portable seam over DBA_HIST_* (LOCAL mode).
 -- =====================================================================
--- These nine views (plus the CAPV_CONTRACT diagnostic at the bottom) are the
+-- These eleven views (plus the CAPV_CONTRACT diagnostic at the bottom) are the
 -- ONLY place the analytics touch Oracle's AWR dictionary. Everything
 -- downstream (CAPD_/CAPF_/CAPA_/report) is written once against CAPV_* and
 -- runs byte-identically in local, warehouse, or fixture mode. Swapping this
@@ -30,8 +30,10 @@
 --   * Root only, CDB-wide: DBA_HIST_SYS_TIME_MODEL and DBA_HIST_SYSSTAT hold
 --     one row per snapshot under the CDB's con_dbid, and that row is the
 --     CDB total. They are used only as the non-CDB fallback below.
---   * Root only, by nature: DBA_HIST_OSSTAT (host level) and
---     DBA_HIST_RESOURCE_LIMIT (instance level).
+--   * Root only, by nature: DBA_HIST_OSSTAT (host level),
+--     DBA_HIST_RESOURCE_LIMIT (instance level) and DBA_HIST_ASM_DISKGROUP_STAT
+--     (host level). DBA_HIST_PARAMETER has root rows plus PDB rows for the
+--     parameters set at PDB level; CAPV_PARAMETER keeps the root rows.
 --   * In the CON_ views the root row covers CDB$ROOT alone. The CDB total is
 --     the SUM over containers.
 --
@@ -249,13 +251,70 @@ WHERE  s.stat_name = 'redo size'
                      AND  c.instance_number = s.instance_number);
 
 -- --------------------------------------------------------------------
+-- CAPV_PARAMETER -- the init parameters the suite reads as ceilings, one
+-- row per (snapshot, instance, parameter), the value as a NUMBER.
+--   * DBA_HIST_PARAMETER.VALUE is a VARCHAR2(512). A numeric string becomes
+--     a NUMBER (the CAPV_RESOURCE_LIMIT guard), anything else NULL. Size
+--     parameters are stored in bytes.
+--   * Instance level, so con_dbid := dbid. In CDB$ROOT the source also
+--     holds rows under a PDB's con_dbid for parameters set at PDB level
+--     (verified on 19c: one snapshot carried sga_target for the root, the
+--     seed and PDB1). Only the root row (con_dbid = dbid, or a non-CDB) is
+--     kept, so a parameter has one value per snapshot and instance.
+--   * Filtered to the parameters a downstream view reads or may read:
+--     cpu_count (the CPU ceiling in CAPD_DBTIME_DAILY) and
+--     db_recovery_file_dest_size (FRA days in CAPF_SERIES_FORECAST), plus
+--     the process, session and memory ceilings.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capv_parameter AS
+SELECT dbid                     AS dbid,
+       dbid                     AS con_dbid,
+       instance_number          AS instance_number,
+       snap_id                  AS snap_id,
+       LOWER(parameter_name)    AS parameter_name,
+       CASE WHEN REGEXP_LIKE(TRIM(value), '^[0-9]+$')
+            THEN TO_NUMBER(TRIM(value))
+       END                      AS value_num
+FROM   dba_hist_parameter
+WHERE  parameter_name IN ('cpu_count','processes','sessions',
+                          'db_recovery_file_dest_size',
+                          'sga_target','sga_max_size',
+                          'pga_aggregate_target','pga_aggregate_limit',
+                          'memory_target')
+  AND  NVL(con_dbid, dbid) = dbid;
+
+-- --------------------------------------------------------------------
+-- CAPV_ASM_DISKGROUP -- ASM diskgroup size per snapshot, named.
+--   * DBA_HIST_ASM_DISKGROUP_STAT carries TOTAL_MB / FREE_MB per snapshot
+--     and group number. DBA_HIST_ASM_DISKGROUP is the name dimension, joined
+--     on (dbid, group_number, con_dbid). NAME has no leading '+'.
+--   * TOTAL_MB / FREE_MB are raw MB, before mirroring. The 19c view has no
+--     USABLE_FILE_MB (verified on 19.27), so usable_file_mb is NULL here.
+--   * Host level: no instance_number, con_dbid := dbid. A database without
+--     ASM has no rows, and the ASM_DG series simply do not appear.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capv_asm_diskgroup AS
+SELECT s.dbid                   AS dbid,
+       s.dbid                   AS con_dbid,
+       s.snap_id                AS snap_id,
+       g.name                   AS group_name,
+       s.total_mb               AS total_mb,
+       s.free_mb                AS free_mb,
+       CAST(NULL AS NUMBER)     AS usable_file_mb
+FROM   dba_hist_asm_diskgroup_stat s
+JOIN   dba_hist_asm_diskgroup g
+  ON   g.dbid = s.dbid AND g.group_number = s.group_number
+ AND   g.con_dbid = s.con_dbid;
+
+-- --------------------------------------------------------------------
 -- CAPV_CONTRACT -- what this seam actually presents, one row per fact
 -- source: row count, distinct con_dbid, snap_id range and the newest
 -- snapshot end time. per_container_expected = 'Y' where the contract wants
 -- one series per container (TBSPC_USAGE, TIME_MODEL, SYSSTAT) and 'N' where
 -- the source is host / instance / spine level (OSSTAT, RESOURCE_LIMIT,
--- SNAPSHOT), so n_con_dbid = 1 against a 'Y' means the per-PDB series are
--- missing. A diagnostic for doctor.sql: it full-scans every source, and no
+-- PARAMETER, ASM_DISKGROUP, SNAPSHOT), so n_con_dbid = 1 against a 'Y' means
+-- the per-PDB series are missing. ASM_DISKGROUP has n_rows = 0 on a database
+-- without ASM. A diagnostic for doctor.sql: it full-scans every source, and no
 -- analytic view selects from it. The body reads only CAPV_* and is the same
 -- in all three seam files.
 -- --------------------------------------------------------------------
@@ -267,6 +326,8 @@ WITH src AS (
         UNION ALL SELECT 'TIME_MODEL',     dbid, con_dbid, snap_id FROM capv_time_model
         UNION ALL SELECT 'SYSSTAT',        dbid, con_dbid, snap_id FROM capv_sysstat
         UNION ALL SELECT 'RESOURCE_LIMIT', dbid, con_dbid, snap_id FROM capv_resource_limit
+        UNION ALL SELECT 'PARAMETER',      dbid, con_dbid, snap_id FROM capv_parameter
+        UNION ALL SELECT 'ASM_DISKGROUP',  dbid, con_dbid, snap_id FROM capv_asm_diskgroup
      ),
      per_con AS (
         SELECT source_name, dbid, con_dbid,
@@ -289,6 +350,8 @@ WITH src AS (
         UNION ALL SELECT 'TIME_MODEL',     'Y' FROM dual
         UNION ALL SELECT 'SYSSTAT',        'Y' FROM dual
         UNION ALL SELECT 'RESOURCE_LIMIT', 'N' FROM dual
+        UNION ALL SELECT 'PARAMETER',      'N' FROM dual
+        UNION ALL SELECT 'ASM_DISKGROUP',  'N' FROM dual
      )
 SELECT k.source_name,
        NVL(SUM(p.n_rows), 0)        AS n_rows,

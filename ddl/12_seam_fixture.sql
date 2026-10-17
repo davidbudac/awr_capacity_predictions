@@ -63,14 +63,54 @@ CREATE OR REPLACE VIEW capv_sysstat AS
 SELECT dbid, con_dbid, instance_number, snap_id, stat_name, value
 FROM   cap_fixture_sysstat;
 
+-- CAPV_PARAMETER / CAPV_ASM_DISKGROUP over CAP_FIXTURE_PARAMETER /
+-- CAP_FIXTURE_ASM_DISKGROUP (value_num already a NUMBER, group_name without
+-- the '+'). test/demo_fixture.sql builds the demo story without these two
+-- tables, so a missing table gets the zero-row contract stub of
+-- ddl/11_seam_warehouse.sql (typed constants, see the ORA-07445 note there)
+-- instead of an INVALID view. The lookup goes
+-- through ALL_TABLES on CURRENT_SCHEMA because USER_TABLES follows the
+-- session user (SYSDBA + CURRENT_SCHEMA installs).
+DECLARE
+    PROCEDURE mk(p_table VARCHAR2, p_pass VARCHAR2, p_stub VARCHAR2) IS
+        v_n PLS_INTEGER;
+    BEGIN
+        SELECT COUNT(*) INTO v_n
+        FROM   all_tables
+        WHERE  owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
+          AND  table_name = p_table;
+        EXECUTE IMMEDIATE CASE WHEN v_n > 0 THEN p_pass ELSE p_stub END;
+    END;
+BEGIN
+    mk('CAP_FIXTURE_PARAMETER',
+       q'[CREATE OR REPLACE VIEW capv_parameter AS
+          SELECT dbid, con_dbid, instance_number, snap_id, parameter_name, value_num
+          FROM   cap_fixture_parameter]',
+       q'[CREATE OR REPLACE VIEW capv_parameter AS
+          SELECT 0 AS dbid, 0 AS con_dbid, 0 AS instance_number, 0 AS snap_id,
+                 CAST('-' AS VARCHAR2(64)) AS parameter_name, 0 AS value_num
+          FROM   dual WHERE 1 = 0]');
+    mk('CAP_FIXTURE_ASM_DISKGROUP',
+       q'[CREATE OR REPLACE VIEW capv_asm_diskgroup AS
+          SELECT dbid, con_dbid, snap_id, group_name, total_mb, free_mb, usable_file_mb
+          FROM   cap_fixture_asm_diskgroup]',
+       q'[CREATE OR REPLACE VIEW capv_asm_diskgroup AS
+          SELECT 0 AS dbid, 0 AS con_dbid, 0 AS snap_id,
+                 CAST('-' AS VARCHAR2(128)) AS group_name,
+                 0 AS total_mb, 0 AS free_mb, 0 AS usable_file_mb
+          FROM   dual WHERE 1 = 0]');
+END;
+/
+
 -- --------------------------------------------------------------------
 -- CAPV_CONTRACT -- what this seam actually presents, one row per fact
 -- source: row count, distinct con_dbid, snap_id range and the newest
 -- snapshot end time. per_container_expected = 'Y' where the contract wants
 -- one series per container (TBSPC_USAGE, TIME_MODEL, SYSSTAT) and 'N' where
 -- the source is host / instance / spine level (OSSTAT, RESOURCE_LIMIT,
--- SNAPSHOT), so n_con_dbid = 1 against a 'Y' means the per-PDB series are
--- missing. A diagnostic for doctor.sql: it full-scans every source, and no
+-- PARAMETER, ASM_DISKGROUP, SNAPSHOT), so n_con_dbid = 1 against a 'Y' means
+-- the per-PDB series are missing. ASM_DISKGROUP has n_rows = 0 on a database
+-- without ASM. A diagnostic for doctor.sql: it full-scans every source, and no
 -- analytic view selects from it. The body reads only CAPV_* and is the same
 -- in all three seam files.
 -- --------------------------------------------------------------------
@@ -82,6 +122,8 @@ WITH src AS (
         UNION ALL SELECT 'TIME_MODEL',     dbid, con_dbid, snap_id FROM capv_time_model
         UNION ALL SELECT 'SYSSTAT',        dbid, con_dbid, snap_id FROM capv_sysstat
         UNION ALL SELECT 'RESOURCE_LIMIT', dbid, con_dbid, snap_id FROM capv_resource_limit
+        UNION ALL SELECT 'PARAMETER',      dbid, con_dbid, snap_id FROM capv_parameter
+        UNION ALL SELECT 'ASM_DISKGROUP',  dbid, con_dbid, snap_id FROM capv_asm_diskgroup
      ),
      per_con AS (
         SELECT source_name, dbid, con_dbid,
@@ -104,6 +146,8 @@ WITH src AS (
         UNION ALL SELECT 'TIME_MODEL',     'Y' FROM dual
         UNION ALL SELECT 'SYSSTAT',        'Y' FROM dual
         UNION ALL SELECT 'RESOURCE_LIMIT', 'N' FROM dual
+        UNION ALL SELECT 'PARAMETER',      'N' FROM dual
+        UNION ALL SELECT 'ASM_DISKGROUP',  'N' FROM dual
      )
 SELECT k.source_name,
        NVL(SUM(p.n_rows), 0)        AS n_rows,

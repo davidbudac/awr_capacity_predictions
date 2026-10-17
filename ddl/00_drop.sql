@@ -72,6 +72,8 @@ DECLARE
         'CAPV_TBSPC_USAGE',
         'CAPV_RESOURCE_LIMIT',
         'CAPV_SYSSTAT',
+        'CAPV_PARAMETER',
+        'CAPV_ASM_DISKGROUP',
         'CAPV_SNAPSHOT',
         'CAP_CFG_CHECK',
         'CAP_CFG'

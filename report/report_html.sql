@@ -956,6 +956,16 @@ DECLARE
     RETURN TO_CHAR(d, 'FMDD Mon');
   END dfmt;
 
+  -- The sizing ask (CAPR_TBSPC_DAYS_TO_FULL need_gib_90 / add_by_day) as a
+  -- phrase, NULL when nothing needs adding within 90 days.
+  FUNCTION ask_txt(p_need IN NUMBER, p_by IN DATE) RETURN VARCHAR2 IS
+  BEGIN
+    IF p_need IS NULL OR p_need <= 0 THEN RETURN NULL; END IF;
+    RETURN 'add ' || CASE WHEN p_need < 10 THEN TO_CHAR(p_need, 'FM9990.00') || ' GiB'
+                          ELSE fmt_size_gb(p_need) END
+           || CASE WHEN p_by IS NOT NULL THEN ' by ' || dfmt(p_by) END;
+  END ask_txt;
+
   -- growth rate from MiB/day: MiB below 1 GiB/day, GiB above
   FUNCTION fmt_rate_mb(mb IN NUMBER) RETURN VARCHAR2 IS
   BEGIN
@@ -1803,14 +1813,16 @@ BEGIN
 
       IF a.kind = 'TBSPC_FULL' THEN
         v_kind_lbl := 'Days to full';
-        FOR t IN (SELECT slope_mb, cur_gb, limit_gb, dtf_worst, accel, pct_used, days_to_full
+        FOR t IN (SELECT slope_mb, cur_gb, limit_gb, dtf_worst, accel, pct_used, days_to_full,
+                         need_gib_90, add_by_day
                   FROM capr_tbspc_days_to_full WHERE con_dbid = a.con_dbid AND tablespace_name = a.series_key
                   FETCH FIRST 1 ROW ONLY) LOOP
           v_main := '<b>' || esc(a.series_key) || '</b> fills at ' || fmt_rate_mb(t.slope_mb)
                     || CASE WHEN t.accel >= 1.5 THEN ', growth &times;' || TO_CHAR(t.accel, 'FM990.0') || ' vs its longer-term pace' END;
           v_sub  := v_tmp || fmt_size_gb(t.cur_gb) || ' of ' || fmt_size_gb(t.limit_gb) || ' (' || TO_CHAR(t.pct_used, 'FM990.0') || '%)'
                     || CASE WHEN t.dtf_worst IS NOT NULL AND t.dtf_worst < t.days_to_full
-                            THEN ' &middot; worst case ' || TO_CHAR(t.dtf_worst, 'FM999990') || ' days' END;
+                            THEN ' &middot; worst case ' || TO_CHAR(t.dtf_worst, 'FM999990') || ' days' END
+                    || CASE WHEN t.need_gib_90 > 0 THEN ' &middot; ' || ask_txt(t.need_gib_90, t.add_by_day) END;
           v_big  := TO_CHAR(a.value, 'FM999990') || ' days';
           v_small := '&asymp; ' || dfmt(NVL(v_last_day, SYSDATE) + a.value);
         END LOOP;
@@ -2239,7 +2251,9 @@ BEGIN
            quality,
            accel,
            cycle_days,
-           cycle_peak_pct
+           cycle_peak_pct,
+           need_gib_90,
+           add_by_day
     FROM   capr_tbspc_days_to_full
     -- CYCLIC rows are always listed: their days_to_full is the peak line's
     -- crossing, often empty, and the row explains why a purge cycle is not
@@ -2258,6 +2272,7 @@ BEGIN
         || '</th><th class="num">Days to full' || info_icon('estimated days until it reaches its allocated limit at the current rate (CAPR column: DAYS_TO_FULL)')
         || '</th><th>Severity' || info_icon('how urgent this is: CRIT is within the critical window, WARN within the warning window (CAPR column: SEV_DTF)')
         || '</th><th>Quality' || info_icon('reliability of the estimate -- only OK is a dependable forecast (CAPR column: QUALITY)')
+        || '</th><th>Sizing ask' || info_icon('space to add so the worst case (the upper 95% band) stays under the limit for 90 days, and the worst-case fill date (CAPR columns: NEED_GIB_90, ADD_BY_DAY)')
         || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
@@ -2270,7 +2285,8 @@ BEGIN
       || '<td class="num">' || nz(r.slope_mb, 'FM9999990.000') || '</td>'
       || '<td class="num">' || dtf_cell(r.days_to_full, r.quality, 'FM99999990') || '</td>'
       || '<td>' || sev_pill(r.sev) || '</td>'
-      || '<td>' || quality_pill(r.quality) || '</td></tr>');
+      || '<td>' || quality_pill(r.quality) || '</td>'
+      || '<td>' || NVL(ask_txt(r.need_gib_90, r.add_by_day), '&ndash;') || '</td></tr>');
 
     v_dtf_diag_n := v_dtf_diag_n + 1;
     v_dtf_diag(v_dtf_diag_n).db_pdb          := r.db_pdb;
@@ -3233,19 +3249,24 @@ BEGIN
   ----------------------------------------------------------------------
   p('<section id="s7">');
   p('<h2>7. Fixed-ceiling series '
-      || info_icon('peak processes and sessions against the init parameters, redo written per day, and total database size against the summed tablespace ceilings')
+      || info_icon('peak processes and sessions against the init parameters, redo written per day, total database size against the summed tablespace ceilings, ASM diskgroups, and TEMP / UNDO peaks')
       || '</h2>');
   p('<p class="desc">Series with a hard ceiling that is not a tablespace; a dash in Days to limit means no crossing at the current trend. '
       || 'PROCESSES / SESSIONS are the AWR peak-concurrency high-water marks against the '
       || 'init parameter (summed over RAC instances); DB_SIZE_GB is total permanent-tablespace '
       || 'usage against the sum of the same tablespaces&#39; ceilings; REDO_GB_DAY has no ceiling '
-      || 'and is a sizing trend for the FRA / archive destination. DAYS_LIM is the projected '
+      || 'and is a sizing trend for the FRA / archive destination, with FRA days = how many days of '
+      || 'redo db_recovery_file_dest_size holds at the current rate (an upper bound: the FRA also holds '
+      || 'flashback logs and backups). ASM_DG:+&lt;group&gt; is a diskgroup&#39;s raw GiB used against '
+      || 'its total; TEMP_PEAK / UNDO_PEAK are the highest sampled GiB used of a TEMP or UNDO '
+      || 'tablespace that day against its maxsize. DAYS_LIM is the projected '
       || 'days until the series reaches SAT, and WORST/BEST bound it with the 95% CI on the slope.</p>');
 
   any_rows := FALSE;
   FOR r IN (
     SELECT db_pdb, series, unit, cur_val, cur_limit, sat_value, pct_of_limit,
-           slope_per_day, r2, days_to_limit, limit_worst, limit_best, sev, quality
+           slope_per_day, r2, days_to_limit, limit_worst, limit_best, sev, quality,
+           fra_days_at_cur
     FROM   capr_series
     ORDER  BY rank_series
   ) LOOP
@@ -3265,7 +3286,9 @@ BEGIN
         || '</th><th class="num">Worst' || info_icon('CAPR column: LIMIT_WORST')
         || '</th><th class="num">Best' || info_icon('CAPR column: LIMIT_BEST')
         || '</th><th>Severity' || info_icon('CAPR column: SEV')
-        || '</th><th>Quality' || info_icon('CAPR column: QUALITY') || '</th></tr></thead><tbody>');
+        || '</th><th>Quality' || info_icon('CAPR column: QUALITY')
+        || '</th><th class="num">FRA days' || info_icon('REDO_GB_DAY only: days of redo db_recovery_file_dest_size holds at the current rate (CAPR column: FRA_DAYS_AT_CUR)')
+        || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
     p('<tr' || row_cls(r.sev) || '><td>' || esc(r.db_pdb) || '</td><td><b>' || esc(r.series) || '</b></td>'
@@ -3281,7 +3304,8 @@ BEGIN
       || '<td class="num">' || nz(r.limit_worst, 'FM99999990') || '</td>'
       || '<td class="num">' || nz(r.limit_best, 'FM99999990') || '</td>'
       || '<td>' || sev_pill(r.sev) || '</td>'
-      || '<td>' || quality_pill(r.quality) || '</td></tr>');
+      || '<td>' || quality_pill(r.quality) || '</td>'
+      || '<td class="num">' || nz(r.fra_days_at_cur, 'FM9999990.0') || '</td></tr>');
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');

@@ -193,13 +193,54 @@ FROM   awrv_sysstat
 WHERE  stat_name = 'redo size';
 
 -- --------------------------------------------------------------------
+-- CAPV_PARAMETER / CAPV_ASM_DISKGROUP -- WAREHOUSE GAP, same treatment as
+-- CAPV_RESOURCE_LIMIT: the collector gathers neither DBA_HIST_PARAMETER nor
+-- DBA_HIST_ASM_DISKGROUP_STAT / DBA_HIST_ASM_DISKGROUP, so these emit the
+-- column contract with zero rows. Downstream, warehouse mode then has no
+-- cpu_count ceiling (CAPD_DBTIME_DAILY divides by NUM_CPUS alone), no FRA
+-- days on REDO_GB_DAY and no ASM_DG series.
+--
+-- TODO (sibling repo awr-fleet-warehouse): collect DBA_HIST_PARAMETER for
+-- the names CAPV_PARAMETER filters on (root rows only, con_dbid = dbid) and
+-- DBA_HIST_ASM_DISKGROUP_STAT joined to DBA_HIST_ASM_DISKGROUP for the name,
+-- expose them as AWRV_PARAMETER / AWRV_ASM_DISKGROUP, then replace these
+-- stubs with pass-throughs shaped like ddl/10_seam_local.sql.
+--
+-- The stub columns are typed constants, not CAST(NULL ...): with NULL join
+-- keys, CAPD_DBTIME_DAILY over a zero-row CAPV_PARAMETER raised ORA-07445
+-- [qksopVisitOpns] (join predicate push-down) on 19.27. ddl/12 uses the
+-- same stubs.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capv_parameter AS
+SELECT 0                           AS dbid,
+       0                           AS con_dbid,
+       0                           AS instance_number,
+       0                           AS snap_id,
+       CAST('-' AS VARCHAR2(64))   AS parameter_name,
+       0                           AS value_num
+FROM   dual
+WHERE  1 = 0;
+
+CREATE OR REPLACE VIEW capv_asm_diskgroup AS
+SELECT 0                           AS dbid,
+       0                           AS con_dbid,
+       0                           AS snap_id,
+       CAST('-' AS VARCHAR2(128))  AS group_name,
+       0                           AS total_mb,
+       0                           AS free_mb,
+       0                           AS usable_file_mb
+FROM   dual
+WHERE  1 = 0;
+
+-- --------------------------------------------------------------------
 -- CAPV_CONTRACT -- what this seam actually presents, one row per fact
 -- source: row count, distinct con_dbid, snap_id range and the newest
 -- snapshot end time. per_container_expected = 'Y' where the contract wants
 -- one series per container (TBSPC_USAGE, TIME_MODEL, SYSSTAT) and 'N' where
 -- the source is host / instance / spine level (OSSTAT, RESOURCE_LIMIT,
--- SNAPSHOT), so n_con_dbid = 1 against a 'Y' means the per-PDB series are
--- missing. A diagnostic for doctor.sql: it full-scans every source, and no
+-- PARAMETER, ASM_DISKGROUP, SNAPSHOT), so n_con_dbid = 1 against a 'Y' means
+-- the per-PDB series are missing. ASM_DISKGROUP has n_rows = 0 on a database
+-- without ASM. A diagnostic for doctor.sql: it full-scans every source, and no
 -- analytic view selects from it. The body reads only CAPV_* and is the same
 -- in all three seam files.
 -- --------------------------------------------------------------------
@@ -211,6 +252,8 @@ WITH src AS (
         UNION ALL SELECT 'TIME_MODEL',     dbid, con_dbid, snap_id FROM capv_time_model
         UNION ALL SELECT 'SYSSTAT',        dbid, con_dbid, snap_id FROM capv_sysstat
         UNION ALL SELECT 'RESOURCE_LIMIT', dbid, con_dbid, snap_id FROM capv_resource_limit
+        UNION ALL SELECT 'PARAMETER',      dbid, con_dbid, snap_id FROM capv_parameter
+        UNION ALL SELECT 'ASM_DISKGROUP',  dbid, con_dbid, snap_id FROM capv_asm_diskgroup
      ),
      per_con AS (
         SELECT source_name, dbid, con_dbid,
@@ -233,6 +276,8 @@ WITH src AS (
         UNION ALL SELECT 'TIME_MODEL',     'Y' FROM dual
         UNION ALL SELECT 'SYSSTAT',        'Y' FROM dual
         UNION ALL SELECT 'RESOURCE_LIMIT', 'N' FROM dual
+        UNION ALL SELECT 'PARAMETER',      'N' FROM dual
+        UNION ALL SELECT 'ASM_DISKGROUP',  'N' FROM dual
      )
 SELECT k.source_name,
        NVL(SUM(p.n_rows), 0)        AS n_rows,

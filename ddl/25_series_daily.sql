@@ -18,6 +18,23 @@
 --   DB_SIZE_GB   (M11.3) total database size = SUM(used_bytes) over
 --                CAPD_TBSPC_DAILY, with SUM(limit_bytes) as the ceiling.
 --                unit GIB.
+--   ASM_DG:+<name>  used space of one ASM diskgroup (CAPV_ASM_DISKGROUP),
+--                (total_mb - free_mb) / 1024 at the day's LAST sample,
+--                against total_mb / 1024. unit GIB. Raw MB before
+--                mirroring, so the percent is right for any redundancy and
+--                the GiB are raw. Autoextend maxsize is often fiction (every
+--                autoextend smallfile datafile reports 32 GiB), and the
+--                diskgroup is the real ceiling under it. The '+' is added
+--                here because AWR stores the name without it.
+--   TEMP_PEAK:<tablespace>  the day's PEAK used space of a TEMPORARY or
+--   UNDO_PEAK:<tablespace>  UNDO tablespace: MAX(used blocks) over the day's
+--                samples * block size, in GiB, against the day's MAX of
+--                (maxsize when autoextend, else allocated size). unit GIB.
+--                CAPD_TBSPC_DAILY leaves these tablespaces out because their
+--                level is not growth, but running out of them is an outage
+--                (ORA-01652 / ORA-30036), so here they are read as peaks.
+--                A peak is the highest SAMPLED value: usage between two
+--                snapshots is not seen. CAP_TBSPC_OVERRIDE does not apply.
 --
 -- Column contract:
 --   (dbid, con_dbid, series, day_dt, value, limit_value, unit, n_samples,
@@ -27,8 +44,8 @@
 -- covered_sec / is_complete mean what they mean in CAPD_CPU_DAILY, and only a
 -- flow series has them: REDO_GB_DAY sums counter deltas, so a day with half
 -- its intervals reads half the redo. The level series (PROCESSES, SESSIONS,
--- DB_SIZE_GB) read one sample per day, so they carry covered_sec NULL and
--- is_complete 'Y'.
+-- DB_SIZE_GB, ASM_DG, TEMP_PEAK, UNDO_PEAK) read samples of a level, so they
+-- carry covered_sec NULL and is_complete 'Y'.
 -- M15 gap columns, read by the anomaly layer (a gap day is neither scored
 -- nor used as baseline):
 --   day_gap            = days since the series' previous row.
@@ -39,10 +56,14 @@
 --                        redo); for DB_SIZE_GB when n_samples differs from the
 --                        previous row's (the tablespace SET changed, so the
 --                        day-over-day move measures membership, not growth);
---                        else 'N'.
+--                        else 'N'. ASM_DG / TEMP_PEAK / UNDO_PEAK count
+--                        samples, not members, so they read 'N'.
 --
 -- Seam-agnostic: only CAPV_* (+ CAPD_TBSPC_DAILY and CAPD_COUNTER_DELTA,
--- both seam-agnostic).
+-- both seam-agnostic). The ASM_DG and TEMP/UNDO branches give each series a
+-- name of its own, so CAPF_SERIES_FORECAST, the SERIES_LIMIT /
+-- SERIES_NEARLIMIT alerts, report section 7 and the point feeds cover them
+-- with no code of their own.
 -- 19c note: every LAG carries an inline OVER (PARTITION BY ... ORDER BY ...).
 --
 -- Facts worth knowing before changing this file:
@@ -148,6 +169,69 @@ WITH snap AS (
         FROM   capd_tbspc_daily
         GROUP  BY dbid, con_dbid, day_dt
      ),
+     -- Space usage has no instance_number: the day comes from the snapshot's
+     -- earliest end time across instances, as in CAPD_TBSPC_DAILY.
+     snap_time AS (
+        SELECT dbid, snap_id, MIN(end_interval_time) AS eit
+        FROM   capv_snapshot
+        GROUP  BY dbid, snap_id
+     ),
+     -- ---------------- ASM_DG ----------------
+     -- A level: the day's last sample. A dismounted group reads total_mb 0
+     -- and is skipped.
+     -- day_dt is projected in the inline view and grouped as a column, for
+     -- the ORA-00979 reason given at redo_day.
+     asm_day AS (
+        SELECT dbid, con_dbid, series, day_dt,
+               MAX(used_mb)  KEEP (DENSE_RANK LAST ORDER BY eit) / 1024 AS val,
+               MAX(total_mb) KEEP (DENSE_RANK LAST ORDER BY eit) / 1024 AS lim,
+               COUNT(*)                                                AS n_samples
+        FROM  ( SELECT a.dbid, a.con_dbid,
+                       'ASM_DG:+' || a.group_name AS series,
+                       TRUNC(st.eit)              AS day_dt,
+                       st.eit,
+                       a.total_mb - a.free_mb     AS used_mb,
+                       a.total_mb
+                FROM   capv_asm_diskgroup a
+                JOIN   snap_time st
+                  ON   st.dbid = a.dbid AND st.snap_id = a.snap_id
+                WHERE  a.total_mb > 0
+                  AND  a.free_mb IS NOT NULL )
+        GROUP  BY dbid, con_dbid, series, day_dt
+     ),
+     -- ---------------- TEMP_PEAK / UNDO_PEAK ----------------
+     -- Read straight off the seam: CAPD_TBSPC_DAILY drops these contents.
+     -- Block size as in CAPD_TBSPC_DAILY (tablespace dim first, datafile
+     -- fallback: DBA_HIST_DATAFILE has no tempfiles anyway).
+     tu AS (
+        SELECT u.dbid, u.con_dbid,
+               CASE t.contents WHEN 'TEMPORARY' THEN 'TEMP_PEAK:' ELSE 'UNDO_PEAK:' END
+                 || t.tablespace_name                                         AS series,
+               TRUNC(st.eit)                                                  AS day_dt,
+               u.tablespace_usedsize * COALESCE(t.block_size, b.block_size)   AS used_bytes,
+               CASE WHEN u.tablespace_maxsize > 0 THEN u.tablespace_maxsize
+                    ELSE u.tablespace_size END
+                 * COALESCE(t.block_size, b.block_size)                       AS limit_bytes
+        FROM   capv_tbspc_usage u
+        JOIN   snap_time st
+          ON   st.dbid = u.dbid AND st.snap_id = u.snap_id
+        JOIN   capv_tablespace t
+          ON   t.dbid = u.dbid AND t.con_dbid = u.con_dbid AND t.tablespace_id = u.tablespace_id
+        LEFT   JOIN (SELECT dbid, con_dbid, tablespace_id, MAX(block_size) AS block_size
+                     FROM   capv_datafile
+                     GROUP  BY dbid, con_dbid, tablespace_id) b
+          ON   b.dbid = u.dbid AND b.con_dbid = u.con_dbid AND b.tablespace_id = u.tablespace_id
+        WHERE  t.contents IN ('TEMPORARY','UNDO')
+     ),
+     tu_day AS (
+        SELECT dbid, con_dbid, series, day_dt,
+               MAX(used_bytes)  / 1073741824 AS val,
+               MAX(limit_bytes) / 1073741824 AS lim,
+               COUNT(*)                      AS n_samples
+        FROM   tu
+        WHERE  used_bytes IS NOT NULL
+        GROUP  BY dbid, con_dbid, series, day_dt
+     ),
      u AS (
         SELECT dbid, con_dbid, series, day_dt, val, lim,
                'COUNT'       AS unit, n_samples,
@@ -168,6 +252,14 @@ WITH snap AS (
                'GIB'         AS unit, n_samples,
                CAST(NULL AS NUMBER), 'Y', CAST(NULL AS NUMBER)
         FROM   size_day
+        UNION ALL
+        SELECT dbid, con_dbid, series, day_dt, val, lim,
+               'GIB', n_samples, CAST(NULL AS NUMBER), 'Y', CAST(NULL AS NUMBER)
+        FROM   asm_day
+        UNION ALL
+        SELECT dbid, con_dbid, series, day_dt, val, lim,
+               'GIB', n_samples, CAST(NULL AS NUMBER), 'Y', CAST(NULL AS NUMBER)
+        FROM   tu_day
      )
 SELECT u.dbid, u.con_dbid, u.series, u.day_dt, u.val AS value, u.lim AS limit_value,
        u.unit, u.n_samples, u.covered_sec, u.is_complete,

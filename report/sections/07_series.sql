@@ -1,31 +1,39 @@
 --
--- 07_series.sql -- fixed-ceiling series: processes/sessions, redo, DB size (M11).
+-- 07_series.sql -- fixed-ceiling series: processes/sessions, redo, DB size (M11),
+-- ASM diskgroups, TEMP / UNDO peaks.
 -- FORMAT ONLY (M8.2 convention): every number, label and severity marker comes
 -- from CAPR_SERIES (7) and CAPR_SERIES_ANOMALIES (7b), the views the HTML
 -- report reads.
 --
 -- Unlike a tablespace, these series each have (or lack) a single hard ceiling
--- that is not a byte count: the `processes` / `sessions` init parameters, the
--- summed tablespace ceilings, or -- for redo -- no ceiling at all. They are
+-- that is not a tablespace's own: the `processes` / `sessions` init parameters,
+-- the summed tablespace ceilings, a diskgroup's size, a TEMP / UNDO
+-- tablespace's size, or -- for redo -- no ceiling at all. They are
 -- listed together because the arithmetic is identical: fit a line, ask when it
 -- reaches SAT% of the limit.
 --
 PROMPT
-PROMPT == 7. FIXED-CEILING SERIES (processes / sessions / redo / total DB size) ==
+PROMPT == 7. FIXED-CEILING SERIES (processes / sessions / redo / DB size / ASM / TEMP / UNDO) ==
 PROMPT     PROCESSES, SESSIONS  peak concurrency (AWR max_utilization, a
 PROMPT                          high-water mark since instance startup) against
 PROMPT                          the init parameter. RAC: summed over instances.
 PROMPT     REDO_GB_DAY          redo written per day, GiB. No ceiling -- it is a
 PROMPT                          trend for FRA / archive-destination sizing.
+PROMPT                          FRA_DAYS = days of redo db_recovery_file_dest_size
+PROMPT                          holds at the current rate (an upper bound).
 PROMPT     DB_SIZE_GB           total permanent-tablespace bytes used, vs the sum
 PROMPT                          of the same tablespaces' ceilings.
+PROMPT     ASM_DG:+<group>      ASM diskgroup GiB used (raw, before mirroring) vs
+PROMPT                          its total, at the day's last snapshot.
+PROMPT     TEMP_PEAK:<ts>       the day's highest sampled GiB used of a TEMP or
+PROMPT     UNDO_PEAK:<ts>       UNDO tablespace vs its maxsize (else size).
 PROMPT     DAYS_LIM = projected days until the series reaches SAT (the
 PROMPT     series_sat_pct% of LIMIT shown), empty when there is no ceiling or no
 PROMPT     growth. WORST/BEST bound it with the 95% CI on the slope
 PROMPT     (BEST empty = might never get there). Trust it per QUALITY.
 
 COLUMN db_pdb       FORMAT A20           HEADING 'DB/PDB'
-COLUMN series       FORMAT A12           HEADING 'SERIES'
+COLUMN series       FORMAT A20           HEADING 'SERIES'
 COLUMN unit         FORMAT A11           HEADING 'UNIT'
 COLUMN n            FORMAT 9990          HEADING 'TRAIN_N'
 COLUMN cur_val      FORMAT 99999990.00   HEADING 'CURRENT'
@@ -39,6 +47,7 @@ COLUMN limit_worst  FORMAT 99999990      HEADING 'WORST'
 COLUMN limit_best   FORMAT 99999990      HEADING 'BEST'
 COLUMN sev          FORMAT A4            HEADING 'SEV'
 COLUMN quality      FORMAT A20           HEADING 'QUALITY'
+COLUMN fra_days     FORMAT 9999990.0     HEADING 'FRA_DAYS'
 
 SELECT db_pdb,
        series,
@@ -54,7 +63,8 @@ SELECT db_pdb,
        limit_worst,
        limit_best,
        sev,
-       quality
+       quality,
+       fra_days_at_cur AS fra_days
 FROM   capr_series
 ORDER  BY rank_series;
 

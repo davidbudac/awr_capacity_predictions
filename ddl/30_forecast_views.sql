@@ -166,6 +166,22 @@
 -- current usage (an override under the used size) reads 0, not a negative
 -- count, and limit_below_used = 'Y' flags the row.
 --
+-- ---------------------------------------------------------------------
+-- Sizing ask (CAPF_TBSPC_FORECAST)
+-- ---------------------------------------------------------------------
+-- How much space to add, and by when, so the WORST case stays under the
+-- ceiling:
+--
+--     need_gib_h = GREATEST(0, proj_h_hi - limit_bytes) / 2^30   h = 30, 90, 180
+--     add_by_day = last_day + days_to_full_lo
+--
+-- proj_h_hi is the upper edge of the 95% band, so need_gib_h is the space
+-- that keeps the high side of the forecast under the ceiling through day h.
+-- It reads 0 when the band stays under, and NULL when the band is NULL or
+-- the row is CYCLIC (its band is drawn around the sawtooth, not the peaks).
+-- A limit already under the current usage asks for at least the overage.
+-- add_by_day is the worst-case fill date, NULL when days_to_full_lo is.
+--
 SET DEFINE OFF
 
 -- --------------------------------------------------------------------
@@ -646,7 +662,22 @@ SELECT f.dbid,
             THEN ROUND(100 * k.cycle_peak / c.limit_bytes, 1)
        END                                                AS cycle_peak_pct,
        CASE WHEN f.is_cyclic = 1 AND p.pk_n >= 3
-            THEN p.pk_slope END                           AS peak_slope_bpd
+            THEN p.pk_slope END                           AS peak_slope_bpd,
+       -- Sizing ask (header): space to add so the band's high edge stays
+       -- under the ceiling through +h, and the worst-case fill date.
+       CASE WHEN f.is_cyclic = 0
+            THEN GREATEST(0, c.cur_used + f.use_slope * 30  + f.use_h30  - c.limit_bytes) / 1073741824
+       END                                                AS need_gib_30,
+       CASE WHEN f.is_cyclic = 0
+            THEN GREATEST(0, c.cur_used + f.use_slope * 90  + f.use_h90  - c.limit_bytes) / 1073741824
+       END                                                AS need_gib_90,
+       CASE WHEN f.is_cyclic = 0
+            THEN GREATEST(0, c.cur_used + f.use_slope * 180 + f.use_h180 - c.limit_bytes) / 1073741824
+       END                                                AS need_gib_180,
+       f.last_day
+         + CASE WHEN f.is_cyclic = 0 AND f.ci_slope > 0 AND f.use_ci IS NOT NULL
+                THEN GREATEST(0, FLOOR((c.limit_bytes - c.cur_used) / (f.ci_slope + f.use_ci)))
+           END                                            AS add_by_day
 FROM   fin f
 JOIN   cur  c ON c.dbid = f.dbid AND c.con_dbid = f.con_dbid
              AND c.tablespace_name = f.tablespace_name
