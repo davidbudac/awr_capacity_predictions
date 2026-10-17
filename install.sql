@@ -6,9 +6,13 @@
 --
 -- Usage (the caller MUST DEFINE seam_mode first; see note below):
 --
---   sqlplus / as sysdba
+--   sqlplus c##awrcap/...                -- the owner create_owner.sql made
 --   SQL> DEFINE seam_mode = 'local'      -- local | warehouse | fixture
 --   SQL> @install.sql
+--
+-- The header prints the target schema. Installing into SYS still works (the
+-- quickstart does it) but prints a warning: a dedicated owner keeps the
+-- suite out of the dictionary schema and is the production path.
 --
 -- seam_mode dispatch:
 --   local      CAPV_* over DBA_HIST_*      (needs Diagnostics Pack + direct
@@ -30,7 +34,11 @@ SET DEFINE '&'
 SET VERIFY   OFF
 SET FEEDBACK OFF
 SET TIMING   OFF
-WHENEVER SQLERROR EXIT SQL.SQLCODE
+SET TAB      OFF
+SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
+-- EXIT FAILURE, not SQL.SQLCODE: the OS keeps only the low 8 bits of the exit
+-- status, so an ORA- code that is a multiple of 256 would exit 0.
+WHENEVER SQLERROR EXIT FAILURE
 WHENEVER OSERROR  EXIT FAILURE
 
 -- Pin '.' as decimal separator so REGR_* / numeric literals are locale-safe.
@@ -54,10 +62,26 @@ SELECT 'ddl/' ||
        END AS seam_script
 FROM   dual;
 
+COLUMN cap_schema NEW_VALUE cap_schema NOPRINT
+SELECT SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS cap_schema FROM dual;
+
 PROMPT  seam_mode  = &&seam_mode
 PROMPT  seam_script= &seam_script
-PROMPT  schema     = installing into the current schema
+PROMPT  schema     = &cap_schema
 PROMPT
+
+BEGIN
+    IF SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') = 'SYS' THEN
+        DBMS_OUTPUT.PUT_LINE('  ############################################################');
+        DBMS_OUTPUT.PUT_LINE('  WARNING: installing into SYS.');
+        DBMS_OUTPUT.PUT_LINE('  Every CAP* object will be owned by SYS in this container.');
+        DBMS_OUTPUT.PUT_LINE('  This works, but it mixes the suite into the dictionary');
+        DBMS_OUTPUT.PUT_LINE('  schema. For a real install, create a dedicated owner with');
+        DBMS_OUTPUT.PUT_LINE('  @create_owner.sql and install as that user.');
+        DBMS_OUTPUT.PUT_LINE('  ############################################################');
+    END IF;
+END;
+/
 
 -- --------------------------------------------------------------------
 -- Layered DDL, in dependency order. @@ resolves relative to this file's dir.
@@ -89,25 +113,76 @@ PROMPT -- [55] report views that need Tier 2 (CAPR_TBSPC_FORECAST/ESM_COMPARE/BA
 @@ddl/55_report_views_ml.sql
 
 -- --------------------------------------------------------------------
--- Closing validity check. Any INVALID object among our prefixes is a real
--- install failure -- in every seam mode (warehouse mode now compiles valid
--- against the awr-fleet-warehouse AWRV_* views, as of Milestone W).
+-- Recompile, then check. A re-install drops and recreates the views, which
+-- leaves any dependent object INVALID (e.g. CAP_REPORT_SPOOL from
+-- install_jobs.sql, which reads CAPR_ALERTS), and nothing else recompiles it.
+-- Both steps read ALL_OBJECTS on owner = CURRENT_SCHEMA: USER_OBJECTS follows
+-- the session user, so it looks in the wrong schema under
+-- ALTER SESSION SET CURRENT_SCHEMA.
 -- --------------------------------------------------------------------
 SET DEFINE '&'
-SET SERVEROUTPUT ON SIZE UNLIMITED
+SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
+DECLARE
+    v_owner VARCHAR2(128) := SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA');
+    v_sql   VARCHAR2(400);
+BEGIN
+    -- Two passes: an object that failed because its own dependency was still
+    -- invalid compiles on the second.
+    FOR pass IN 1 .. 2 LOOP
+        FOR r IN (
+            SELECT object_name, object_type
+            FROM   all_objects
+            WHERE  owner  = v_owner
+              AND  status = 'INVALID'
+              AND  REGEXP_LIKE(object_name, '^CAP[VDFAR]?_')
+              AND  object_type IN ('VIEW', 'PROCEDURE', 'FUNCTION', 'PACKAGE',
+                                   'PACKAGE BODY', 'TYPE', 'TYPE BODY',
+                                   'TRIGGER', 'SYNONYM')
+            ORDER BY DECODE(object_type, 'TYPE', 1, 'PACKAGE', 2, 'VIEW', 3,
+                                         'SYNONYM', 3, 'FUNCTION', 4,
+                                         'PROCEDURE', 4, 'TYPE BODY', 5,
+                                         'PACKAGE BODY', 5, 6),
+                     object_name
+        ) LOOP
+            v_sql := 'ALTER '
+                  || CASE r.object_type
+                         WHEN 'PACKAGE BODY' THEN 'PACKAGE'
+                         WHEN 'TYPE BODY'    THEN 'TYPE'
+                         ELSE r.object_type
+                     END
+                  || ' ' || DBMS_ASSERT.ENQUOTE_NAME(v_owner, FALSE)
+                  || '.' || DBMS_ASSERT.ENQUOTE_NAME(r.object_name, FALSE)
+                  || CASE WHEN r.object_type IN ('PACKAGE BODY', 'TYPE BODY')
+                          THEN ' COMPILE BODY' ELSE ' COMPILE' END;
+            BEGIN
+                EXECUTE IMMEDIATE v_sql;
+                DBMS_OUTPUT.PUT_LINE('  recompiled ' || r.object_type || ' ' || r.object_name);
+            EXCEPTION
+                WHEN OTHERS THEN
+                    -- ORA-24344 (compiled with errors) lands here; the check
+                    -- below lists whatever is still invalid.
+                    IF pass = 2 THEN
+                        DBMS_OUTPUT.PUT_LINE('  recompile failed: ' || r.object_type || ' '
+                                             || r.object_name || ' (' || SQLERRM || ')');
+                    END IF;
+            END;
+        END LOOP;
+    END LOOP;
+END;
+/
+
+-- Any INVALID object among our prefixes is a real install failure, in every
+-- seam mode (warehouse mode compiles valid against the awr-fleet-warehouse
+-- AWRV_* views, as of Milestone W).
 DECLARE
     v_bad   PLS_INTEGER  := 0;
 BEGIN
     FOR r IN (
         SELECT object_name, object_type
-        FROM   user_objects
-        WHERE  status = 'INVALID'
-          AND (object_name LIKE 'CAP\_%'  ESCAPE '\'
-            OR object_name LIKE 'CAPV\_%' ESCAPE '\'
-            OR object_name LIKE 'CAPD\_%' ESCAPE '\'
-            OR object_name LIKE 'CAPF\_%' ESCAPE '\'
-            OR object_name LIKE 'CAPA\_%' ESCAPE '\'
-            OR object_name LIKE 'CAPR\_%' ESCAPE '\')
+        FROM   all_objects
+        WHERE  owner  = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
+          AND  status = 'INVALID'
+          AND  REGEXP_LIKE(object_name, '^CAP[VDFAR]?_')
         ORDER BY object_name
     ) LOOP
         v_bad := v_bad + 1;
@@ -116,22 +191,25 @@ BEGIN
 
     IF v_bad > 0 THEN
         RAISE_APPLICATION_ERROR(-20001,
-            'Install incomplete: ' || v_bad || ' object(s) invalid (see list above). '
+            'Install incomplete: ' || v_bad || ' object(s) invalid in schema '
+            || SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') || ' (see list above). '
             || 'Check DBA_HIST_* grants (local mode), the AWRV_* views + SELECT grants '
             || '(warehouse mode), or CAP_FIXTURE_* tables (fixture mode).');
     END IF;
-    DBMS_OUTPUT.PUT_LINE('  All CAP* objects valid.');
+    DBMS_OUTPUT.PUT_LINE('  All CAP* objects valid in schema '
+                         || SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') || '.');
 END;
 /
 
 PROMPT
 SET DEFINE '&'
 PROMPT ============================================================
-PROMPT  Install complete (seam_mode = &&seam_mode).
+PROMPT  Install complete (seam_mode = &&seam_mode, schema = &cap_schema).
 PROMPT  Next: report/report.sql  (text capacity report)
 PROMPT        cap_forecast_ml.train_all  (optional Tier 2 ESM models)
 PROMPT ============================================================
 PROMPT
 
 WHENEVER SQLERROR CONTINUE
+WHENEVER OSERROR  CONTINUE
 SET FEEDBACK ON

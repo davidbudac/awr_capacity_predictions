@@ -22,6 +22,13 @@
 -- On a stock box (8-day AWR retention) the first report says
 -- INSUFFICIENT_HISTORY -- that is expected; raise retention and let it fill.
 --
+-- It stops before install when doctor.sql reports any FAIL line. WARN lines
+-- (short history, SYS as the target schema) do not stop it. To install anyway:
+--   SQL> DEFINE force_install = Y
+--   SQL> @quickstart.sql
+--
+-- As SYS this installs into SYS. For a dedicated owner see create_owner.sql.
+--
 SET DEFINE '&'
 SET VERIFY   OFF
 SET FEEDBACK OFF
@@ -39,7 +46,39 @@ PROMPT
 HOST mkdir -p reports
 
 PROMPT ==== [1/3] preflight -- doctor.sql ====
+-- Judge readiness for the local install this script is about to run, even if
+-- the schema currently holds a fixture or warehouse install.
+DEFINE cap_doctor_mode = 'local'
 @@doctor.sql
+SET DEFINE '&'
+SET FEEDBACK OFF
+
+-- force_install defaults to N without prompting: a zero-row NEW_VALUE query
+-- defines an unset variable as empty and leaves a set one alone.
+SET TERMOUT OFF
+COLUMN cap_force_in NEW_VALUE force_install NOPRINT
+SELECT NULL AS cap_force_in FROM dual WHERE 1 = 0;
+COLUMN cap_force_in CLEAR
+SET TERMOUT ON
+
+-- Stop on a doctor FAIL: print why, then divide by zero under
+-- WHENEVER SQLERROR EXIT so sqlplus exits non-zero before install.sql runs.
+SET HEADING OFF
+SELECT 'quickstart: STOPPED before install. doctor.sql reported &cap_doctor_fail FAIL line(s)'
+       || ' (a FAIL means install.sql would fail or forecasts would be empty).'
+       || CHR(10) || 'Fix the FAIL lines above and re-run, or DEFINE force_install = Y to install anyway.'
+FROM   dual
+WHERE  TO_NUMBER('&cap_doctor_fail') > 0
+  AND  UPPER(NVL('&force_install', 'N')) <> 'Y';
+SET HEADING ON
+WHENEVER SQLERROR EXIT FAILURE
+COLUMN cap_gate NOPRINT
+SELECT CASE WHEN TO_NUMBER('&cap_doctor_fail') > 0
+             AND UPPER(NVL('&force_install', 'N')) <> 'Y'
+            THEN 1/0 ELSE 0 END AS cap_gate
+FROM   dual;
+COLUMN cap_gate CLEAR
+WHENEVER SQLERROR CONTINUE
 
 PROMPT
 PROMPT ==== [2/3] install -- install.sql  (seam_mode = local) ====
@@ -60,3 +99,5 @@ PROMPT  then re-run @report/report.sql once history has accumulated.
 PROMPT ############################################################
 PROMPT
 UNDEFINE seam_mode
+UNDEFINE force_install
+UNDEFINE cap_doctor_mode

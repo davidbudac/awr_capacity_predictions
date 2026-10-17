@@ -170,6 +170,8 @@ BEGIN
 END;
 /
 
+-- reports/ is gitignored, so a fresh clone does not have it.
+HOST mkdir -p reports
 SPOOL &cap_path
 
 SET DEFINE OFF

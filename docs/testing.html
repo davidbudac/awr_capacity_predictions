@@ -77,8 +77,9 @@
           <h4>Fixture self-check</h4>
           <p>Install <span class="inline">fixture</span> mode (fake data) as <b>CAPTEST</b> in
             <b>PDB1</b>, then run the self-check scripts. This is how you "test everything yourself":
-            <b>199 Tier 1 assertions</b> plus <b>14 Tier 2 (ESM) assertions</b>, each compared against
-            a closed-form answer, <b>failing loudly</b> if any is off. No AWR history required.</p>
+            a Tier 1 script and a Tier 2 (ESM) script, each assertion compared against a closed-form
+            answer, <b>failing loudly</b> if any is off. Each script prints its own count in its
+            summary line. No AWR history required.</p>
           <div class="meta">
             <span><b>Where:</b> PDB1 · captest/&lt;password&gt;</span>
             <span><b>Proves:</b> forecasts, intervals, robust slope, resets, overrides, CPU peaks/gaps/shifts, fixed-ceiling series, alerts, ESM</span>
@@ -503,7 +504,7 @@ M11 fixtures loaded: sessions 200..440 of 500, processes 150 of 300,
 ============================================================
  seam_mode  = fixture
  seam_script= ddl/12_seam_fixture.sql
- schema     = installing into the current schema
+ schema     = CAPTEST
 
  -- [00] drop any prior install ...
  -- [05] CAP_CONFIG + seed ...
@@ -516,9 +517,9 @@ M11 fixtures loaded: sessions 200..440 of 500, processes 150 of 300,
  -- [45] integration/report layer (CAPR_CONTAINER + CAPR_ALERTS + sections) ...
  -- [50] Tier 2 OML ESM (CAP_ML_MODEL + package + CAPF_ESM/COMPARE) ...
  -- [55] report views that need Tier 2 (CAPR_TBSPC_FORECAST/ESM_COMPARE/BACKTEST) ...
-  <span class="c-pass">All CAP* objects valid.</span>
+  <span class="c-pass">All CAP* objects valid in schema CAPTEST.</span>
 ============================================================
- Install complete (seam_mode = fixture).
+ Install complete (seam_mode = fixture, schema = CAPTEST).
 ============================================================</pre>
             </div>
             <div class="callout">
@@ -537,8 +538,10 @@ M11 fixtures loaded: sessions 200..440 of 500, processes 150 of 300,
           <div class="step__rail"><div class="step__n">5</div><div class="step__line"></div></div>
           <div class="step__body">
             <h4>Run the Tier 1 self-check</h4>
-            <p><b>199 assertions</b> over the fake data — every result compared to its closed-form
-              answer. It prints PASS/FAIL per check and <b>exits with an error code on any failure</b>
+            <p>Every assertion over the fake data compares a result to its closed-form answer. The
+              number of assertions grows with each milestone, so this page does not quote one: read
+              the closing <span class="inline">RESULT: N passed, M failed</span> line, where M must be
+              0. It prints PASS/FAIL per check and <b>exits with an error code on any failure</b>
               (<span class="inline">WHENEVER SQLERROR EXIT FAILURE</span> plus a final
               <span class="inline">RAISE_APPLICATION_ERROR</span>), so you can wire it straight into CI
               or a monitoring job.</p>
@@ -549,7 +552,7 @@ M11 fixtures loaded: sessions 200..440 of 500, processes 150 of 300,
             </div>
             <div class="term">
               <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
-                <span class="term__title">output (abridged — 199 lines)</span><span class="term__tag out">expect</span></div>
+                <span class="term__title">output (abridged)</span><span class="term__tag out">expect</span></div>
 <pre><span class="c-dim">=== FIX_LINEAR forecast ===</span>
   <span class="c-pass">PASS</span>  LINEAR slope_bpd (bytes/day) ~= 10485760
   <span class="c-pass">PASS</span>  LINEAR days_to_full = 4990
@@ -595,13 +598,13 @@ M11 fixtures loaded: sessions 200..440 of 500, processes 150 of 300,
 <span class="c-dim">=== M11.2 redo GiB/day ===</span>
   <span class="c-pass">PASS</span>  REDO_GB_DAY probe value ~= 2
 ----------------------------------------
-RESULT: <span class="c-pass">199 passed, 0 failed</span>
+RESULT: <span class="c-pass">&lt;N&gt; passed, 0 failed</span>
 
 All fixture assertions passed.</pre>
             </div>
             <div class="callout tip">
               <span class="ico">▸</span>
-              <p><strong>What the blocks prove.</strong> The 199 assertions are grouped by the
+              <p><strong>What the blocks prove.</strong> The assertions are grouped by the
               behaviour they pin down: the four original series (LINEAR / SPIKE / FLAT / GAP), the
               M7.1 near-full pair, the M7.2 container labels, the M7.4 report bound and M7.7
               acceleration floor, the M8.1 alert kinds and M8.2 <span class="inline">CAPR_*</span>
@@ -619,12 +622,13 @@ All fixture assertions passed.</pre>
           <div class="step__body">
             <h4>Run the Tier 2 (optional ML) self-check</h4>
             <p>A separate script, because Oracle's built-in ML needs the
-              <span class="inline">CREATE MINING MODEL</span> privilege. <b>14 assertions</b>: it
+              <span class="inline">CREATE MINING MODEL</span> privilege. It
               trains the smoothing models, checks the <code>FIX_LINEAR</code> +30-day forecast lands
               within 5% of the closed form, then checks the M10.4 contract — the quality gate (no
               model for <code>FIX_FLAT</code> / <code>FIX_NEARFULL</code>), both candidate twins
               scored, the recorded pick matching the recorded evidence, and no backtest twin leaking
-              into the forecast surface.</p>
+              into the forecast surface. Success ends with
+              <span class="inline">All ML assertions passed.</span>; a failure exits non-zero.</p>
             <div class="term in">
               <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
                 <span class="term__title">SQL*Plus · captest@pdb1</span><span class="term__tag in">you run</span></div>
@@ -721,7 +725,9 @@ All ML assertions passed.</pre>
               the <span class="inline">CAP_*</span> objects gone as well — that is also the only thing
               that drops the persisted <span class="inline">CAP_CONFIG</span>,
               <span class="inline">CAP_TBSPC_OVERRIDE</span> and
-              <span class="inline">CAP_ML_MODEL</span> tables.</p>
+              <span class="inline">CAP_ML_MODEL</span> tables. It removes the opt-in scheduler jobs
+              first and ends with the number of <span class="inline">CAP%</span> objects left
+              (0 expected).</p>
             <div class="term in">
               <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
                 <span class="term__title">SQL*Plus · captest@pdb1</span><span class="term__tag in">you run</span></div>
@@ -779,13 +785,16 @@ sqlplus / as sysdba</pre>
             <h4>Run the preflight</h4>
             <p><span class="inline">doctor.sql</span> is a read-only PASS/WARN/FAIL checklist and the
               fastest way to find out whether local mode <em>can</em> work here — before you install
-              anything. It checks Diagnostics Pack access, <b>direct</b> SELECT on each
-              <span class="inline">DBA_HIST_*</span> view the local seam needs, the
+              anything. It checks the target schema (WARN on SYS), Diagnostics Pack access and
+              <span class="inline">STATISTICS_LEVEL</span>, SELECT on each of the ten
+              <span class="inline">DBA_HIST_*</span> views the local seam reads plus the target
+              schema's <b>direct</b> grants on them, the
               <span class="inline">CREATE TABLE/VIEW/PROCEDURE/TYPE/MINING MODEL/JOB</span>
               privileges, AWR retention and snapshot interval per dbid, how many distinct days each
-              source actually holds versus <span class="inline">min_train_days</span>, and — if the
-              suite is already installed — invalid <span class="inline">CAP*</span> objects plus the
-              seam mode in use. It closes with a plain-English reason why forecasts would come back
+              source holds and how old the newest snapshot is, and a readiness table of days needed
+              versus days available per feature. If the suite is already installed it adds the
+              <span class="inline">suite_version</span>, invalid <span class="inline">CAP*</span>
+              objects, the seam mode in use, the fit-quality mix and a config sanity block. It closes with a plain-English reason why forecasts would come back
               <span class="pill crit">INSUFFICIENT_HISTORY</span>. Every probe is exception-wrapped,
               so a missing privilege prints one WARN line instead of aborting.</p>
             <div class="term in">
@@ -836,9 +845,13 @@ control_management_pack_access     string   <span class="c-key">DIAGNOSTIC+TUNIN
 <pre><span class="c-prompt">SQL&gt;</span> DEFINE seam_mode = 'local'
 <span class="c-prompt">SQL&gt;</span> @install.sql</pre>
             </div>
-            <p>Same layered output as Track A, ending in
-              <span class="c-pass" style="font-family:var(--mono);font-size:13px">All CAP* objects valid.</span>
-              If any view is invalid, the closing check aborts with the exact grant/pack hint.</p>
+            <p>Same layered output as Track A, with a warning block because the target schema is
+              SYS, ending in
+              <span class="c-pass" style="font-family:var(--mono);font-size:13px">All CAP* objects valid in schema SYS.</span>
+              If any view is invalid, the closing check aborts with the exact grant/pack hint. To keep
+              the suite out of SYS, run <span class="inline">@create_owner.sql</span> first and
+              install with <span class="inline">ALTER SESSION SET CURRENT_SCHEMA = C##AWRCAP</span>
+              (see <a href="reference.html#owner">Reference</a>).</p>
           </div>
         </div>
 
@@ -994,7 +1007,7 @@ crontab bench/cron/bench.crontab      <span class="c-cmt"># daily shape from her
 
       <footer class="foot">
         AWR Capacity Predictions · in-database capacity forecasting · Oracle 19c floor<br>
-        Documentation generated from <span class="inline">README.md</span> and
+        Hand-maintained documentation. Design rationale lives in
         <span class="inline">docs/design.md</span>.
       </footer>
 

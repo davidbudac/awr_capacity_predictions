@@ -127,6 +127,8 @@ SELECT CASE WHEN UPPER('&show_esm') = 'N'
        END AS esm_file
 FROM   dual;
 
+-- reports/ is gitignored, so a fresh clone does not have it.
+HOST mkdir -p reports
 SPOOL &cap_path
 
 PROMPT ================================================================================

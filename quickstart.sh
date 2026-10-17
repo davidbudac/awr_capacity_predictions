@@ -7,6 +7,11 @@
 # Needs sqlplus on PATH (source oraenv first on the DB host). Runs from the
 # repo directory regardless of where you call it from, because the SQL*Plus
 # @@ includes resolve relative to the outermost script.
+#
+# With no argument the suite lands in SYS (install.sql warns about it). For a
+# dedicated owner run create_owner.sql once as SYSDBA, then pass that user's
+# connect string here. Exits non-zero if doctor.sql reports a FAIL or the
+# install fails.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 

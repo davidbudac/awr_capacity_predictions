@@ -125,6 +125,8 @@
             <tr><td><span class="k">dow_weeks</span></td><td class="num">8</td><td class="def">Number of prior same-weekday observations forming the CPU seasonal baseline.</td></tr>
             <tr><td><span class="k">dtf_warn</span></td><td class="num">90</td><td class="def"><code>days_to_full</code> at/below this = <span class="pill warn">WARN</span> in the report.</td></tr>
             <tr><td><span class="k">dtf_crit</span></td><td class="num">30</td><td class="def"><code>days_to_full</code> at/below this = <span class="pill crit">CRIT</span> in the report.</td></tr>
+            <tr><td><span class="k">nearfull_warn_pct</span></td><td class="num">90</td><td class="def">Percent-used at/above which a tablespace raises a near-full-now <span class="pill warn">WARN</span>, whatever the forecast quality.</td></tr>
+            <tr><td><span class="k">nearfull_crit_pct</span></td><td class="num">97</td><td class="def">Percent-used at/above which a tablespace raises a near-full-now <span class="pill crit">CRIT</span>, whatever the forecast quality.</td></tr>
             <tr><td><span class="k">tbspc_min_hist</span></td><td class="num">7</td><td class="def">Minimum trailing observations before a tablespace anomaly can flag.</td></tr>
             <tr><td><span class="k">cpu_min_mad_pct</span></td><td class="num">3</td><td class="def">Floor (whole percent) on CPU <code>MAD_σ</code> so an exactly-flat seasonal baseline still flags a real jump.</td></tr>
             <tr><td><span class="k">cpu_min_dow_hist</span></td><td class="num">3</td><td class="def">Minimum prior same-weekday observations before a CPU anomaly can flag.</td></tr>
@@ -135,10 +137,13 @@
             <tr><td><span class="k">esm_prediction_step</span></td><td class="num">30</td><td class="def">OML ESM forecast horizon in steps (days). Oracle 19c hard-caps this at 30.</td></tr>
             <tr><td><span class="k">esm_tbspc_model</span></td><td class="num">2</td><td class="def">ESM model type for tablespaces: <span class="num">0</span> = <code>EXSM_HOLT</code>, <span class="num">1</span> = <code>EXSM_ADDWINTERS</code> with a 7-day season, <span class="num">2</span> = AUTO — train both as holdout twins and keep the lower-MAPE one (ties → Holt).</td></tr>
             <tr><td><span class="k">esm_select_by_backtest</span></td><td class="num">1</td><td class="def">Enables the AUTO comparison (two extra models per tablespace, per retrain). <span class="num">0</span> makes AUTO fall back to <code>EXSM_HOLT</code> and trains no candidate twins.</td></tr>
+            <tr><td><span class="k">backtest_holdout_days</span></td><td class="num">28</td><td class="def">Holdout window (days) <code>CAPF_BACKTEST</code> fits before and scores against. Keep it at or below 30 so ESM can cover it on 19c.</td></tr>
+            <tr><td><span class="k">suite_version</span></td><td class="num">13</td><td class="def">Not a tuning knob. The suite release (latest <span class="inline">PLAN.md</span> milestone) that built the objects; every install overwrites it and <span class="inline">doctor.sql</span> prints it. No analytic view reads it; <span class="inline">CAP_CFG_CHECK</span> reports it <code>BAD</code> below 13.</td></tr>
           </tbody>
         </table>
       </div>
-      <p>That's the complete shipped set. <span class="inline">SELECT * FROM cap_config ORDER BY cfg_name</span>
+      <p>That's the complete shipped set: 34 knobs plus <span class="inline">suite_version</span>, the
+        35 rows <span class="inline">ddl/05_config.sql</span> seeds. <span class="inline">SELECT * FROM cap_config ORDER BY cfg_name</span>
         prints the same knobs with their annotations straight from the database, including any values you've
         since overridden. Where <span class="inline">cfg_value</span> differs from <span class="inline">cfg_default</span>,
         the knob has been tuned.</p>
@@ -287,8 +292,9 @@
               <td class="def">local mode</td>
               <td class="def">Granted <b>directly</b>, not via a role; view compilation ignores
                 role-granted privileges, so the <span class="k">CAPV_</span> seam views won't compile
-                without direct grants on the underlying <span class="kt">DBA_HIST_*</span> views.
-                <span class="inline">doctor.sql</span> probes each one individually.</td>
+                without direct grants on the ten underlying <span class="kt">DBA_HIST_*</span> views.
+                <span class="inline">doctor.sql</span> probes each one and checks the grants of the
+                target schema; <span class="inline">create_owner.sql</span> grants them.</td>
             </tr>
             <tr>
               <td><b>CREATE MINING MODEL</b></td>
@@ -314,7 +320,7 @@
       </div>
 
       <p>The schema you install into needs the ordinary object-creation privileges. These are exactly
-        the ones <span class="inline">doctor.sql</span> check&nbsp;3 reports on:</p>
+        the ones <span class="inline">doctor.sql</span> check&nbsp;4 reports on:</p>
 
       <div class="tablewrap">
         <table>
@@ -325,11 +331,41 @@
             <tr><td><span class="k">CREATE VIEW</span></td><td class="def">Every <span class="k">CAPV_</span> / <span class="k">CAPD_</span> / <span class="k">CAPF_</span> / <span class="k">CAPA_</span> / <span class="k">CAPR_</span> object.</td></tr>
             <tr><td><span class="k">CREATE TYPE</span></td><td class="def"><span class="inline">CAP_ESM_ROW</span> / <span class="inline">CAP_ESM_TAB</span>, the pipelined-function types behind <span class="inline">CAPF_ESM_FORECAST</span>.</td></tr>
             <tr><td><span class="k">CREATE PROCEDURE</span></td><td class="def">The <span class="inline">cap_forecast_ml</span> package (and <span class="inline">cap_report_spool</span>, if you add the jobs).</td></tr>
-            <tr><td><span class="k">CREATE MINING MODEL</span></td><td class="def">Optional, Tier 2 only. Without it everything else still installs and runs.</td></tr>
+            <tr><td><span class="k">CREATE MINING MODEL</span></td><td class="def">Optional, Tier 2 only. Without it everything else still installs and runs. Must be granted <b>directly</b> to the owner: <span class="inline">cap_forecast_ml</span> is definer's rights and creates models with the owner's own privileges.</td></tr>
             <tr><td><span class="k">CREATE JOB</span></td><td class="def">Optional, <span class="inline">install_jobs.sql</span> only.</td></tr>
           </tbody>
         </table>
       </div>
+
+      <div class="section-head" id="owner">
+        <span class="eyebrow">Production path</span>
+        <h2>A dedicated owner: create_owner.sql</h2>
+        <p>The quickstart installs into <span class="inline">SYS</span>. That is fine for a first look,
+          but it puts every <span class="inline">CAP*</span> object in the dictionary schema.
+          <span class="inline">install.sql</span> prints the target schema and warns when it is SYS.</p>
+      </div>
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">sqlplus · CDB$ROOT</span><span class="term__tag in">you run, once</span></div>
+<pre>sqlplus / as sysdba
+<span class="c-prompt">SQL&gt;</span> DEFINE owner = C##AWRCAP          <span class="c-cmt">-- optional; this is the CDB default</span>
+<span class="c-prompt">SQL&gt;</span> @create_owner.sql</pre>
+      </div>
+      <p><span class="inline">create_owner.sql</span> is not part of the quickstart. Run it once as
+        SYSDBA. In <span class="inline">CDB$ROOT</span> it creates the common user
+        <span class="inline">C##AWRCAP</span> and grants with <code>CONTAINER=ALL</code>; in a non-CDB
+        or a PDB it creates the local user <span class="inline">AWRCAP</span>. It grants, all
+        <b>directly</b>: the privileges in the table above plus <code>CREATE SESSION</code>, a quota
+        (<span class="inline">owner_quota</span>, default 1G, on <span class="inline">owner_ts</span>,
+        default the database default tablespace), SELECT on the ten
+        <span class="kt">DBA_HIST_*</span> views <span class="inline">ddl/10_seam_local.sql</span> reads,
+        and SELECT on <span class="inline">DBA_HIST_WR_CONTROL</span> and
+        <span class="inline">V_$PARAMETER</span>, which only <span class="inline">doctor.sql</span> reads.
+        Without <span class="inline">DEFINE owner_pw</span> the user has no password
+        (<code>NO AUTHENTICATION</code>), so you install as SYSDBA with
+        <code>ALTER SESSION SET CURRENT_SCHEMA = C##AWRCAP</code>, or set a password later. Re-running
+        it is safe: an existing user is kept and the grants are re-applied. It prints every statement
+        and exits non-zero if one failed.</p>
 
       <div class="callout">
         <span class="ico">@@</span>
@@ -370,12 +406,15 @@
           <caption>What the checklist covers</caption>
           <thead><tr><th class="num" scope="col">#</th><th scope="col">Check</th><th scope="col">What it tells you</th></tr></thead>
           <tbody>
-            <tr><td class="num">1</td><td><b>Diagnostics Pack</b></td><td class="def"><span class="inline">CONTROL_MANAGEMENT_PACK_ACCESS</span> includes <code>DIAGNOSTIC</code>. If not, AWR collects nothing to fit and forecasts will be empty.</td></tr>
-            <tr><td class="num">2</td><td><b>DBA_HIST_* readable</b></td><td class="def">Each of the eight views the local seam needs, probed one at a time (direct grant, not via a role): snapshot, tablespace usage / tablespace / datafile, OSSTAT, sys time model, PDB instance, database instance.</td></tr>
-            <tr><td class="num">3</td><td><b>Install privileges</b></td><td class="def"><code>CREATE TABLE / VIEW / PROCEDURE / TYPE / MINING MODEL / JOB</code> in the session user's <span class="inline">SESSION_PRIVS</span>.</td></tr>
-            <tr><td class="num">4</td><td><b>AWR retention &amp; interval</b></td><td class="def">From <span class="inline">DBA_HIST_WR_CONTROL</span>, per dbid. This is the knob that decides whether a 90-day training window can ever fill.</td></tr>
-            <tr><td class="num">5</td><td><b>History per source</b></td><td class="def">How many <em>distinct days</em> each source actually holds, compared against <span class="inline">min_train_days</span> (read from <span class="inline">CAP_CONFIG</span> when the suite is installed, else the built-in 14).</td></tr>
-            <tr><td class="num">6</td><td><b>Install state</b></td><td class="def">Whether <span class="inline">CAP_CONFIG</span> exists in this schema, any <span class="inline">CAP*</span> objects that are <code>INVALID</code>, and the seam mode in use, inferred from what <span class="inline">CAPV_SNAPSHOT</span> actually depends on.</td></tr>
+            <tr><td class="num">1</td><td><b>Target schema</b></td><td class="def">The schema objects would land in (<span class="inline">CURRENT_SCHEMA</span>). WARN when it is <span class="inline">SYS</span>, with a pointer to <span class="inline">create_owner.sql</span>.</td></tr>
+            <tr><td class="num">2</td><td><b>Database settings</b></td><td class="def"><span class="inline">CONTROL_MANAGEMENT_PACK_ACCESS</span> includes <code>DIAGNOSTIC</code> (if not, AWR collects nothing to fit), and <span class="inline">STATISTICS_LEVEL</span> is not <code>BASIC</code> (which stops automatic snapshots).</td></tr>
+            <tr><td class="num">3</td><td><b>DBA_HIST_* readable</b></td><td class="def">Each of the ten views the local seam reads, probed one at a time as the session user: snapshot, tablespace usage / tablespace / datafile, OSSTAT, sys time model, PDB instance, database instance, resource limit, sysstat. When the target schema is not SYS it also checks that schema's <b>direct</b> grants in <span class="inline">DBA_TAB_PRIVS</span> / <span class="inline">ALL_TAB_PRIVS</span>; a grant through a role does not count.</td></tr>
+            <tr><td class="num">4</td><td><b>Install privileges</b></td><td class="def"><code>CREATE TABLE / VIEW / PROCEDURE / TYPE / MINING MODEL / JOB</code> in the session user's <span class="inline">SESSION_PRIVS</span>, plus a direct <code>CREATE MINING MODEL</code> on the target schema when it is not SYS.</td></tr>
+            <tr><td class="num">5</td><td><b>AWR retention &amp; interval</b></td><td class="def">From <span class="inline">DBA_HIST_WR_CONTROL</span>, per dbid, against <span class="inline">train_days</span>. The remedy it prints raises retention to <span class="inline">train_days</span> days.</td></tr>
+            <tr><td class="num">6</td><td><b>History per source</b></td><td class="def">How many <em>distinct days</em> each source holds against <span class="inline">min_train_days</span>, and how old the newest snapshot is per dbid (WARN past 24 hours).</td></tr>
+            <tr><td class="num">7</td><td><b>Readiness per feature</b></td><td class="def">One line per feature with days needed, days available and PASS/WARN: trend fit (<span class="inline">min_train_days</span>), full training window (<span class="inline">train_days</span>), CPU weekday baseline (<span class="inline">dow_weeks</span>&times;7), CPU level shift (<span class="inline">shift_days</span>+<span class="inline">shift_baseline_days</span>), backtest (<span class="inline">backtest_holdout_days</span>+<span class="inline">min_train_days</span>) and the ESM +30 horizon (120 daily rows). Knobs come from <span class="inline">CAP_CONFIG</span> when installed, else the shipped defaults.</td></tr>
+            <tr><td class="num">8</td><td><b>Install state</b></td><td class="def">Whether <span class="inline">CAP_CONFIG</span> exists, the <span class="inline">suite_version</span> that built the objects, any <code>INVALID</code> <span class="inline">CAP*</span> object, the seam mode (inferred from what <span class="inline">CAPV_SNAPSHOT</span> depends on), and how the tablespace and CPU fits came out by quality.</td></tr>
+            <tr><td class="num">9</td><td><b>Config sanity</b></td><td class="def">Installed only: reads <a href="#config"><span class="inline">CAP_CFG_CHECK</span></a>. PASS when every knob is <code>OK</code>, else one WARN per <code>MISSING</code> or <code>BAD</code> knob with its reason.</td></tr>
           </tbody>
         </table>
       </div>
@@ -386,8 +425,12 @@
         spells out, in plain English, why forecasts would come back
         <span class="pill crit">INSUFFICIENT_HISTORY</span>: how many sources hold fewer than
         <span class="inline">min_train_days</span> distinct days, and whether retention caps history
-        below the training window so it never can. In warehouse or fixture mode it also says that
-        checks 2 and 5 don't apply to that install.</p>
+        below the training window so it never can. In warehouse or fixture mode the
+        <span class="kt">DBA_HIST_*</span> lines (checks 3, 5 and 6) print as INFO and do not count;
+        <code>DEFINE cap_doctor_mode = fixture</code> (or <code>warehouse</code>) says which install
+        you are about to run. It leaves <span class="inline">cap_doctor_fail</span>, the number of FAIL
+        lines, defined for the caller: <span class="inline">quickstart.sql</span> stops before install
+        when it is not 0, unless you <code>DEFINE force_install = Y</code>.</p>
       </div>
 
       <!-- ===================== MODES ===================== -->
@@ -405,7 +448,7 @@
             <tr>
               <td><span class="k">local</span></td>
               <td class="def"><span class="kt">DBA_HIST_*</span></td>
-              <td class="def">sysdba in <span class="inline">CDB$ROOT</span></td>
+              <td class="def">The <span class="inline">create_owner.sql</span> owner in <span class="inline">CDB$ROOT</span> (or sysdba, which installs into SYS)</td>
               <td class="def">Needs the Diagnostics Pack + direct SELECT grants on the DBA_HIST views.</td>
             </tr>
             <tr>
@@ -435,20 +478,24 @@
       <div class="section-head" id="local">
         <span class="eyebrow">Install</span>
         <h2>Local mode</h2>
-        <p>The common case: point the seam at this database's live AWR. Connect as
-          <span class="inline">sysdba</span> in <span class="inline">CDB$ROOT</span>, which is where
-          AWR lives, define the mode, and run the installer.</p>
+        <p>The common case: point the seam at this database's live AWR. Work in
+          <span class="inline">CDB$ROOT</span>, which is where AWR lives, as the owner
+          <a href="#owner">create_owner.sql</a> made, define the mode, and run the installer.</p>
       </div>
       <div class="term in">
         <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
           <span class="term__title">sqlplus · CDB$ROOT</span><span class="term__tag in">you run</span></div>
 <pre>sqlplus / as sysdba          <span class="c-cmt">-- lands in CDB$ROOT, where AWR lives</span>
+<span class="c-prompt">SQL&gt;</span> ALTER SESSION SET CURRENT_SCHEMA = C##AWRCAP;   <span class="c-cmt">-- or connect as C##AWRCAP</span>
 <span class="c-prompt">SQL&gt;</span> DEFINE seam_mode = 'local'
 <span class="c-prompt">SQL&gt;</span> @install.sql</pre>
       </div>
-      <p>The installer runs eleven DDL steps in dependency order and ends with a validity check that
-        <b>fails loudly</b> if any <span class="inline">CAP*</span> object came out invalid, with a
-        hint naming the likely cause for your seam mode.</p>
+      <p>The installer prints the target schema, runs eleven DDL steps in dependency order, recompiles
+        any <span class="inline">CAP*</span> object of that schema a re-install left invalid (for
+        example <span class="inline">cap_report_spool</span> from <span class="inline">install_jobs.sql</span>),
+        and ends with a validity check on <span class="inline">ALL_OBJECTS</span> for that schema. The
+        check <b>fails loudly</b> if any <span class="inline">CAP*</span> object is still invalid, with
+        a hint naming the likely cause for your seam mode, and sqlplus exits non-zero.</p>
       <div class="term">
         <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
           <span class="term__title">output</span><span class="term__tag out">expect</span></div>
@@ -457,7 +504,7 @@
 ============================================================
  seam_mode  = local
  seam_script= ddl/10_seam_local.sql
- schema     = installing into the current schema
+ schema     = C##AWRCAP
 
 -- [00] drop any prior install ...
 -- [05] CAP_CONFIG + seed ...
@@ -470,10 +517,10 @@
 -- [45] integration/report layer (CAPR_CONTAINER + CAPR_ALERTS + sections) ...
 -- [50] Tier 2 OML ESM (CAP_ML_MODEL + package + CAPF_ESM/COMPARE) ...
 -- [55] report views that need Tier 2 (CAPR_TBSPC_FORECAST/ESM_COMPARE/BACKTEST) ...
-  <span class="c-pass">All CAP* objects valid.</span>
+  <span class="c-pass">All CAP* objects valid in schema C##AWRCAP.</span>
 
 ============================================================
- Install complete (seam_mode = local).
+ Install complete (seam_mode = local, schema = C##AWRCAP).
  Next: report/report.sql  (text capacity report)
        cap_forecast_ml.train_all  (optional Tier 2 ESM models)
 ============================================================</pre>
@@ -529,8 +576,8 @@
           <tbody>
             <tr>
               <td><span class="inline">CAP_CONFIG</span></td>
-              <td class="def">Every tuning knob, name/value, read by the views through a one-row <span class="inline">cfg</span> CTE.</td>
-              <td class="def"><span class="inline">ddl/05_config.sql</span>, idempotent <code>CREATE</code> (ORA-00955 swallowed) plus an INSERT-only <code>MERGE</code>.</td>
+              <td class="def">Every tuning knob, name/value, read by the views through the one-row view <span class="inline">CAP_CFG</span>.</td>
+              <td class="def"><span class="inline">ddl/05_config.sql</span>, idempotent <code>CREATE</code> (ORA-00955 swallowed) plus a <code>MERGE</code> that inserts missing knobs and refreshes <span class="inline">cfg_default</span> / <span class="inline">cfg_desc</span>, never <span class="inline">cfg_value</span>. Only <span class="inline">suite_version</span> has its value overwritten on every install.</td>
               <td class="def"><span class="inline">@install.sql</span>. Dropped by <span class="inline">@uninstall.sql</span>.</td>
             </tr>
             <tr>
@@ -671,20 +718,23 @@
         <span class="inline">CAP_TBSPC_OVERRIDE</span> rows and the
         <span class="inline">CAP_ML_MODEL</span> registry (with its OML models). The
         <span class="inline">00_drop</span> step deliberately leaves those tables alone, and the config
-        <code>MERGE</code> is INSERT-only (<code>WHEN NOT MATCHED THEN INSERT</code>, with no
-        <code>WHEN MATCHED</code> branch), so it seeds keys that are missing and never overwrites a
-        value you changed.</p>
+        <code>MERGE</code> inserts keys that are missing and on existing keys refreshes only
+        <span class="inline">cfg_default</span> and <span class="inline">cfg_desc</span>, so it never
+        overwrites a value you changed. The one exception is <span class="inline">suite_version</span>,
+        which is not a knob: the same <code>MERGE</code> overwrites its value on every install so
+        <span class="inline">doctor.sql</span> shows which release built the objects.</p>
       </div>
       <p><b>Upgrading is the same command.</b> Pull the new revision and re-run
         <span class="inline">@install.sql</span> with the same
         <span class="inline">seam_mode</span>: every view is <code>CREATE OR REPLACE</code>, both
         tables are created only if absent, and any knob a new milestone added is MERGE-seeded with its
         shipped default while your existing values stay exactly as you set them. To reset one knob to
-        its shipped default, <code>DELETE</code> that row and re-run
-        <span class="inline">ddl/05_config.sql</span> (or just <code>UPDATE</code> it). Run
+        its shipped default, <code>UPDATE cap_config SET cfg_value = cfg_default</code> for that row. Run
         <span class="inline">@doctor.sql</span> afterwards to confirm nothing came out
-        <code>INVALID</code>. For a full teardown of views, types, package, OML models and all three
-        tables, use <span class="inline">@uninstall.sql</span>.</p>
+        <code>INVALID</code>. For a full teardown of the opt-in scheduler jobs, views, types, package,
+        OML models and all three tables, use <span class="inline">@uninstall.sql</span>. It prints any
+        error other than "does not exist" and ends with the number of <span class="inline">CAP%</span>
+        objects left in the schema (0 expected).</p>
 
       <!-- ===================== NEW KNOBS ===================== -->
       <div class="section-head" id="knobs">
@@ -700,7 +750,7 @@
           <thead><tr><th scope="col">Knob</th><th class="num" scope="col">Default</th><th scope="col">Controls</th></tr></thead>
           <tbody>
             <tr><td><span class="k">peak_hour_from</span></td><td class="num">8</td><td class="def">Peak window start (hour of day, <em>exclusive</em>). A snapshot interval is "peak" when its <b>end</b> time falls in <code>(from, to]</code>, so with hourly AWR the default is the snapshots ending 09:00–18:00.</td></tr>
-            <tr><td><span class="k">peak_hour_to</span></td><td class="num">18</td><td class="def">Peak window end (hour of day, <em>inclusive</em>). Together these define <code>BUSY_PEAK</code> and <code>DB_CPU_PEAK</code>.</td></tr>
+            <tr><td><span class="k">peak_hour_to</span></td><td class="num">18</td><td class="def">Peak window end (hour of day, <em>inclusive</em>). Together these define the <code>BUSY_PEAK</code> metric and the <code>db_cpu_peak_pct</code> column of <span class="inline">CAPD_DBTIME_DAILY</span>. There is no <code>DB_CPU_PEAK</code> metric.</td></tr>
             <tr><td><span class="k">cpu_sat_on_p95</span></td><td class="num">1</td><td class="def"><span class="num">1</span> = <code>CPU_SAT</code> alerts key off the <code>BUSY_P95</code> (per-snapshot p95) trend; <span class="num">0</span> = off the daily-average <code>BUSY_PCT</code> trend.</td></tr>
             <tr><td><span class="k">report_min_gb</span></td><td class="num">1</td><td class="def">Report sections 2 and 6a print a tablespace only if it is growing, near-full, or at least this many GiB used.</td></tr>
             <tr><td><span class="k">accel_slope_floor_bpd</span></td><td class="num">1,048,576</td><td class="def">Minimum <code>|slope|</code> (bytes/day, default 1 MiB) before <code>accel_ratio</code> is computed; below it a near-flat series gets NULL instead of a meaningless ratio.</td></tr>
@@ -731,7 +781,7 @@
         <span class="pill crit">INSUFFICIENT_HISTORY</span> (<span class="inline">TRAIN_N</span>
         &lt; <span class="inline">min_train_days</span>) and say so loudly. That is correct behaviour,
         not a bug. The report refuses to project a trend it can't yet see.
-        <span class="inline">doctor.sql</span> checks 4 and 5 tell you this before you install.</p>
+        <span class="inline">doctor.sql</span> checks 5 to 7 tell you this before you install.</p>
       </div>
       <p>To get real trends, raise AWR retention (here, to 90 days, expressed in minutes):</p>
       <div class="term in">
@@ -757,7 +807,7 @@
 
       <footer class="foot">
         AWR Capacity Predictions · in-database capacity forecasting · Oracle 19c floor<br>
-        Documentation generated from <span class="inline">README.md</span> and
+        Hand-maintained documentation. Design rationale lives in
         <span class="inline">docs/design.md</span>.
       </footer>
 

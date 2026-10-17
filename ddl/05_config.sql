@@ -11,6 +11,7 @@
 -- in days, percentages in whole percent. The MERGE below is re-runnable: it
 -- inserts any missing key, refreshes cfg_default and cfg_desc, and never
 -- touches cfg_value, so a re-install never clobbers an operator's tuning.
+-- The one exception is suite_version, which is not a knob (see the MERGE).
 -- To reset a key to its shipped default:
 --   UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = '...'
 -- Do not DELETE a key: every view that reads it then returns no rows or NULLs.
@@ -89,10 +90,14 @@ USING (
     UNION ALL SELECT 'shift_baseline_days',    28,       'M10.3: length of the BASELINE window (days) immediately before the recent window.'                                                   FROM dual
     UNION ALL SELECT 'shift_min_pct',          15,       'M10.3: minimum |recent median - baseline median|, in percentage POINTS, before a level shift is flagged.'                            FROM dual
     UNION ALL SELECT 'series_sat_pct',         90,        'M11: percent of a fixed-ceiling series'' limit (processes/sessions, DB size) treated as saturated for days_to_limit.' FROM dual
+    UNION ALL SELECT 'suite_version',          13,        'Suite release that built these objects (latest PLAN.md milestone). Set by every install; not a tuning knob.' FROM dual
 ) s
 ON (c.cfg_name = s.cfg_name)
 WHEN MATCHED THEN
-    UPDATE SET c.cfg_default = s.cfg_default,
+    -- suite_version records which release built the objects, so every install
+    -- overwrites its cfg_value. Bump it here and in CAP_CFG_CHECK together.
+    UPDATE SET c.cfg_value   = CASE WHEN c.cfg_name = 'suite_version' THEN s.cfg_default ELSE c.cfg_value END,
+               c.cfg_default = s.cfg_default,
                c.cfg_desc    = s.cfg_desc
 WHEN NOT MATCHED THEN
     INSERT (cfg_name, cfg_value, cfg_default, cfg_desc)
@@ -143,7 +148,8 @@ SELECT MAX(CASE WHEN cfg_name = 'train_days'             THEN cfg_value END) AS 
        MAX(CASE WHEN cfg_name = 'shift_days'             THEN cfg_value END) AS shift_days,
        MAX(CASE WHEN cfg_name = 'shift_baseline_days'    THEN cfg_value END) AS shift_baseline_days,
        MAX(CASE WHEN cfg_name = 'shift_min_pct'          THEN cfg_value END) AS shift_min_pct,
-       MAX(CASE WHEN cfg_name = 'series_sat_pct'         THEN cfg_value END) AS series_sat_pct
+       MAX(CASE WHEN cfg_name = 'series_sat_pct'         THEN cfg_value END) AS series_sat_pct,
+       MAX(CASE WHEN cfg_name = 'suite_version'          THEN cfg_value END) AS suite_version
 FROM   cap_config;
 
 COMMENT ON TABLE cap_cfg IS 'One row, one NUMBER column per CAP_CONFIG knob (column name = knob name). NULL = the knob row is missing.';
@@ -165,11 +171,13 @@ WITH u AS (
                peak_hour_from, peak_hour_to, cpu_sat_on_p95, backtest_holdout_days,
                report_min_gb, accel_slope_floor_bpd, slope_method, reset_on_shrink,
                shrink_mad_k, cpu_gap_hours, shift_days, shift_baseline_days,
-               shift_min_pct, series_sat_pct))
+               shift_min_pct, series_sat_pct, suite_version))
      ),
      r AS (
         SELECT u.knob, u.value,
                CASE
+                   WHEN u.value IS NULL AND u.knob = 'suite_version'
+                        THEN 'not stamped: re-run install.sql'
                    WHEN u.value IS NULL
                         THEN 'no CAP_CONFIG row: views that read it return no rows or NULLs. Re-run ddl/05_config.sql to re-seed it.'
                    WHEN u.knob = 'recent_days'         AND u.value > c.train_days
@@ -190,6 +198,8 @@ WITH u AS (
                         THEN 'must be 0 (OLS) or 1 (THEILSEN)'
                    WHEN u.knob = 'esm_tbspc_model'     AND u.value NOT IN (0, 1, 2)
                         THEN 'must be 0 (HOLT), 1 (ADDWINTERS) or 2 (AUTO)'
+                   WHEN u.knob = 'suite_version'       AND u.value < 13
+                        THEN 'older than this release (13): re-run install.sql'
                END AS reason
         FROM   u CROSS JOIN cap_cfg c
      )

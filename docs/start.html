@@ -96,7 +96,9 @@ cd awr_capacity_predictions</pre>
           <div class="step__body">
             <h4>Run the quickstart</h4>
             <p>One command. It runs the read-only preflight, installs every object into the current
-              schema and spools your first report. Safe to re-run at any time.</p>
+              schema and spools your first report. Safe to re-run at any time. If the preflight
+              reports a FAIL line it stops before installing and says why; fix it and re-run, or
+              <span class="inline">DEFINE force_install = Y</span> in SQL*Plus to install anyway.</p>
             <div class="term in">
               <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
                 <span class="term__title">DB host · bash</span><span class="term__tag in">you run</span></div>
@@ -114,9 +116,9 @@ cd awr_capacity_predictions</pre>
             <div class="term">
               <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
                 <span class="term__title">output</span><span class="term__tag">expect</span></div>
-<pre>  <span class="c-pass">All CAP* objects valid.</span>
+<pre>  <span class="c-pass">All CAP* objects valid in schema SYS.</span>
 ============================================================
- Install complete (seam_mode = local).
+ Install complete (seam_mode = local, schema = SYS).
 ============================================================
 ...
 Report written to: reports/cap_report_CDB1_202609221410.txt</pre>
@@ -175,8 +177,8 @@ Report written to: reports/cap_report_CDB1_202609221410.txt</pre>
           <caption><span class="inline">quickstart.sql</span>, step by step</caption>
           <thead><tr><th scope="col">Step</th><th scope="col">Script</th><th scope="col">Does</th></tr></thead>
           <tbody>
-            <tr><td class="num">1</td><td><span class="inline">doctor.sql</span></td><td class="def">Read-only preflight: Diagnostics Pack, <span class="inline">DBA_HIST_*</span> grants, privileges, AWR retention and how much history each source holds. Prints a PASS / WARN / FAIL checklist and explains any gap.</td></tr>
-            <tr><td class="num">2</td><td><span class="inline">install.sql</span></td><td class="def">Creates the views, three small config tables and the Tier 2 package in the current schema, in local mode. Idempotent; re-running never overwrites a knob you changed. Fails loudly if any object is invalid.</td></tr>
+            <tr><td class="num">1</td><td><span class="inline">doctor.sql</span></td><td class="def">Read-only preflight: target schema, Diagnostics Pack, <span class="inline">DBA_HIST_*</span> grants, privileges, AWR retention, how much history each source holds and which features it is enough for. Prints a PASS / WARN / FAIL checklist and explains any gap.</td></tr>
+            <tr><td class="num">2</td><td><span class="inline">install.sql</span></td><td class="def">Creates the views, three small config tables and the Tier 2 package in the current schema, in local mode. As <span class="inline">/ as sysdba</span> that schema is SYS, and the installer prints a warning saying so. Idempotent; re-running never overwrites a knob you changed. Fails loudly if any object is invalid. Skipped when step 1 reported a FAIL.</td></tr>
             <tr><td class="num">3</td><td><span class="inline">report/report.sql</span></td><td class="def">The read-only text report, spooled to <span class="inline">reports/</span>.</td></tr>
           </tbody>
         </table>
@@ -194,8 +196,9 @@ Report written to: reports/cap_report_CDB1_202609221410.txt</pre>
       <div class="section-head" id="next">
         <span class="eyebrow">Read next</span>
         <h2>Where to go from here</h2>
-        <p>Installing from a monitoring schema, warehouse or fixture mode, scheduler jobs and
-          upgrades are all under Advanced install.</p>
+        <p>The quickstart puts the suite in SYS. For a real install, create a dedicated owner with
+          <span class="inline">create_owner.sql</span> and install as that user. That, warehouse or
+          fixture mode, scheduler jobs and upgrades are all under Advanced install.</p>
       </div>
       <div class="cardgrid">
         <a class="card" href="usage.html">
@@ -222,7 +225,7 @@ Report written to: reports/cap_report_CDB1_202609221410.txt</pre>
 
       <footer class="foot">
         AWR Capacity Predictions · in-database capacity forecasting · Oracle 19c floor<br>
-        Documentation generated from <span class="inline">README.md</span> and
+        Hand-maintained documentation. Design rationale lives in
         <span class="inline">docs/design.md</span>.
       </footer>
 

@@ -14,3 +14,6 @@ grafana/.env
 grafana/ords/config/*
 !grafana/ords/config/.gitkeep
 __pycache__/
+
+# vendored agent skills (third-party); skills-lock.json pins them, `skills` reinstalls
+.agents/

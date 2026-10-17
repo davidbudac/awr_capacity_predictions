@@ -86,6 +86,8 @@ SET TERMOUT ON
 UNDEFINE 1
 UNDEFINE 2
 
+-- reports/ is gitignored, so a fresh clone does not have it.
+HOST mkdir -p reports
 SPOOL &cap_path
 
 PROMPT ================================================================================
