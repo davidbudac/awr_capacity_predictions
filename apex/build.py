@@ -644,7 +644,16 @@ def page_needs(page):
     return set(needs(text))
 
 
-def loader_plsql(page_expr, request_expr, redirect=False):
+def delete_collections():
+    return [f"  if apex_collection.collection_exists('{n}') then apex_collection.delete_collection('{n}'); end if;"
+            for n in COLLECTIONS]
+
+
+def refresh_plsql():
+    return '\n'.join(['begin'] + delete_collections() + ['end;'])
+
+
+def loader_plsql(page_expr, request_expr):
     out = ['declare',
            '  procedure load(p_name in varchar2, p_query in varchar2) is',
            '  begin',
@@ -655,11 +664,7 @@ def loader_plsql(page_expr, request_expr, redirect=False):
            '  end;',
            'begin',
            f"  if {request_expr} = 'REFRESH' then"]
-    out += [f"    if apex_collection.collection_exists('{n}') then apex_collection.delete_collection('{n}'); end if;"
-            for n in COLLECTIONS]
-    if redirect:
-        # Leave the REQUEST=REFRESH URL behind, or a browser reload would reload the views again.
-        out.append(f'    apex_util.redirect_url(apex_page.get_url(p_page => {page_expr}));')
+    out += ['  ' + line for line in delete_collections()]
     out.append('  end if;')
     page_sets = {p.id: page_needs(p) for p in PAGES}
     for name in COLLECTIONS:
@@ -905,7 +910,9 @@ end;
            p_nav_bar_template_options='#DEFAULT#')
     x.block('create_application')
 
-    refresh = 'f?p=&APP_ID.:&APP_PAGE_ID.:&APP_SESSION.:REFRESH:&DEBUG.:::'
+    # Refresh is a page submit: the on-submit process drops the collections inside the
+    # POST transaction and the page branch comes back without a request in the URL.
+    refresh = "javascript:apex.submit({request:'REFRESH'});"
     x.call('wwv_flow_imp_shared.create_list', p_id=nav, p_name='Navigation Menu', p_static_id='navigation-menu')
     for i, p in enumerate(PAGES, 1):
         x.call('wwv_flow_imp_shared.create_list_item', p_id=x.id(), p_list_item_display_sequence=i * 10,
@@ -929,9 +936,15 @@ end;
 
     x.call('wwv_flow_imp_shared.create_flow_process', p_id=x.id(), p_process_sequence=1,
            p_process_point='BEFORE_HEADER', p_process_type='NATIVE_PLSQL', p_process_name='Load data',
-           p_static_id='load-data', p_process_sql_clob=loader_plsql(':APP_PAGE_ID', ':REQUEST', redirect=True),
+           p_static_id='load-data', p_process_sql_clob=loader_plsql(':APP_PAGE_ID', ':REQUEST'),
            p_process_clob_language='PLSQL')
     x.block('shared_components/logic/application_processes/load_data')
+    x.call('wwv_flow_imp_shared.create_flow_process', p_id=x.id(), p_process_sequence=1,
+           p_process_point='ON_SUBMIT_BEFORE_COMPUTATION', p_process_type='NATIVE_PLSQL',
+           p_process_name='Refresh data', p_static_id='refresh-data', p_process_sql_clob=refresh_plsql(),
+           p_process_clob_language='PLSQL', p_process_when_type='REQUEST_EQUALS_CONDITION',
+           p_process_when='REFRESH')
+    x.block('shared_components/logic/application_processes/refresh_data')
 
     x.call('wwv_flow_imp_shared.create_theme', p_id=x.id(), p_theme_id=42, p_static_id='universal-theme',
            p_theme_name='Universal Theme', p_theme_internal_name='UNIVERSAL_THEME', p_version_identifier='26.2',
@@ -1029,9 +1042,9 @@ def emit_global_page(x, refresh):
                    p_attributes={'page_action_on_selection': 'NONE'})
     x.call('wwv_flow_imp_page.create_page_button', p_id=x.id(), p_button_sequence=len(ITEMS) * 10 + 10,
            p_button_plug_id=filters,
-           p_button_name='REFRESH', p_static_id='refresh', p_button_action='REDIRECT_URL',
+           p_button_name='REFRESH', p_static_id='refresh', p_button_action='SUBMIT',
            p_button_template_options='#DEFAULT#:t-Button--iconLeft', p_button_template_id=2086257187394300437,
-           p_button_image_alt='Refresh data', p_button_position='BODY', p_button_redirect_url=refresh,
+           p_button_image_alt='Refresh data', p_button_position='BODY',
            p_icon_css_classes='fa-refresh', p_grid_new_row='N', p_grid_new_column='Y')
     ev = x.id()
     x.call('wwv_flow_imp_page.create_page_da_event', p_id=ev, p_name='Filter changed', p_static_id='filter-changed',
