@@ -20,11 +20,18 @@
 --                unit GIB.
 --
 -- Column contract:
---   (dbid, con_dbid, series, day_dt, value, limit_value, unit, n_samples)
+--   (dbid, con_dbid, series, day_dt, value, limit_value, unit, n_samples,
+--    covered_sec, is_complete)
 -- limit_value is NULL when the series has no ceiling (REDO_GB_DAY) or when it
 -- could not be resolved (an UNLIMITED / non-numeric resource limit).
+-- covered_sec / is_complete mean what they mean in CAPD_CPU_DAILY, and only a
+-- flow series has them: REDO_GB_DAY sums counter deltas, so a day with half
+-- its intervals reads half the redo. The level series (PROCESSES, SESSIONS,
+-- DB_SIZE_GB) read one sample per day, so they carry covered_sec NULL and
+-- is_complete 'Y'.
 --
--- Seam-agnostic: only CAPV_* (+ CAPD_TBSPC_DAILY, itself seam-agnostic).
+-- Seam-agnostic: only CAPV_* (+ CAPD_TBSPC_DAILY and CAPD_COUNTER_DELTA,
+-- both seam-agnostic).
 -- 19c note: every LAG carries an inline OVER (PARTITION BY ... ORDER BY ...).
 --
 -- Facts worth knowing before changing this file:
@@ -42,8 +49,11 @@
 --     tablespaces are EXCLUDED (their usage is transient, not growth), and
 --     CAP_TBSPC_OVERRIDE limits / exclusions (M9.5) are already applied. So
 --     "total DB size" here means permanent-tablespace bytes actually used.
---   * Redo is one stream per DATABASE, and AWR records SYSSTAT under the CDB's
---     con_dbid (same as OSSTAT), so REDO_GB_DAY is a CDB-level series.
+--   * REDO_GB_DAY is per container in local mode (CAPV_SYSSTAT reads
+--     DBA_HIST_CON_SYSSTAT). The log stream is shared, so the CDB's redo is
+--     the SUM over its containers. Warehouse mode still has one CDB-level row.
+--   * PROCESSES / SESSIONS are CDB-wide: DBA_HIST_RESOURCE_LIMIT is root-only
+--     in CDB$ROOT.
 --
 SET DEFINE OFF
 
@@ -87,43 +97,28 @@ WITH snap AS (
         GROUP  BY dbid, con_dbid, series, day_dt
      ),
      -- ---------------- REDO_GB_DAY (M11.2) ----------------
-     -- 'redo size' is a cumulative BYTE counter; same diff-and-restart-guard
-     -- pattern as CAPD_CPU_DAILY: difference consecutive snaps per
-     -- (dbid, con_dbid, instance) and drop any interval that spans a restart
-     -- or shows a negative delta (counter reset). The delta is attributed to
-     -- the day the interval ENDS on, as everywhere else in the suite.
-     redo_raw AS (
-        SELECT x.dbid, x.con_dbid, x.instance_number, x.snap_id, x.value,
-               s.end_interval_time, s.startup_time
-        FROM   capv_sysstat x
-        JOIN   snap s
-          ON   s.dbid = x.dbid AND s.snap_id = x.snap_id
-         AND   s.instance_number = x.instance_number
-        WHERE  x.stat_name = 'redo size'
-     ),
-     redo_delta AS (
-        SELECT r.dbid, r.con_dbid,
-               TRUNC(r.end_interval_time) AS day_dt,
-               r.startup_time,
-               r.value - LAG(r.value)
-                 OVER (PARTITION BY r.dbid, r.con_dbid, r.instance_number
-                       ORDER BY r.snap_id)         AS d_bytes,
-               LAG(r.startup_time)
-                 OVER (PARTITION BY r.dbid, r.con_dbid, r.instance_number
-                       ORDER BY r.snap_id)         AS prev_startup
-        FROM   redo_raw r
-     ),
+     -- 'redo size' is a cumulative BYTE counter, differenced once in
+     -- CAPD_COUNTER_DELTA with the same restart rule as the CPU views.
+     -- covered_sec is per instance, as in CAPD_CPU_DAILY.
+     -- day_dt is projected in an inline view and grouped as a column: a
+     -- GROUP BY TRUNC(end_time) here raised ORA-00979 on 19c once
+     -- CAPR_FORECAST_POINTS merged it with the CPU views over the same
+     -- CAPD_COUNTER_DELTA.
      redo_day AS (
         SELECT dbid, con_dbid,
-               'REDO_GB_DAY'            AS series,
+               'REDO_GB_DAY'                                  AS series,
                day_dt,
-               SUM(d_bytes) / 1073741824 AS val,
-               CAST(NULL AS NUMBER)      AS lim,
-               COUNT(*)                  AS n_samples
-        FROM   redo_delta
-        WHERE  d_bytes IS NOT NULL          -- first snap of each partition
-          AND  d_bytes >= 0                 -- counter reset
-          AND  startup_time = prev_startup  -- restart-spanning interval
+               SUM(delta) / 1073741824                        AS val,
+               CAST(NULL AS NUMBER)                           AS lim,
+               COUNT(*)                                       AS n_samples,
+               SUM(ivl_sec) / COUNT(DISTINCT instance_number) AS covered_sec
+        FROM  ( SELECT dbid, con_dbid, instance_number,
+                       TRUNC(end_time) AS day_dt, delta, ivl_sec
+                FROM   capd_counter_delta
+                WHERE  source = 'SYSSTAT'
+                  AND  stat_name = 'redo size'
+                  AND  delta IS NOT NULL
+                  AND  is_restart = 'N' )
         GROUP  BY dbid, con_dbid, day_dt
      ),
      -- ---------------- DB_SIZE_GB (M11.3) ----------------
@@ -142,13 +137,19 @@ WITH snap AS (
         GROUP  BY dbid, con_dbid, day_dt
      )
 SELECT dbid, con_dbid, series, day_dt, val AS value, lim AS limit_value,
-       'COUNT'       AS unit, n_samples
+       'COUNT'       AS unit, n_samples,
+       CAST(NULL AS NUMBER) AS covered_sec, 'Y' AS is_complete
 FROM   rl_day
 UNION ALL
-SELECT dbid, con_dbid, series, day_dt, val, lim,
-       'GIB_PER_DAY' AS unit, n_samples
-FROM   redo_day
+SELECT r.dbid, r.con_dbid, r.series, r.day_dt, r.val, r.lim,
+       'GIB_PER_DAY' AS unit, r.n_samples,
+       r.covered_sec,
+       CASE WHEN r.covered_sec >= cfg.complete_day_pct / 100 * 86400
+            THEN 'Y' ELSE 'N' END
+FROM   redo_day r
+CROSS  JOIN cap_cfg cfg
 UNION ALL
 SELECT dbid, con_dbid, series, day_dt, val, lim,
-       'GIB'         AS unit, n_samples
+       'GIB'         AS unit, n_samples,
+       CAST(NULL AS NUMBER), 'Y'
 FROM   size_day;

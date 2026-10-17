@@ -1,17 +1,19 @@
 --
 -- ddl/10_seam_local.sql -- CAPV_* portable seam over DBA_HIST_* (LOCAL mode).
 -- =====================================================================
--- These nine views are the ONLY place the analytics touch Oracle's AWR
--- dictionary. Everything downstream (CAPD_/CAPF_/CAPA_/report) is written
--- once against CAPV_* and runs byte-identically in local, warehouse, or
--- fixture mode. Swapping this file for ddl/11_seam_warehouse.sql or
--- ddl/12_seam_fixture.sql re-points the same column contract at a different
--- source.
+-- These nine views (plus the CAPV_CONTRACT diagnostic at the bottom) are the
+-- ONLY place the analytics touch Oracle's AWR dictionary. Everything
+-- downstream (CAPD_/CAPF_/CAPA_/report) is written once against CAPV_* and
+-- runs byte-identically in local, warehouse, or fixture mode. Swapping this
+-- file for ddl/11_seam_warehouse.sql or ddl/12_seam_fixture.sql re-points the
+-- same column contract at a different source.
 --
 -- LOCAL mode requires the Diagnostics Pack and DIRECT SELECT grants (not via
 -- a role) on the DBA_HIST_* views for the installing schema, so the views
--- compile. Install where the DBA_HIST rows you want are visible -- for a CDB
--- that is CDB$ROOT (AWR lives at the CDB level).
+-- compile. That includes DBA_HIST_CON_SYS_TIME_MODEL and DBA_HIST_CON_SYSSTAT
+-- as well as their SYS_ counterparts. Install where the DBA_HIST rows you
+-- want are visible -- for a CDB that is CDB$ROOT (AWR lives at the CDB
+-- level).
 --
 -- Column contract (identical in all three seam files):
 --   * every view carries (dbid, con_dbid). DBA_HIST_SNAPSHOT has no CON_DBID
@@ -20,6 +22,19 @@
 --     TABLESPACE_ID / TS# restart at 0 per container, so SYSTEM in the root
 --     and SYSTEM in a PDB collide unless con_dbid disambiguates them.
 --
+-- Container facts (verified on 19c in CDB$ROOT, AWR_PDB_AUTOFLUSH_ENABLED =
+-- FALSE, the default):
+--   * Per container: DBA_HIST_TBSPC_SPACE_USAGE, DBA_HIST_CON_SYS_TIME_MODEL,
+--     DBA_HIST_CON_SYSSTAT. CAPV_TBSPC_USAGE / CAPV_TIME_MODEL / CAPV_SYSSTAT
+--     read these, minus PDB$SEED.
+--   * Root only, CDB-wide: DBA_HIST_SYS_TIME_MODEL and DBA_HIST_SYSSTAT hold
+--     one row per snapshot under the CDB's con_dbid, and that row is the
+--     CDB total. They are used only as the non-CDB fallback below.
+--   * Root only, by nature: DBA_HIST_OSSTAT (host level) and
+--     DBA_HIST_RESOURCE_LIMIT (instance level).
+--   * In the CON_ views the root row covers CDB$ROOT alone. The CDB total is
+--     the SUM over containers.
+--
 -- Unit facts (do not "fix" these -- downstream converts):
 --   * DBA_HIST_TBSPC_SPACE_USAGE sizes are in DB BLOCKS (multiply by the
 --     tablespace block size to get bytes). Passed through as-is here.
@@ -27,7 +42,8 @@
 --     current size is its ceiling).
 --   * DBA_HIST_OSSTAT *_TIME values are in CENTISECONDS and are cumulative
 --     counters since instance startup.
---   * DBA_HIST_SYS_TIME_MODEL values are in MICROSECONDS, cumulative counters.
+--   * DBA_HIST_CON_SYS_TIME_MODEL values are in MICROSECONDS, cumulative
+--     counters.
 --   * RTIME on TBSPC_SPACE_USAGE is an NLS-fragile VARCHAR2 -- we deliberately
 --     ignore it and derive timestamps by joining snap_id -> CAPV_SNAPSHOT.
 --   * We never join live DBA_TABLESPACES: it drops history for dropped
@@ -111,18 +127,36 @@ WHERE  stat_name IN ('BUSY_TIME','IDLE_TIME','IOWAIT_TIME',
                      'NUM_CPUS','NUM_CPU_CORES','PHYSICAL_MEMORY_BYTES');
 
 -- --------------------------------------------------------------------
--- CAPV_TIME_MODEL -- DB time model, filtered to the three CPU/DB-time names.
--- Values are cumulative counters in microseconds.
+-- CAPV_TIME_MODEL -- DB time model PER CONTAINER, filtered to the three
+-- CPU/DB-time names. Values are cumulative counters in microseconds.
+--   * Source DBA_HIST_CON_SYS_TIME_MODEL. DBA_HIST_SYS_TIME_MODEL is not
+--     usable in a CDB: in CDB$ROOT it has one row per snapshot, under the
+--     root's con_dbid, holding the CDB-wide total, so a PDB never got a
+--     DB CPU series and the root's series was really the whole CDB.
+--   * PDB$SEED is dropped by CON_ID <> 2 (CON_ID 2 is always the seed in a
+--     CDB). It runs no workload and would only add a zero series.
+--   * Fallback: a snapshot with no CON_ row at all (a non-CDB, or AWR data
+--     imported from one) reads DBA_HIST_SYS_TIME_MODEL, where con_dbid is
+--     the dbid.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capv_time_model AS
-SELECT dbid                     AS dbid,
-       con_dbid                 AS con_dbid,
-       instance_number          AS instance_number,
-       snap_id                  AS snap_id,
-       stat_name                AS stat_name,
-       value                    AS value
-FROM   dba_hist_sys_time_model
-WHERE  stat_name IN ('DB CPU','DB time','background cpu time');
+SELECT c.dbid                   AS dbid,
+       c.con_dbid               AS con_dbid,
+       c.instance_number        AS instance_number,
+       c.snap_id                AS snap_id,
+       c.stat_name              AS stat_name,
+       c.value                  AS value
+FROM   dba_hist_con_sys_time_model c
+WHERE  c.stat_name IN ('DB CPU','DB time','background cpu time')
+  AND  NVL(c.con_id, 0) <> 2
+UNION ALL
+SELECT s.dbid, s.con_dbid, s.instance_number, s.snap_id, s.stat_name, s.value
+FROM   dba_hist_sys_time_model s
+WHERE  s.stat_name IN ('DB CPU','DB time','background cpu time')
+  AND  NOT EXISTS (SELECT 1
+                   FROM   dba_hist_con_sys_time_model c
+                   WHERE  c.dbid = s.dbid AND c.snap_id = s.snap_id
+                     AND  c.instance_number = s.instance_number);
 
 -- --------------------------------------------------------------------
 -- CAPV_CONTAINER -- container/database naming dimension: one row per
@@ -166,8 +200,10 @@ LEFT  JOIN (SELECT dbid, con_dbid, MAX(pdb_name) AS con_name
 --   * LIMIT_VALUE is a VARCHAR2(10) in the source and can read 'UNLIMITED',
 --     so it is converted here: numeric strings become NUMBER, anything else
 --     becomes NULL (= "no ceiling"), which the daily/forecast layers treat as
---     "no days-to-limit". Verified on 19c: DBA_HIST_RESOURCE_LIMIT DOES carry
---     CON_DBID, so PDBs stay separable exactly like every other CAPV_ view.
+--     "no days-to-limit".
+--   * DBA_HIST_RESOURCE_LIMIT has a CON_DBID column, but in CDB$ROOT its rows
+--     are root-only (verified on 19c): the limits are instance-wide, so
+--     PROCESSES / SESSIONS are CDB-wide series under the root's con_dbid.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capv_resource_limit AS
 SELECT dbid                     AS dbid,
@@ -184,19 +220,86 @@ FROM   dba_hist_resource_limit
 WHERE  resource_name IN ('processes','sessions');
 
 -- --------------------------------------------------------------------
--- CAPV_SYSSTAT (M11.2) -- system statistics, filtered to the one counter the
--- redo series needs. 'redo size' is a CUMULATIVE BYTE counter since instance
--- startup (like the OSSTAT/time-model counters), so the daily layer
--- differences consecutive snaps and drops restart-spanning intervals.
--- Redo is one stream per DATABASE and AWR records it under the CDB's
--- con_dbid, the same way OSSTAT does.
+-- CAPV_SYSSTAT (M11.2) -- system statistics PER CONTAINER, filtered to the
+-- one counter the redo series needs. 'redo size' is a CUMULATIVE BYTE counter
+-- since instance startup (like the OSSTAT/time-model counters), so the daily
+-- layer differences consecutive snaps and drops restart-spanning intervals.
+--   * Source DBA_HIST_CON_SYSSTAT, for the same reason as CAPV_TIME_MODEL:
+--     DBA_HIST_SYSSTAT in CDB$ROOT carries the root's con_dbid only. The log
+--     stream is shared, so the CDB's redo is the SUM over containers.
+--   * Same PDB$SEED filter and non-CDB fallback as CAPV_TIME_MODEL.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capv_sysstat AS
-SELECT dbid                     AS dbid,
-       con_dbid                 AS con_dbid,
-       instance_number          AS instance_number,
-       snap_id                  AS snap_id,
-       stat_name                AS stat_name,
-       value                    AS value
-FROM   dba_hist_sysstat
-WHERE  stat_name = 'redo size';
+SELECT c.dbid                   AS dbid,
+       c.con_dbid               AS con_dbid,
+       c.instance_number        AS instance_number,
+       c.snap_id                AS snap_id,
+       c.stat_name              AS stat_name,
+       c.value                  AS value
+FROM   dba_hist_con_sysstat c
+WHERE  c.stat_name = 'redo size'
+  AND  NVL(c.con_id, 0) <> 2
+UNION ALL
+SELECT s.dbid, s.con_dbid, s.instance_number, s.snap_id, s.stat_name, s.value
+FROM   dba_hist_sysstat s
+WHERE  s.stat_name = 'redo size'
+  AND  NOT EXISTS (SELECT 1
+                   FROM   dba_hist_con_sysstat c
+                   WHERE  c.dbid = s.dbid AND c.snap_id = s.snap_id
+                     AND  c.instance_number = s.instance_number);
+
+-- --------------------------------------------------------------------
+-- CAPV_CONTRACT -- what this seam actually presents, one row per fact
+-- source: row count, distinct con_dbid, snap_id range and the newest
+-- snapshot end time. per_container_expected = 'Y' where the contract wants
+-- one series per container (TBSPC_USAGE, TIME_MODEL, SYSSTAT) and 'N' where
+-- the source is host / instance / spine level (OSSTAT, RESOURCE_LIMIT,
+-- SNAPSHOT), so n_con_dbid = 1 against a 'Y' means the per-PDB series are
+-- missing. A diagnostic for doctor.sql: it full-scans every source, and no
+-- analytic view selects from it. The body reads only CAPV_* and is the same
+-- in all three seam files.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capv_contract AS
+WITH src AS (
+        SELECT 'SNAPSHOT' AS source_name, dbid, con_dbid, snap_id FROM capv_snapshot
+        UNION ALL SELECT 'TBSPC_USAGE',    dbid, con_dbid, snap_id FROM capv_tbspc_usage
+        UNION ALL SELECT 'OSSTAT',         dbid, con_dbid, snap_id FROM capv_osstat
+        UNION ALL SELECT 'TIME_MODEL',     dbid, con_dbid, snap_id FROM capv_time_model
+        UNION ALL SELECT 'SYSSTAT',        dbid, con_dbid, snap_id FROM capv_sysstat
+        UNION ALL SELECT 'RESOURCE_LIMIT', dbid, con_dbid, snap_id FROM capv_resource_limit
+     ),
+     per_con AS (
+        SELECT source_name, dbid, con_dbid,
+               COUNT(*)     AS n_rows,
+               MIN(snap_id) AS min_snap_id,
+               MAX(snap_id) AS max_snap_id
+        FROM   src
+        GROUP  BY source_name, dbid, con_dbid
+     ),
+     snap_end AS (
+        SELECT dbid, snap_id, MAX(end_interval_time) AS end_time
+        FROM   capv_snapshot
+        GROUP  BY dbid, snap_id
+     ),
+     -- The source list is fixed so that an empty source still gets its row.
+     sources AS (
+        SELECT 'SNAPSHOT' AS source_name, 'N' AS per_container_expected FROM dual
+        UNION ALL SELECT 'TBSPC_USAGE',    'Y' FROM dual
+        UNION ALL SELECT 'OSSTAT',         'N' FROM dual
+        UNION ALL SELECT 'TIME_MODEL',     'Y' FROM dual
+        UNION ALL SELECT 'SYSSTAT',        'Y' FROM dual
+        UNION ALL SELECT 'RESOURCE_LIMIT', 'N' FROM dual
+     )
+SELECT k.source_name,
+       NVL(SUM(p.n_rows), 0)        AS n_rows,
+       COUNT(DISTINCT p.con_dbid)   AS n_con_dbid,
+       MIN(p.min_snap_id)           AS min_snap_id,
+       MAX(p.max_snap_id)           AS max_snap_id,
+       MAX(e.end_time)              AS max_end_time,
+       k.per_container_expected
+FROM   sources k
+LEFT   JOIN per_con p
+  ON   p.source_name = k.source_name
+LEFT   JOIN snap_end e
+  ON   e.dbid = p.dbid AND e.snap_id = p.max_snap_id
+GROUP  BY k.source_name, k.per_container_expected;

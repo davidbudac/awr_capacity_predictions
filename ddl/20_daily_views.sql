@@ -2,20 +2,23 @@
 -- ddl/20_daily_views.sql -- CAPD_* daily series over the CAPV_* seam.
 -- =====================================================================
 -- Collapses AWR snapshots (irregular, per-instance, cumulative-counter) into
--- clean one-row-per-day series that the forecast/anomaly layers fit. All four
+-- clean one-row-per-day series that the forecast/anomaly layers fit. All five
 -- views are seam-agnostic: they touch only CAPV_*.
 --
---   CAPD_TBSPC_DAILY  -- one row per (dbid, con_dbid, tablespace, day).
---                        Usage is a LEVEL, so we take the LAST sample of the
---                        day and convert blocks->bytes.
---   CAPD_TBSPC_DELTA  -- day-over-day used_bytes delta (negatives kept).
---   CAPD_CPU_DAILY    -- host busy% per day from OSSTAT counter deltas, with
---                        an instance-restart guard; average + p95/max/peak-
---                        window variants (M10.1); AWR-gap columns (M10.5).
---   CAPD_DBTIME_DAILY -- DB CPU / DB time / bg CPU seconds per day from
---                        SYS_TIME_MODEL counter deltas, same restart guard;
---                        DB CPU as % of core capacity + share of host (M10.2);
---                        the same M10.5 gap columns.
+--   CAPD_TBSPC_DAILY   -- one row per (dbid, con_dbid, tablespace, day).
+--                         Usage is a LEVEL, so we take the LAST sample of the
+--                         day and convert blocks->bytes.
+--   CAPD_TBSPC_DELTA   -- day-over-day used_bytes delta (negatives kept).
+--   CAPD_COUNTER_DELTA -- every cumulative counter differenced once per
+--                         interval, with the instance-restart flag.
+--   CAPD_CPU_DAILY     -- host busy% per day from the OSSTAT deltas; average +
+--                         p95/max/peak-window variants (M10.1); AWR-gap
+--                         columns (M10.5); day coverage (covered_sec /
+--                         is_complete).
+--   CAPD_DBTIME_DAILY  -- DB CPU / DB time / bg CPU seconds per day per
+--                         container from the time-model deltas; DB CPU as % of
+--                         logical-CPU capacity + share of host (M10.2); the
+--                         same gap and coverage columns.
 --
 -- 19c note: LAG uses an inline OVER (PARTITION BY ... ORDER BY ...) on every
 -- call -- the standalone WINDOW clause is 21c+.
@@ -162,12 +165,92 @@ FROM (
 );
 
 -- --------------------------------------------------------------------
+-- CAPD_COUNTER_DELTA -- every cumulative counter the suite reads, differenced
+-- once. One row per (dbid, con_dbid, instance, source, stat_name, interval):
+--   source      OSSTAT     BUSY_TIME / IDLE_TIME / IOWAIT_TIME (centiseconds)
+--               TIME_MODEL DB CPU / DB time / background cpu time (microseconds)
+--               SYSSTAT    every CAPV_SYSSTAT name, consumers filter
+--                          (local / warehouse: 'redo size', bytes)
+--   delta       value - previous value of the same counter, by snap_id
+--   ivl_sec     end_time - prev_end_time in whole seconds
+--   is_restart  'Y' when the interval spans an instance startup (startup_time
+--               differs from the previous snapshot's) or the delta is
+--               negative (counter reset), else 'N'. Consumers keep 'N' only.
+-- The first snapshot of each partition has no predecessor and no row. A NULL
+-- value gives a NULL delta, which every consumer drops.
+-- NULL startup_time: DECODE treats two NULLs as equal, so a source that never
+-- fills startup_time (possible in a warehouse) keeps its intervals, and only a
+-- NULL-to-value change counts as a restart. A plain startup_time =
+-- prev_startup test is never true for NULLs and emptied such a series.
+-- A delta is attributed to the day its interval ENDS on, everywhere.
+-- CAPD_CPU_DAILY, CAPD_DBTIME_DAILY and the REDO_GB_DAY branch of
+-- CAPD_SERIES_DAILY pivot these rows per interval instead of each running
+-- its own LAG. They group by prev_end_time too, so two counters only pair up
+-- when they difference the same pair of snapshots.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capd_counter_delta AS
+WITH ctr AS (
+        SELECT 'OSSTAT' AS source, dbid, con_dbid, instance_number, snap_id, stat_name, value
+        FROM   capv_osstat
+        WHERE  stat_name IN ('BUSY_TIME','IDLE_TIME','IOWAIT_TIME')
+        UNION ALL
+        SELECT 'TIME_MODEL', dbid, con_dbid, instance_number, snap_id, stat_name, value
+        FROM   capv_time_model
+        UNION ALL
+        SELECT 'SYSSTAT', dbid, con_dbid, instance_number, snap_id, stat_name, value
+        FROM   capv_sysstat
+     ),
+     lagged AS (
+        -- CAPV_SNAPSHOT sets con_dbid := dbid, so the join is on (dbid,
+        -- snap_id, instance_number) and con_dbid comes from the counter.
+        SELECT c.source, c.dbid, c.con_dbid, c.instance_number, c.stat_name, c.snap_id,
+               c.value,
+               s.end_interval_time AS end_time,
+               s.startup_time,
+               LAG(c.snap_id)
+                 OVER (PARTITION BY c.source, c.dbid, c.con_dbid, c.instance_number, c.stat_name
+                       ORDER BY c.snap_id) AS prev_snap_id,
+               LAG(c.value)
+                 OVER (PARTITION BY c.source, c.dbid, c.con_dbid, c.instance_number, c.stat_name
+                       ORDER BY c.snap_id) AS prev_value,
+               LAG(s.end_interval_time)
+                 OVER (PARTITION BY c.source, c.dbid, c.con_dbid, c.instance_number, c.stat_name
+                       ORDER BY c.snap_id) AS prev_end_time,
+               LAG(s.startup_time)
+                 OVER (PARTITION BY c.source, c.dbid, c.con_dbid, c.instance_number, c.stat_name
+                       ORDER BY c.snap_id) AS prev_startup
+        FROM   ctr c
+        JOIN   capv_snapshot s
+          ON   s.dbid = c.dbid AND s.snap_id = c.snap_id
+         AND   s.instance_number = c.instance_number
+     )
+SELECT dbid,
+       con_dbid,
+       instance_number,
+       source,
+       stat_name,
+       snap_id,
+       end_time,
+       prev_end_time,
+       -- DATE arithmetic gives days. AWR times have whole-second resolution,
+       -- so ROUND only removes the 1/86400 representation error.
+       ROUND((CAST(end_time AS DATE) - CAST(prev_end_time AS DATE)) * 86400) AS ivl_sec,
+       value - prev_value                                                   AS delta,
+       startup_time,
+       CASE WHEN DECODE(startup_time, prev_startup, 0, 1) = 1 THEN 'Y'
+            WHEN value < prev_value                         THEN 'Y'
+            ELSE 'N'
+       END                                                                  AS is_restart
+FROM   lagged
+WHERE  prev_snap_id IS NOT NULL;
+
+-- --------------------------------------------------------------------
 -- CAPD_CPU_DAILY -- host CPU busy% per day: average AND peak (M10.1).
--- BUSY_TIME / IDLE_TIME are cumulative centisecond counters; we difference
--- consecutive snaps per (dbid,con_dbid,instance) and DROP any interval that
--- (a) spans an instance restart (startup_time changed) or (b) shows a
--- negative delta (counter reset) -- both would corrupt the ratio. The
--- centisecond units cancel in every ratio, so no unit conversion is needed.
+-- BUSY_TIME / IDLE_TIME are cumulative centisecond counters, differenced in
+-- CAPD_COUNTER_DELTA. An interval is used only when both deltas exist and
+-- neither is a restart (startup_time changed, or a negative delta): either
+-- would corrupt the ratio. The centisecond units cancel in every ratio, so no
+-- unit conversion is needed.
 --   busy_pct      = 100 * SUM(busy_d) / SUM(busy_d+idle_d) over the day
 --                   (time-weighted daily average -- the "average" view).
 --   busy_p95      = PERCENTILE_CONT(0.95) of the per-INTERVAL busy% within
@@ -204,65 +287,67 @@ FROM (
 --     baseline and never flags one, and CAPA_CPU_SHIFT skips them too.
 -- busy_pct itself still uses EVERY valid interval, so the day's time-weighted
 -- average stays honest about the counters that were actually recorded.
+-- Restart intervals are dropped before max_interval_hours is taken, so a
+-- restart or outage day keeps gap_flag = 'N'. covered_sec says how much of
+-- the day the valid intervals cover:
+--   covered_sec = valid interval seconds ending that day, per instance (the
+--                 sum divided by the instances that reported). 86400 for a
+--                 full day, less on the first day of AWR history, on today's
+--                 partial day and on a restart day. More than 86400 on a gap
+--                 day, whose long interval also covers earlier days.
+--   is_complete = 'Y' when covered_sec >= complete_day_pct (knob, default
+--                 80) percent of 86400, else 'N'.
+-- num_cpus / num_cpu_cores are the day's averages over its intervals.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capd_cpu_daily AS
-WITH pivoted AS (
-        SELECT o.dbid, o.con_dbid, o.instance_number, o.snap_id,
-               MAX(CASE WHEN o.stat_name = 'BUSY_TIME'     THEN o.value END) AS busy_time,
-               MAX(CASE WHEN o.stat_name = 'IDLE_TIME'     THEN o.value END) AS idle_time,
-               MAX(CASE WHEN o.stat_name = 'IOWAIT_TIME'   THEN o.value END) AS iowait_time,
-               MAX(CASE WHEN o.stat_name = 'NUM_CPUS'      THEN o.value END) AS num_cpus,
-               MAX(CASE WHEN o.stat_name = 'NUM_CPU_CORES' THEN o.value END) AS num_cpu_cores
-        FROM   capv_osstat o
-        GROUP  BY o.dbid, o.con_dbid, o.instance_number, o.snap_id
+WITH ivl AS (
+        -- BUSY_TIME and IDLE_TIME side by side, one row per interval.
+        SELECT d.dbid, d.con_dbid, d.instance_number, d.snap_id, d.end_time, d.ivl_sec,
+               MAX(CASE WHEN d.stat_name = 'BUSY_TIME' THEN d.delta END) AS busy_d,
+               MAX(CASE WHEN d.stat_name = 'IDLE_TIME' THEN d.delta END) AS idle_d,
+               MAX(d.is_restart)                                         AS is_restart
+        FROM   capd_counter_delta d
+        WHERE  d.source = 'OSSTAT'
+          AND  d.stat_name IN ('BUSY_TIME','IDLE_TIME')
+        GROUP  BY d.dbid, d.con_dbid, d.instance_number, d.snap_id,
+                  d.end_time, d.prev_end_time, d.ivl_sec
      ),
-     with_snap AS (
-        SELECT p.*, s.end_interval_time, s.startup_time
-        FROM   pivoted p
-        JOIN   capv_snapshot s
-          ON   s.dbid = p.dbid AND s.snap_id = p.snap_id
-         AND   s.instance_number = p.instance_number
-     ),
-     deltas AS (
-        SELECT w.*,
-               w.busy_time - LAG(w.busy_time)
-                 OVER (PARTITION BY w.dbid, w.con_dbid, w.instance_number ORDER BY w.snap_id) AS busy_d,
-               w.idle_time - LAG(w.idle_time)
-                 OVER (PARTITION BY w.dbid, w.con_dbid, w.instance_number ORDER BY w.snap_id) AS idle_d,
-               LAG(w.startup_time)
-                 OVER (PARTITION BY w.dbid, w.con_dbid, w.instance_number ORDER BY w.snap_id) AS prev_startup,
-               -- M10.5: interval length in HOURS. DATE arithmetic gives days,
-               -- so * 24. NULL on the first snap of a partition -- the same
-               -- rows the busy_d IS NOT NULL filter below already drops.
-               ( CAST(w.end_interval_time AS DATE)
-                 - CAST(LAG(w.end_interval_time)
-                          OVER (PARTITION BY w.dbid, w.con_dbid, w.instance_number ORDER BY w.snap_id) AS DATE)
-               ) * 24 AS ivl_hours
-        FROM   with_snap w
+     lvl AS (
+        -- CPU counts are levels, read at the end snapshot of the interval.
+        SELECT dbid, con_dbid, instance_number, snap_id,
+               MAX(CASE WHEN stat_name = 'NUM_CPUS'      THEN value END) AS num_cpus,
+               MAX(CASE WHEN stat_name = 'NUM_CPU_CORES' THEN value END) AS num_cpu_cores
+        FROM   capv_osstat
+        WHERE  stat_name IN ('NUM_CPUS','NUM_CPU_CORES')
+        GROUP  BY dbid, con_dbid, instance_number, snap_id
      ),
      valid AS (
-        SELECT d.dbid, d.con_dbid, d.instance_number,
-               TRUNC(d.end_interval_time) AS day_dt,
-               d.busy_d, d.idle_d, d.num_cpus, d.num_cpu_cores,
-               d.ivl_hours,
-               CASE WHEN d.ivl_hours > cfg.cpu_gap_hours THEN 1 ELSE 0 END AS is_long,
+        SELECT i.dbid, i.con_dbid, i.instance_number,
+               TRUNC(i.end_time) AS day_dt,
+               i.busy_d, i.idle_d, l.num_cpus, l.num_cpu_cores,
+               i.ivl_sec,
+               i.ivl_sec / 3600 AS ivl_hours,
+               CASE WHEN i.ivl_sec / 3600 > cfg.cpu_gap_hours THEN 1 ELSE 0 END AS is_long,
                -- M10.5: per-interval busy% is only meaningful for an interval
                -- of normal length; a gap-spanning one is NULLed so it drops out
                -- of PERCENTILE_CONT / MAX (both ignore NULLs) instead of
                -- diluting the day's peak.
-               CASE WHEN NVL(d.ivl_hours, 0) <= cfg.cpu_gap_hours
-                    THEN 100 * d.busy_d / NULLIF(d.busy_d + d.idle_d, 0)
+               CASE WHEN i.ivl_sec / 3600 <= cfg.cpu_gap_hours
+                    THEN 100 * i.busy_d / NULLIF(i.busy_d + i.idle_d, 0)
                END AS ivl_busy_pct,
                -- peak-window membership: end hour in (peak_hour_from, peak_hour_to],
                -- and (M10.5) not a gap-spanning interval
-               CASE WHEN EXTRACT(HOUR FROM CAST(d.end_interval_time AS TIMESTAMP)) >  cfg.peak_hour_from
-                     AND EXTRACT(HOUR FROM CAST(d.end_interval_time AS TIMESTAMP)) <= cfg.peak_hour_to
-                     AND NVL(d.ivl_hours, 0) <= cfg.cpu_gap_hours
+               CASE WHEN EXTRACT(HOUR FROM CAST(i.end_time AS TIMESTAMP)) >  cfg.peak_hour_from
+                     AND EXTRACT(HOUR FROM CAST(i.end_time AS TIMESTAMP)) <= cfg.peak_hour_to
+                     AND i.ivl_sec / 3600 <= cfg.cpu_gap_hours
                     THEN 1 ELSE 0 END AS in_peak
-        FROM   deltas d CROSS JOIN cap_cfg cfg
-        WHERE  d.busy_d IS NOT NULL AND d.idle_d IS NOT NULL    -- drop first snap of each partition
-          AND  d.busy_d >= 0 AND d.idle_d >= 0                  -- drop counter resets
-          AND  d.startup_time = d.prev_startup                  -- drop restart-spanning intervals
+        FROM   ivl i
+        CROSS  JOIN cap_cfg cfg
+        LEFT   JOIN lvl l
+          ON   l.dbid = i.dbid AND l.con_dbid = i.con_dbid
+         AND   l.instance_number = i.instance_number AND l.snap_id = i.snap_id
+        WHERE  i.busy_d IS NOT NULL AND i.idle_d IS NOT NULL
+          AND  i.is_restart = 'N'
      ),
      agg AS (
         SELECT dbid,
@@ -279,7 +364,8 @@ WITH pivoted AS (
                ROUND(AVG(num_cpu_cores))                                     AS num_cpu_cores,
                COUNT(*)                                                      AS n_intervals,
                ROUND(MAX(ivl_hours), 2)                                      AS max_interval_hours,
-               CASE WHEN MAX(is_long) = 1 THEN 'Y' ELSE 'N' END              AS gap_flag
+               CASE WHEN MAX(is_long) = 1 THEN 'Y' ELSE 'N' END              AS gap_flag,
+               SUM(ivl_sec) / COUNT(DISTINCT instance_number)                AS covered_sec
         FROM   valid
         GROUP  BY dbid, con_dbid, day_dt
      )
@@ -298,74 +384,98 @@ SELECT a.dbid,
        a.max_interval_hours,
        a.gap_flag,
        a.day_dt - LAG(a.day_dt) OVER (PARTITION BY a.dbid, a.con_dbid
-                                      ORDER BY a.day_dt)                     AS day_gap
-FROM   agg a;
+                                      ORDER BY a.day_dt)                     AS day_gap,
+       a.covered_sec,
+       CASE WHEN a.covered_sec >= cfg.complete_day_pct / 100 * 86400
+            THEN 'Y' ELSE 'N' END                                            AS is_complete
+FROM   agg a
+CROSS  JOIN cap_cfg cfg;
 
 -- --------------------------------------------------------------------
--- CAPD_DBTIME_DAILY -- DB CPU / DB time / background CPU seconds per day,
--- plus DB CPU as a PERCENT OF CORE CAPACITY (M10.2) and the container's
--- share of host CPU.
--- SYS_TIME_MODEL values are cumulative MICROSECOND counters; same
--- diff-and-restart-guard pattern as CAPD_CPU_DAILY, summed across instances
--- per day and divided by 1e6 to seconds. db_cpu_per_core divides DB CPU by
--- the host core count (summed across instances, from OSSTAT NUM_CPU_CORES,
--- falling back to NUM_CPUS) so it is comparable across differently-sized hosts.
---   db_cpu_pct      = 100 * db_cpu_sec / (total_cores * 86400): the fraction
---                     of the host's core-seconds this container's foreground
---                     DB CPU consumed that day. Same scale as busy%, so it
---                     gets the same REGR fit + days_to_sat in CAPF_CPU_TREND.
+-- CAPD_DBTIME_DAILY -- DB CPU / DB time / background CPU seconds per day per
+-- container, DB CPU as a PERCENT OF LOGICAL-CPU CAPACITY (M10.2) and the
+-- container's share of host CPU.
+-- The time-model counters (cumulative MICROSECONDS) come from
+-- CAPD_COUNTER_DELTA with the same restart rule as CAPD_CPU_DAILY, summed
+-- across instances per day and divided by 1e6 to seconds.
+--   db_cpu_pct      = 100 * db_cpu_sec / SUM over the day's valid intervals
+--                     of (num_cpus * ivl_sec): the share of the host's
+--                     logical-CPU seconds this container's foreground DB CPU
+--                     used while the counters were recording.
+--                     Why logical CPUs: Oracle accrues CPU time per logical
+--                     CPU (a thread on an SMT host), OSSTAT BUSY_TIME /
+--                     IDLE_TIME are summed over NUM_CPUS, and the AWR report's
+--                     own %Total CPU divides by NUM_CPUS. Dividing by cores
+--                     read 2x on 2-way SMT (4-8x on POWER / SPARC) and fired
+--                     DBCPU_SAT at half load. Now db_cpu_pct = busy_pct *
+--                     host_share_pct / 100, the same scale as host busy%.
+--                     num_cpus is read per interval at its end snapshot
+--                     (NUM_CPUS, else NUM_CPU_CORES), so a host resize does
+--                     not rewrite history. OSSTAT is host level and recorded
+--                     under the CDB's con_dbid, so it is matched on (dbid,
+--                     instance, snap_id) and serves every container. A
+--                     snapshot with no OSSTAT row uses the instance's last
+--                     earlier value.
+--                     The denominator is the covered time, not 86400, so a
+--                     partial, restart or gap day reads its true average.
 --   db_cpu_p95_pct / db_cpu_max_pct / db_cpu_peak_pct
 --                   = the per-INTERVAL version of db_cpu_pct (DB CPU seconds
---                     over the interval's elapsed core-seconds), then p95 /
---                     max over the day / time-weighted over the peak window
---                     (same (peak_hour_from, peak_hour_to] rule as
---                     CAPD_CPU_DAILY). Per-PDB "busy hour".
+--                     over the interval's num_cpus * ivl_sec), then p95 / max
+--                     over the day / time-weighted over the peak window (same
+--                     (peak_hour_from, peak_hour_to] rule as CAPD_CPU_DAILY).
+--                     Per-PDB "busy hour".
+--   db_cpu_per_core = db_cpu_sec / total_cores, where total_cores is the
+--                     host core count summed across instances (MAX over the
+--                     dbid's history, NUM_CPU_CORES falling back to NUM_CPUS),
+--                     so it is comparable across differently-sized hosts.
+--   num_cpus / num_cpu_cores
+--                   = the day's MAX over its intervals per instance, summed
+--                     across instances, so a resize shows on the day it lands.
 --   host_share_pct  = 100 * db_cpu_sec / host busy seconds that day (host
 --                     busy from CAPD_CPU_DAILY summed over the dbid, since
 --                     OSSTAT records under the CDB's con_dbid): how much of
 --                     what the host was doing was THIS container.
---   max_interval_hours / gap_flag / day_gap
---                   = the M10.5 AWR-gap columns, identical in meaning to
---                     CAPD_CPU_DAILY's (see the comment block there). The
---                     per-interval percentages (db_cpu_p95_pct /
---                     db_cpu_max_pct / db_cpu_peak_pct) ignore intervals
---                     longer than cpu_gap_hours; the daily totals
---                     (db_cpu_sec / db_cpu_pct) do not, so on a gap day
---                     db_cpu_pct legitimately reads high -- gap_flag is the
---                     flag that says "this day carries more than a day".
+--   max_interval_hours / gap_flag / day_gap / covered_sec / is_complete
+--                   = identical in meaning to CAPD_CPU_DAILY's (see the
+--                     comment block there). The per-interval percentages
+--                     ignore intervals longer than cpu_gap_hours. The daily
+--                     totals do not, and on a gap day db_cpu_sec carries more
+--                     than a day of CPU (gap_flag says so) while db_cpu_pct
+--                     stays an average over the covered time.
+-- In local mode the root row is CDB$ROOT alone (see ddl/10). The CDB's total
+-- DB CPU is the SUM over its containers.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capd_dbtime_daily AS
-WITH pivoted AS (
-        SELECT m.dbid, m.con_dbid, m.instance_number, m.snap_id,
-               MAX(CASE WHEN m.stat_name = 'DB CPU'             THEN m.value END) AS db_cpu,
-               MAX(CASE WHEN m.stat_name = 'DB time'            THEN m.value END) AS db_time,
-               MAX(CASE WHEN m.stat_name = 'background cpu time' THEN m.value END) AS bg_cpu
-        FROM   capv_time_model m
-        GROUP  BY m.dbid, m.con_dbid, m.instance_number, m.snap_id
+WITH ivl AS (
+        SELECT d.dbid, d.con_dbid, d.instance_number, d.snap_id, d.end_time, d.ivl_sec,
+               MAX(CASE WHEN d.stat_name = 'DB CPU'              THEN d.delta END) AS db_cpu_d,
+               MAX(CASE WHEN d.stat_name = 'DB time'             THEN d.delta END) AS db_time_d,
+               MAX(CASE WHEN d.stat_name = 'background cpu time' THEN d.delta END) AS bg_cpu_d,
+               MAX(d.is_restart)                                                   AS is_restart
+        FROM   capd_counter_delta d
+        WHERE  d.source = 'TIME_MODEL'
+        GROUP  BY d.dbid, d.con_dbid, d.instance_number, d.snap_id,
+                  d.end_time, d.prev_end_time, d.ivl_sec
      ),
-     with_snap AS (
-        SELECT p.*, s.end_interval_time, s.startup_time
-        FROM   pivoted p
-        JOIN   capv_snapshot s
-          ON   s.dbid = p.dbid AND s.snap_id = p.snap_id
-         AND   s.instance_number = p.instance_number
-     ),
-     deltas AS (
-        SELECT w.*,
-               w.db_cpu  - LAG(w.db_cpu)
-                 OVER (PARTITION BY w.dbid, w.con_dbid, w.instance_number ORDER BY w.snap_id) AS db_cpu_d,
-               w.db_time - LAG(w.db_time)
-                 OVER (PARTITION BY w.dbid, w.con_dbid, w.instance_number ORDER BY w.snap_id) AS db_time_d,
-               w.bg_cpu  - LAG(w.bg_cpu)
-                 OVER (PARTITION BY w.dbid, w.con_dbid, w.instance_number ORDER BY w.snap_id) AS bg_cpu_d,
-               LAG(w.startup_time)
-                 OVER (PARTITION BY w.dbid, w.con_dbid, w.instance_number ORDER BY w.snap_id) AS prev_startup,
-               -- interval length in seconds (DATE arithmetic on the TIMESTAMPs)
-               ( CAST(w.end_interval_time AS DATE)
-                 - CAST(LAG(w.end_interval_time)
-                          OVER (PARTITION BY w.dbid, w.con_dbid, w.instance_number ORDER BY w.snap_id) AS DATE)
-               ) * 86400 AS elapsed_sec
-        FROM   with_snap w
+     ncpu AS (
+        -- Logical CPUs per instance at every snapshot, carried forward over
+        -- snapshots that have no OSSTAT row.
+        SELECT s.dbid, s.instance_number, s.snap_id,
+               LAST_VALUE(o.num_cpus IGNORE NULLS)
+                 OVER (PARTITION BY s.dbid, s.instance_number ORDER BY s.snap_id
+                       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS num_cpus,
+               LAST_VALUE(o.num_cpu_cores IGNORE NULLS)
+                 OVER (PARTITION BY s.dbid, s.instance_number ORDER BY s.snap_id
+                       ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS num_cpu_cores
+        FROM   capv_snapshot s
+        LEFT   JOIN ( SELECT dbid, instance_number, snap_id,
+                             NVL(MAX(CASE WHEN stat_name = 'NUM_CPUS'      THEN value END),
+                                 MAX(CASE WHEN stat_name = 'NUM_CPU_CORES' THEN value END)) AS num_cpus,
+                             MAX(CASE WHEN stat_name = 'NUM_CPU_CORES' THEN value END)     AS num_cpu_cores
+                      FROM   capv_osstat
+                      WHERE  stat_name IN ('NUM_CPUS','NUM_CPU_CORES')
+                      GROUP  BY dbid, instance_number, snap_id ) o
+          ON   o.dbid = s.dbid AND o.instance_number = s.instance_number AND o.snap_id = s.snap_id
      ),
      cores AS (
         SELECT dbid,
@@ -378,32 +488,49 @@ WITH pivoted AS (
         GROUP BY dbid
      ),
      valid AS (
-        SELECT d.dbid, d.con_dbid,
-               TRUNC(d.end_interval_time) AS day_dt,
-               d.db_cpu_d, d.db_time_d, d.bg_cpu_d, d.elapsed_sec,
+        SELECT i.dbid, i.con_dbid, i.instance_number,
+               TRUNC(i.end_time) AS day_dt,
+               i.db_cpu_d, i.db_time_d, i.bg_cpu_d, i.ivl_sec,
+               n.num_cpus, n.num_cpu_cores,
+               -- logical-CPU seconds the interval offered, NULL when unknown
+               CASE WHEN n.num_cpus > 0 AND i.ivl_sec > 0
+                    THEN n.num_cpus * i.ivl_sec
+               END AS cap_sec,
                c.total_cores,
-               -- M10.5: same interval length, expressed in hours.
-               d.elapsed_sec / 3600 AS ivl_hours,
-               CASE WHEN d.elapsed_sec / 3600 > cfg.cpu_gap_hours THEN 1 ELSE 0 END AS is_long,
-               CASE WHEN c.total_cores > 0 AND d.elapsed_sec > 0
-                     AND d.elapsed_sec / 3600 <= cfg.cpu_gap_hours
-                    THEN 100 * (d.db_cpu_d / 1e6) / (c.total_cores * d.elapsed_sec)
+               i.ivl_sec / 3600 AS ivl_hours,
+               CASE WHEN i.ivl_sec / 3600 > cfg.cpu_gap_hours THEN 1 ELSE 0 END AS is_long,
+               CASE WHEN n.num_cpus > 0 AND i.ivl_sec > 0
+                     AND i.ivl_sec / 3600 <= cfg.cpu_gap_hours
+                    THEN 100 * (i.db_cpu_d / 1e6) / (n.num_cpus * i.ivl_sec)
                END AS ivl_cpu_pct,
-               CASE WHEN EXTRACT(HOUR FROM CAST(d.end_interval_time AS TIMESTAMP)) >  cfg.peak_hour_from
-                     AND EXTRACT(HOUR FROM CAST(d.end_interval_time AS TIMESTAMP)) <= cfg.peak_hour_to
-                     AND d.elapsed_sec / 3600 <= cfg.cpu_gap_hours
+               CASE WHEN EXTRACT(HOUR FROM CAST(i.end_time AS TIMESTAMP)) >  cfg.peak_hour_from
+                     AND EXTRACT(HOUR FROM CAST(i.end_time AS TIMESTAMP)) <= cfg.peak_hour_to
+                     AND i.ivl_sec / 3600 <= cfg.cpu_gap_hours
                     THEN 1 ELSE 0 END AS in_peak
-        FROM   deltas d
+        FROM   ivl i
         CROSS  JOIN cap_cfg cfg
-        LEFT   JOIN cores c ON c.dbid = d.dbid
-        WHERE  d.db_cpu_d IS NOT NULL AND d.db_time_d IS NOT NULL
-          AND  d.db_cpu_d >= 0 AND d.db_time_d >= 0 AND NVL(d.bg_cpu_d,0) >= 0
-          AND  d.startup_time = d.prev_startup
+        LEFT   JOIN ncpu n
+          ON   n.dbid = i.dbid AND n.instance_number = i.instance_number AND n.snap_id = i.snap_id
+        LEFT   JOIN cores c ON c.dbid = i.dbid
+        WHERE  i.db_cpu_d IS NOT NULL AND i.db_time_d IS NOT NULL
+          AND  i.is_restart = 'N'
      ),
      host AS (
         SELECT dbid, day_dt, SUM(host_busy_sec) AS host_busy_sec
         FROM   capd_cpu_daily
         GROUP  BY dbid, day_dt
+     ),
+     -- CPU counts per day: MAX per instance, then summed across instances
+     cpus_day AS (
+        SELECT dbid, con_dbid, day_dt,
+               SUM(num_cpus)      AS num_cpus,
+               SUM(num_cpu_cores) AS num_cpu_cores
+        FROM ( SELECT dbid, con_dbid, day_dt, instance_number,
+                      MAX(num_cpus)      AS num_cpus,
+                      MAX(num_cpu_cores) AS num_cpu_cores
+               FROM   valid
+               GROUP  BY dbid, con_dbid, day_dt, instance_number )
+        GROUP  BY dbid, con_dbid, day_dt
      ),
      agg AS (
         SELECT v.dbid,
@@ -415,15 +542,12 @@ WITH pivoted AS (
                CASE WHEN v.total_cores > 0
                     THEN (SUM(v.db_cpu_d) / 1e6) / v.total_cores
                END                                                 AS db_cpu_per_core,
-               CASE WHEN v.total_cores > 0
-                    THEN 100 * (SUM(v.db_cpu_d) / 1e6) / (v.total_cores * 86400)
-               END                                                 AS db_cpu_pct,
+               100 * (SUM(CASE WHEN v.cap_sec IS NOT NULL THEN v.db_cpu_d END) / 1e6)
+                   / NULLIF(SUM(v.cap_sec), 0)                     AS db_cpu_pct,
                PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY v.ivl_cpu_pct) AS db_cpu_p95_pct,
                MAX(v.ivl_cpu_pct)                                  AS db_cpu_max_pct,
-               CASE WHEN v.total_cores > 0
-                    THEN 100 * (SUM(CASE WHEN v.in_peak = 1 THEN v.db_cpu_d END) / 1e6)
-                         / NULLIF(v.total_cores * SUM(CASE WHEN v.in_peak = 1 THEN v.elapsed_sec END), 0)
-               END                                                 AS db_cpu_peak_pct,
+               100 * (SUM(CASE WHEN v.in_peak = 1 AND v.cap_sec IS NOT NULL THEN v.db_cpu_d END) / 1e6)
+                   / NULLIF(SUM(CASE WHEN v.in_peak = 1 THEN v.cap_sec END), 0) AS db_cpu_peak_pct,
                SUM(v.in_peak)                                      AS peak_intervals,
                CASE WHEN h.host_busy_sec > 0
                     THEN 100 * (SUM(v.db_cpu_d) / 1e6) / h.host_busy_sec
@@ -431,7 +555,8 @@ WITH pivoted AS (
                v.total_cores,
                COUNT(*)                                            AS n_intervals,
                ROUND(MAX(v.ivl_hours), 2)                          AS max_interval_hours,
-               CASE WHEN MAX(v.is_long) = 1 THEN 'Y' ELSE 'N' END   AS gap_flag
+               CASE WHEN MAX(v.is_long) = 1 THEN 'Y' ELSE 'N' END   AS gap_flag,
+               SUM(v.ivl_sec) / COUNT(DISTINCT v.instance_number)  AS covered_sec
         FROM   valid v
         LEFT   JOIN host h ON h.dbid = v.dbid AND h.day_dt = v.day_dt
         GROUP  BY v.dbid, v.con_dbid, v.day_dt, v.total_cores, h.host_busy_sec
@@ -454,5 +579,13 @@ SELECT a.dbid,
        a.max_interval_hours,
        a.gap_flag,
        a.day_dt - LAG(a.day_dt) OVER (PARTITION BY a.dbid, a.con_dbid
-                                      ORDER BY a.day_dt)           AS day_gap
-FROM   agg a;
+                                      ORDER BY a.day_dt)           AS day_gap,
+       c.num_cpus,
+       c.num_cpu_cores,
+       a.covered_sec,
+       CASE WHEN a.covered_sec >= cfg.complete_day_pct / 100 * 86400
+            THEN 'Y' ELSE 'N' END                                  AS is_complete
+FROM   agg a
+JOIN   cpus_day c
+  ON   c.dbid = a.dbid AND c.con_dbid = a.con_dbid AND c.day_dt = a.day_dt
+CROSS  JOIN cap_cfg cfg;

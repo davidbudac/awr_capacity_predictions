@@ -39,13 +39,34 @@ This document explains *why* each layer is shaped the way it is. For usage see
 Nine views re-present the AWR dictionary in a stable shape. Everything
 downstream depends only on these, so swapping `ddl/10_seam_local.sql` for `11`
 (warehouse) or `12` (fixture) re-points the whole stack. Every view carries
-`(dbid, con_dbid)`.
+`(dbid, con_dbid)`. A tenth view, `CAPV_CONTRACT`, describes what the other
+nine present (see the last bullet).
 
 - `DBA_HIST_SNAPSHOT` has no `CON_DBID`, so `CAPV_SNAPSHOT` sets
   `con_dbid := dbid`. The tablespace / OS / time-model views expose the **real**
   `CON_DBID`, which is mandatory: `TABLESPACE_ID`/`TS#` restart at 0 per
   container, so `SYSTEM` in the root and in a PDB collide unless `con_dbid`
   disambiguates them.
+- **Per-container sources.** In `CDB$ROOT` (with the default
+  `AWR_PDB_AUTOFLUSH_ENABLED = FALSE`) only some AWR views have a row per
+  container: `DBA_HIST_TBSPC_SPACE_USAGE`, `DBA_HIST_CON_SYS_TIME_MODEL` and
+  `DBA_HIST_CON_SYSSTAT`. `DBA_HIST_SYS_TIME_MODEL` and `DBA_HIST_SYSSTAT`
+  have one row per snapshot, under the root's `con_dbid`, and that row is the
+  CDB-wide total. Verified on 19c: root + seed + PDB1 DB CPU in the `CON_`
+  view summed to the `SYS_` row within 0.3%.
+  So `CAPV_TIME_MODEL` and `CAPV_SYSSTAT` read the `CON_` views. Their root
+  row is `CDB$ROOT` alone, and the CDB total is the sum over containers.
+  `PDB$SEED` is dropped with `CON_ID <> 2` (the seed is always container 2;
+  it runs nothing). A snapshot with no `CON_` row at all (a non-CDB, or AWR
+  imported from one) falls back to the `SYS_` view, where `con_dbid = dbid`.
+  The three remaining sources are root-only by nature: `DBA_HIST_OSSTAT`
+  (host level), `DBA_HIST_RESOURCE_LIMIT` (instance level) and
+  `DBA_HIST_SNAPSHOT`. Reading the `SYS_` views gave local mode one DB CPU
+  and redo series per CDB, labelled as the root, so per-PDB `DB_CPU_PCT`,
+  `DBCPU_SAT`, the PDB level shift and `host_share_pct` only ever worked on
+  fixture data. The warehouse collector still gathers the `SYS_` views, so in
+  warehouse mode those two series stay CDB-level (header of
+  `ddl/11_seam_warehouse.sql`; a collector change in the sibling repo).
 - **Units are passed through, not normalized** (documented in the file header):
   tablespace sizes stay in DB **blocks**; OSSTAT `*_TIME` stays in
   **centiseconds**; time-model values stay in **microseconds**. Conversion is
@@ -67,17 +88,28 @@ downstream depends only on these, so swapping `ddl/10_seam_local.sql` for `11`
   (`con_name` stays NULL — no PDB-name dim collected yet); fixture mode reads
   `CAP_FIXTURE_CONTAINER`. Historical dictionaries only, same as the rest of
   the seam — never live `V$` views.
-- `CAPV_RESOURCE_LIMIT` / `CAPV_SYSSTAT` (M11) are the two newest seam views.
-  `DBA_HIST_RESOURCE_LIMIT` (filtered to `processes` / `sessions`) **does**
-  carry `CON_DBID` on 19c — verified — so PDBs stay separable; its
-  `LIMIT_VALUE` is a `VARCHAR2(10)` that can read `UNLIMITED`, converted here
-  to a NUMBER (non-numeric → NULL = "no ceiling"). `CAPV_SYSSTAT` is filtered
-  to `redo size`, a cumulative byte counter. The warehouse collects SYSSTAT
-  whole (`awrv_sysstat`, `con_dbid := dbid` — right for redo, which is one
-  stream per database) but has **no** resource-limit fact yet, so
+- `CAPV_RESOURCE_LIMIT` / `CAPV_SYSSTAT` (M11).
+  `DBA_HIST_RESOURCE_LIMIT` (filtered to `processes` / `sessions`) has a
+  `CON_DBID` column, but in `CDB$ROOT` its rows are root-only (verified on
+  19c): the limits are instance-wide, so `PROCESSES` / `SESSIONS` are CDB-wide
+  series. Its `LIMIT_VALUE` is a `VARCHAR2(10)` that can read `UNLIMITED`,
+  converted here to a NUMBER (non-numeric → NULL = "no ceiling").
+  `CAPV_SYSSTAT` is filtered to `redo size`, a cumulative byte counter, per
+  container (see above). The warehouse collects SYSSTAT whole
+  (`awrv_sysstat`, no `CON_DBID`, so `con_dbid := dbid`: one CDB-level redo
+  series) but has **no** resource-limit fact yet, so
   `ddl/11_seam_warehouse.sql` emits `CAPV_RESOURCE_LIMIT` with the exact
   column contract and `WHERE 1 = 0`: the stack stays valid in warehouse mode
   and the `PROCESSES` / `SESSIONS` series simply have no rows there.
+- `CAPV_CONTRACT` is a diagnostic over the seam itself, the same body in all
+  three seam files: one row per fact source (`SNAPSHOT`, `TBSPC_USAGE`,
+  `OSSTAT`, `TIME_MODEL`, `SYSSTAT`, `RESOURCE_LIMIT`) with `n_rows`,
+  `n_con_dbid`, `min_snap_id` / `max_snap_id`, `max_end_time` and
+  `per_container_expected` (`Y` for tablespace usage, time model and sysstat,
+  `N` for the host, instance and spine sources). `n_con_dbid = 1` against a
+  `Y` says the per-PDB series are missing, which is what a warehouse with the
+  old collector shows. It full-scans every source, so no analytic view reads
+  it. It is meant for `doctor.sql`.
 
 ## Layer 2 — daily series (`CAPD_*`)
 
@@ -112,10 +144,22 @@ row per day.
   used_delta_bytes / day_gap`, so a multi-day AWR gap is not mistaken for a
   one-day spike downstream. Negative deltas (purge/shrink) are legitimate and
   kept.
-- **`CAPD_CPU_DAILY`** — `BUSY_TIME`/`IDLE_TIME` are cumulative counters;
-  consecutive snaps are differenced per `(dbid, con_dbid, instance)`, then any
-  interval that spans an **instance restart** (`startup_time` changed) or shows
-  a **negative delta** (counter reset) is dropped. Per day:
+- **`CAPD_COUNTER_DELTA`** differences every cumulative counter once: the
+  OSSTAT `*_TIME` counters, the three time-model counters and `CAPV_SYSSTAT`.
+  One row per `(dbid, con_dbid, instance, source, stat_name, interval)` with
+  `end_time`, `prev_end_time`, `ivl_sec`, `delta`, `startup_time` and
+  `is_restart`. `is_restart = 'Y'` when the interval spans an **instance
+  restart** (`startup_time` differs from the previous snapshot's) or shows a
+  **negative delta** (counter reset). The startup test is
+  `DECODE(startup_time, prev_startup, ...)`, which treats two NULLs as equal:
+  a source that never fills `startup_time` keeps its series, where the old
+  `startup_time = prev_startup` test silently emptied it. The first snapshot
+  of each partition has no row. The CPU, DB time and redo views pivot these
+  rows per interval (grouping by `prev_end_time` too, so two counters pair up
+  only when they difference the same two snapshots) and keep `is_restart =
+  'N'`. Before this view the LAG and the guard were pasted three times.
+- **`CAPD_CPU_DAILY`** — `BUSY_TIME`/`IDLE_TIME` deltas from
+  `CAPD_COUNTER_DELTA`, restart intervals dropped. Per day:
   `busy% = 100·Σbusy_d / Σ(busy_d+idle_d)` — centisecond units cancel in the
   ratio. **Peak, not just average (M10.1):** the same per-interval deltas also
   give `busy_p95` (`PERCENTILE_CONT(0.95)` of the day's per-snapshot busy%),
@@ -126,16 +170,28 @@ row per day.
   busy hour" — what actually saturates while a 40% daily average hides it.
   `host_busy_sec` (Σbusy_d/100) is the denominator for a container's share of
   host CPU.
-- **`CAPD_DBTIME_DAILY`** — same delta+guard pattern over the time model →
-  `db_cpu_sec`, `db_time_sec`, `bg_cpu_sec` (÷1e6). `db_cpu_per_core` divides by
-  the host core count summed across instances from OSSTAT (falling back to
-  `NUM_CPUS`). **DB CPU as % of core capacity (M10.2):** `db_cpu_pct =
-  100·db_cpu_sec / (total_cores·86400)`, plus per-interval `db_cpu_p95_pct` /
+- **`CAPD_DBTIME_DAILY`** — the time-model deltas, same restart rule, per
+  container → `db_cpu_sec`, `db_time_sec`, `bg_cpu_sec` (÷1e6). In local mode
+  the root row is `CDB$ROOT` alone; the CDB's DB CPU is the sum over its rows.
+  `db_cpu_per_core` divides by the host core count summed across instances
+  from OSSTAT (falling back to `NUM_CPUS`). **DB CPU as % of logical-CPU
+  capacity (M10.2):** `db_cpu_pct = 100·db_cpu_sec / Σ(num_cpus·ivl_sec)` over
+  the day's valid intervals, plus per-interval `db_cpu_p95_pct` /
   `db_cpu_max_pct` / `db_cpu_peak_pct` (DB CPU seconds over the interval's
-  elapsed core-seconds, same peak-window rule). `host_share_pct =
-  100·db_cpu_sec / host busy seconds` (host busy summed over the `dbid`, since
-  OSSTAT records under the CDB's `con_dbid`) is the per-PDB share of what the
-  host was actually doing.
+  `num_cpus·ivl_sec`, same peak-window rule). The denominator is logical CPUs
+  (`NUM_CPUS`, else `NUM_CPU_CORES`) because Oracle accrues CPU time per
+  logical CPU, OSSTAT `BUSY_TIME`/`IDLE_TIME` are summed over `NUM_CPUS`, and
+  the AWR report's own %Total CPU divides by `NUM_CPUS`. Dividing by cores read
+  2× on a 2-way SMT host (4–8× on POWER / SPARC) and fired `DBCPU_SAT` at half
+  load. Now `db_cpu_pct = busy_pct · host_share_pct / 100`, the same scale as
+  host busy%. `num_cpus` is read per interval at its end snapshot (OSSTAT is
+  host level, so it is matched on `(dbid, instance, snap_id)` and serves every
+  container; a snapshot without an OSSTAT row uses the instance's last earlier
+  value), so a host resize no longer rewrites history. `num_cpus` /
+  `num_cpu_cores` are exposed per day (MAX per instance, summed across
+  instances). `host_share_pct = 100·db_cpu_sec / host busy seconds` (host busy
+  summed over the `dbid`, since OSSTAT records under the CDB's `con_dbid`) is
+  the per-PDB share of what the host was actually doing.
 
 **AWR gaps in the CPU series (M10.5).** A missing stretch of snapshots does not
 leave a hole in a counter series — the next snapshot simply differences against
@@ -152,8 +208,9 @@ the series — it is still data, and the forecast layer wants it — but:
   never masquerade as a peak hour; NULL if the day has no short interval at all.
 - the daily time-weighted averages (`busy_pct`, `db_cpu_pct`) still use **every**
   valid interval, so they stay honest about the counters that were actually
-  recorded — on a gap day `db_cpu_pct` legitimately reads high, and `gap_flag`
-  is the column that says "this day carries more than a day".
+  recorded. Both divide by the time covered, so neither reads high on a gap
+  day; the daily totals (`db_cpu_sec`, `host_busy_sec`, `REDO_GB_DAY`) do
+  carry more than a day, and `gap_flag` is the column that says so.
 - `CAPA_CPU_ANOM` and `CAPA_CPU_SHIFT` (Layer 4) drop gap days from their
   baselines and never flag one.
 
@@ -161,6 +218,27 @@ Why 12 hours and not something tighter: `gap_flag` *suppresses* anomaly
 scoring, so an over-sensitive default would silence the whole CPU anomaly layer
 on any site whose snapshot interval is wide. Half a day is comfortably above
 every realistic AWR interval and still catches real outages.
+
+**Day coverage.** A gap is one kind of incomplete day. Three others never
+raise `gap_flag`: the first day of AWR history, today (a row exists as soon as
+the first snapshot after midnight lands), and a restart or outage day, whose
+restart-spanning interval is dropped *before* `max_interval_hours` is taken.
+On such a day the flow totals (`db_cpu_sec`, `host_busy_sec`, `REDO_GB_DAY`)
+read low. So `CAPD_CPU_DAILY`, `CAPD_DBTIME_DAILY` and the `REDO_GB_DAY` rows
+of `CAPD_SERIES_DAILY` expose:
+
+- `covered_sec`: the seconds of valid (non-restart) intervals ending that
+  day, per instance (summed, then divided by the instances that reported).
+  86400 for a full day, 43200 for a day with one 12 h interval, more than
+  86400 on a gap day.
+- `is_complete`: `'Y'` when `covered_sec >= complete_day_pct/100 · 86400`
+  (knob, default 80), else `'N'`.
+
+`gap_flag` keeps its meaning. The level series of `CAPD_SERIES_DAILY`
+(`PROCESSES`, `SESSIONS`, `DB_SIZE_GB`) read one sample a day and carry
+`covered_sec` NULL and `is_complete = 'Y'`. The forecast and anomaly layers do
+not filter on `is_complete` yet; until they do, a partial day still enters fits
+and baselines with its low totals.
 
 All `LAG`s use inline `OVER (...)` (19c has no `WINDOW` clause).
 
@@ -249,7 +327,7 @@ land in one generic pair keyed by a `series` name, so the report, the alert
 view and any future series need no extra code.
 
 `CAPD_SERIES_DAILY (dbid, con_dbid, series, day_dt, value, limit_value, unit,
-n_samples)` — `ddl/25_series_daily.sql`, a UNION ALL of:
+n_samples, covered_sec, is_complete)` — `ddl/25_series_daily.sql`, a UNION ALL of:
 
 | series | value | limit_value | unit |
 | --- | --- | --- | --- |
@@ -264,10 +342,14 @@ n_samples)` — `ddl/25_series_daily.sql`, a UNION ALL of:
 - RAC: limits are per instance, so both the utilization and the ceiling are
   summed. If **any** instance's limit is non-numeric (`UNLIMITED`) the day's
   `limit_value` is NULL rather than an understated sum.
-- `REDO_GB_DAY` uses the identical diff-and-restart-guard as `CAPD_CPU_DAILY`
-  (LAG per `(dbid, con_dbid, instance)` by `snap_id`; drop the first snap of a
-  partition, negative deltas, and restart-spanning intervals). The delta is
-  attributed to the day the interval **ends** on.
+- `REDO_GB_DAY` sums the `redo size` rows of `CAPD_COUNTER_DELTA` with
+  `is_restart = 'N'`, the same rule as `CAPD_CPU_DAILY`. The delta is
+  attributed to the day the interval **ends** on. It is the one flow series
+  here, so it carries `covered_sec` / `is_complete` (Layer 2, day coverage);
+  the level series carry NULL / `'Y'`. In local mode it is per container (the
+  CDB's redo is the sum); in warehouse mode it is one CDB-level series.
+- `PROCESSES` / `SESSIONS` are CDB-wide: `DBA_HIST_RESOURCE_LIMIT` is
+  root-only in `CDB$ROOT`.
 - `DB_SIZE_GB` inherits everything `CAPD_TBSPC_DAILY` already decided: **UNDO
   and TEMPORARY are excluded**, and M9.5 overrides / exclusions are applied. So
   "total DB size" means permanent-tablespace bytes actually used.

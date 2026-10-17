@@ -29,15 +29,19 @@
 --                  the cliff and read 10 MiB/day, not the across-the-cliff
 --                  slope).
 --   CPU          : two snapshots per day (06:00 = the overnight interval,
---                  18:00 = the daytime/peak interval). Weekday 20% night /
+--                  18:00 = the daytime/peak interval) on an SMT host:
+--                  NUM_CPUS 8, NUM_CPU_CORES 4. Weekday 20% night /
 --                  60% day (daily avg 40%), weekend 10% / 30% (avg 20%), one
 --                  +30pt Tuesday (70%/70%), one restart at day 60 (startup_time
 --                  change + counter reset, morning snapshot missing so the
---                  whole day drops), and one PURE AWR GAP (a Sunday in 70..80
---                  whose two snapshots carry no osstat/time-model rows, so the
---                  next 06:00 interval spans 36 h). Exercises M10.1
---                  (p95/max/peak-window), M10.2 (DB CPU % of cores) and M10.5
---                  (gap_flag / max_interval_hours / day_gap) closed forms.
+--                  whole day drops), one PARTIAL day (a weekday in 14..20
+--                  whose instance restarts at noon: only its 06:00 interval
+--                  survives, 12 h of 24), and one PURE AWR GAP (a Sunday in
+--                  70..80 whose two snapshots carry no osstat/time-model rows,
+--                  so the next 06:00 interval spans 36 h). Exercises M10.1
+--                  (p95/max/peak-window), M10.2 (DB CPU % of logical CPUs),
+--                  M10.5 (gap_flag / max_interval_hours / day_gap) and the
+--                  covered_sec / is_complete closed forms.
 --   PDB CPU      : a SECOND container (FIXPDB1, con_dbid 42424243) with
 --                  time-model rows ONLY -- a 7-day 34..46% DB CPU sawtooth
 --                  that steps +18 points for the last 7 days. The M10.3
@@ -118,7 +122,11 @@ DECLARE
     -- day, i.e. OUTSIDE the 14-day anomaly_report_days alert window.
     c_purge  CONSTANT PLS_INTEGER := 90;
     c_purgeb CONSTANT NUMBER      := 76800;       -- 600 MiB in 8 KiB blocks
-    c_tot_cs CONSTANT NUMBER := 4 * 86400 * 100;  -- 34,560,000 cs/day (4 CPUs)
+    -- BUSY_TIME + IDLE_TIME are summed over NUM_CPUS (logical CPUs), so a day
+    -- holds 8 * 86400 * 100 cs. NUM_CPU_CORES = 4: a 2-way SMT host.
+    c_ncpu   CONSTANT NUMBER := 8;
+    c_ncore  CONSTANT NUMBER := 4;
+    c_tot_cs CONSTANT NUMBER := c_ncpu * 86400 * 100;  -- 69,120,000 cs/day
     -- 50 GiB as a literal NUMBER: 50*1024*1024*1024 as integer-literal
     -- arithmetic overflows PLS_INTEGER (>2^31) before the NUMBER assignment.
     c_50g    CONSTANT NUMBER := 53687091200;
@@ -147,6 +155,20 @@ DECLARE
     --   * it is far from the restart day (60), the probe day (>=115) and the
     --     M10.3 shift windows (86..120).
     v_cpugap PLS_INTEGER;
+    -- The PARTIAL day: a weekday in 14..20 whose instance restarts at noon.
+    -- Its 06:00 interval is valid, its 18:00 one spans the restart and is
+    -- dropped, so the day covers 12 h and reads is_complete = 'N' with
+    -- gap_flag = 'N'. Placed before the train_days window (31..120) so no
+    -- fit or alert moves, and with at most two same-weekday priors so its
+    -- low busy% cannot flag (cpu_min_dow_hist = 3).
+    v_partial PLS_INTEGER;
+    v_startp TIMESTAMP;
+    -- Local functions cannot be called inside SQL (PLS-00231), so the meta
+    -- values that need fnight() / pdb_pct() go through these.
+    v_pnight NUMBER;
+    v_ppdb   NUMBER;
+    v_prpdb  NUMBER;
+    v_gpdb   NUMBER;
     -- M10.3: the second container (FIXPDB1, con_dbid c_con + 1) and its
     -- DB CPU level-shift series. See the block comment at the CPU counters.
     c_pdb    CONSTANT NUMBER      := 42424243;    -- = c_con + 1
@@ -176,7 +198,7 @@ DECLARE
     END;
 
     -- M10.3: the FIXPDB1 container's DB CPU level, in percent of the host's
-    -- 4 cores, for day index p_i. A 7-day sawtooth 34,36,38,40,42,44,46 keyed
+    -- 8 logical CPUs, for day index p_i. A 7-day sawtooth 34,36,38,40,42,44,46 keyed
     -- off MOD(i,7): ANY 7 consecutive days contain each offset exactly once,
     -- so a 7-day median is exactly 40 and a 28-day (4 x 7) median is too --
     -- the medians are closed forms, not approximations. The sawtooth also
@@ -237,6 +259,12 @@ BEGIN
     FOR i IN REVERSE 70 .. 80 LOOP
         IF MOD(TRUNC(v_base + i) - DATE '2020-01-06', 7) = 6 THEN v_cpugap := i; EXIT; END IF;
     END LOOP;
+    -- Partial day = the latest weekday (dow 0..4) in 14..20.
+    v_partial := NULL;
+    FOR i IN REVERSE 14 .. 20 LOOP
+        IF MOD(TRUNC(v_base + i) - DATE '2020-01-06', 7) < 5 THEN v_partial := i; EXIT; END IF;
+    END LOOP;
+    v_startp := CAST(v_base + v_partial + 12/24 AS TIMESTAMP);
 
     -- ---- dimensions ----
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 10, 'FIX_LINEAR',   'PERMANENT', c_bs);
@@ -274,14 +302,19 @@ BEGIN
     -- instance was down overnight, so the 06:00 snapshot does not exist and
     -- the 18:00 one carries the new startup_time + reset counters: the single
     -- interval that day spans the restart and is dropped by the guard.
+    -- On the partial day the instance restarts at noon, so its 06:00
+    -- snapshot keeps the old startup_time and its 18:00 one has the new.
     FOR i IN 0 .. c_nd LOOP
-        v_start := CASE WHEN i < c_restart THEN v_start1 ELSE v_start2 END;
+        v_start := CASE WHEN i <= v_partial  THEN v_start1
+                        WHEN i <  c_restart  THEN v_startp
+                        ELSE                      v_start2 END;
         IF i <> c_restart THEN
             INSERT INTO cap_fixture_snapshot
             VALUES (c_dbid, c_con, c_inst, 2000 + 2 * i,
                     CAST(v_base + i - 6/24 AS TIMESTAMP),
                     CAST(v_base + i + 6/24 AS TIMESTAMP), v_start);
         END IF;
+        IF i = v_partial THEN v_start := v_startp; END IF;
         INSERT INTO cap_fixture_snapshot
         VALUES (c_dbid, c_con, c_inst, 2001 + 2 * i,
                 CAST(v_base + i + 6/24 AS TIMESTAMP),
@@ -394,9 +427,13 @@ BEGIN
         -- M10.3 SECOND CONTAINER (FIXPDB1). Time-model rows only, split evenly
         -- over the two 12 h intervals so the per-interval percentage equals
         -- the daily one (p95 = avg, nothing to reason about). Daily
-        -- db_cpu_pct = 100 * db_cpu_sec / (4 cores * 86400 s), so a level of
-        -- L points needs L * 3456 CPU-seconds a day, i.e. L * 1728 per
-        -- interval. pdb_pct() supplies L.
+        -- db_cpu_pct = 100 * db_cpu_sec / (8 logical CPUs * 86400 s), so a
+        -- level of L points needs L * 6912 CPU-seconds a day, i.e. L * 3456
+        -- per interval. pdb_pct() supplies L.
+        --
+        -- PARTIAL DAY. The 06:00 rows are written as usual, then every
+        -- counter resets before the 18:00 rows, which carry the new
+        -- startup_time: that interval is a restart and is dropped.
         IF i = c_restart THEN
             v_busy := 0; v_idle := 0; v_dbcpu := 0; v_dbtime := 0; v_bg := 0;
             v_pcpu := 0; v_ptime := 0; v_pbg := 0;
@@ -406,14 +443,14 @@ BEGIN
             v_dbcpu  := v_dbcpu  + fnight(i) * 500 * 1000000;
             v_dbtime := v_dbtime + fnight(i) * 600 * 1000000;
             v_bg     := v_bg     + 25 * 1000000;
-            v_pcpu   := v_pcpu   + pdb_pct(i) * 1728 * 1000000;
-            v_ptime  := v_ptime  + pdb_pct(i) * 1728 * 1.2 * 1000000;
+            v_pcpu   := v_pcpu   + pdb_pct(i) * 3456 * 1000000;
+            v_ptime  := v_ptime  + pdb_pct(i) * 3456 * 1.2 * 1000000;
             v_pbg    := v_pbg    + 25 * 1000000;
             IF i <> v_cpugap THEN
                 osstat(2000 + 2 * i, 'BUSY_TIME', v_busy);
                 osstat(2000 + 2 * i, 'IDLE_TIME', v_idle);
-                osstat(2000 + 2 * i, 'NUM_CPUS', 4);
-                osstat(2000 + 2 * i, 'NUM_CPU_CORES', 4);
+                osstat(2000 + 2 * i, 'NUM_CPUS', c_ncpu);
+                osstat(2000 + 2 * i, 'NUM_CPU_CORES', c_ncore);
                 tmodel(2000 + 2 * i, 'DB CPU', v_dbcpu);
                 tmodel(2000 + 2 * i, 'DB time', v_dbtime);
                 tmodel(2000 + 2 * i, 'background cpu time', v_bg);
@@ -422,19 +459,23 @@ BEGIN
             ptmodel(2000 + 2 * i, 'DB time', v_ptime);
             ptmodel(2000 + 2 * i, 'background cpu time', v_pbg);
         END IF;
+        IF i = v_partial THEN
+            v_busy := 0; v_idle := 0; v_dbcpu := 0; v_dbtime := 0; v_bg := 0;
+            v_pcpu := 0; v_ptime := 0; v_pbg := 0;
+        END IF;
         v_busy   := v_busy   + fday(i) * c_tot_cs / 2;
         v_idle   := v_idle   + (1 - fday(i)) * c_tot_cs / 2;
         v_dbcpu  := v_dbcpu  + fday(i) * 500 * 1000000;
         v_dbtime := v_dbtime + fday(i) * 600 * 1000000;
         v_bg     := v_bg     + 25 * 1000000;
-        v_pcpu   := v_pcpu   + pdb_pct(i) * 1728 * 1000000;
-        v_ptime  := v_ptime  + pdb_pct(i) * 1728 * 1.2 * 1000000;
+        v_pcpu   := v_pcpu   + pdb_pct(i) * 3456 * 1000000;
+        v_ptime  := v_ptime  + pdb_pct(i) * 3456 * 1.2 * 1000000;
         v_pbg    := v_pbg    + 25 * 1000000;
         IF i <> v_cpugap THEN
             osstat(2001 + 2 * i, 'BUSY_TIME', v_busy);
             osstat(2001 + 2 * i, 'IDLE_TIME', v_idle);
-            osstat(2001 + 2 * i, 'NUM_CPUS', 4);
-            osstat(2001 + 2 * i, 'NUM_CPU_CORES', 4);
+            osstat(2001 + 2 * i, 'NUM_CPUS', c_ncpu);
+            osstat(2001 + 2 * i, 'NUM_CPU_CORES', c_ncore);
             tmodel(2001 + 2 * i, 'DB CPU', v_dbcpu);
             tmodel(2001 + 2 * i, 'DB time', v_dbtime);
             tmodel(2001 + 2 * i, 'background cpu time', v_bg);
@@ -445,6 +486,10 @@ BEGIN
     END LOOP;
 
     -- ---- expected values / key dates for run_test.sql ----
+    v_pnight := fnight(v_partial);
+    v_ppdb   := pdb_pct(v_partial);
+    v_prpdb  := pdb_pct(v_probe);
+    v_gpdb   := pdb_pct(v_cpugap);
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBID', c_dbid);
     INSERT INTO cap_fixture_meta (mkey, dval) VALUES ('BASE_DAY',    v_base);
     INSERT INTO cap_fixture_meta (mkey, dval) VALUES ('LAST_DAY',    v_base + c_nd);
@@ -458,11 +503,28 @@ BEGIN
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_PROBE_P95',  58);     -- PERCENTILE_CONT(.95) of {20,60}
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_PROBE_MAX',  60);
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_PROBE_PEAK', 60);     -- daytime interval only
-    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_PROBE_HOST_BUSY_SEC', 0.40 * 4 * 86400);   -- 138240
+    -- DB CPU percentages divide by LOGICAL CPUs (8), not cores (4).
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_PROBE_HOST_BUSY_SEC', 0.40 * c_ncpu * 86400);   -- 276480
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_SEC', 400);  -- 0.2*500 + 0.6*500
-    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_PCT', 100 * 400 / (4 * 86400));           -- 0.1157
-    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_PEAK_PCT', 100 * 300 / (4 * 43200));      -- 0.1736
-    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_HOST_SHARE', 100 * 400 / (0.40 * 4 * 86400)); -- 0.2894
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_PCT', 100 * 400 / (c_ncpu * 86400));           -- 0.0579
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_PEAK_PCT', 100 * 300 / (c_ncpu * 43200));      -- 0.0868
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_HOST_SHARE', 100 * 400 / (0.40 * c_ncpu * 86400)); -- 0.1447
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_PER_CORE', 400 / c_ncore);                      -- 100
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DBCPU_PROBE_PCT_CORES', 100 * 400 / (c_ncore * 86400));    -- 0.1157, NUM_CPUS deleted
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('NUM_CPUS', c_ncpu);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('NUM_CPU_CORES', c_ncore);
+    -- Coverage closed forms. A full day is two valid 12 h intervals. The
+    -- partial day keeps only its 06:00 interval (weekday night, 20% busy,
+    -- 0.2 * 500 s of DB CPU), and so does the first day of the series,
+    -- whose 06:00 snapshot has no predecessor.
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('FULL_COVERED_SEC', 86400);
+    INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('PARTIAL_DAY', v_base + v_partial, v_partial);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PARTIAL_COVERED_SEC', 43200);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PARTIAL_BUSY_PCT', 100 * v_pnight);                     -- 20
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PARTIAL_DBCPU_PCT',
+        100 * v_pnight * 500 / (c_ncpu * 43200));                                                              -- 0.0289
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_PARTIAL_PCT', v_ppdb);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_PROBE_PCT',   v_prpdb);
     -- M10.5 gap closed forms. The gap day itself vanishes; the day AFTER it
     -- carries one 36 h interval (Sunday night 0.10 + Sunday day 0.30 + Monday
     -- night 0.20 = 0.60 of three half-days) plus the normal 12 h Monday
@@ -479,6 +541,14 @@ BEGIN
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPUGAP_DAYGAP',    2);
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPUGAP_BUSY_PCT', 30);
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPUGAP_P95',      60);
+    -- The post-gap day covers 36 h + 12 h. Its DB CPU is (0.10 + 0.30 +
+    -- 0.20) * 500 s over the long interval plus 0.60 * 500 s over the short
+    -- one, and db_cpu_pct divides by the 48 h actually covered.
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPUGAP_COVERED_SEC', 48 * 3600);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPUGAP_DBCPU_PCT', 100 * 600 / (c_ncpu * 48 * 3600));  -- 0.0434
+    -- FIXPDB1 keeps time-model rows on the gap day, where OSSTAT has none:
+    -- its NUM_CPUS is carried forward from the previous snapshot.
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_GAP_PCT', v_gpdb);
     -- M10.3 level-shift closed forms for the FIXPDB1 container. The 7-day
     -- sawtooth means both medians are exact: 40 over any whole number of
     -- weeks, 58 over the shifted last 7 days.
@@ -642,7 +712,8 @@ BEGIN
         || ' spike=' || TO_CHAR(v_base + c_spike,'YYYY-MM-DD')
         || ' inj_tue=' || TO_CHAR(v_base + v_inj,'YYYY-MM-DD Dy')
         || ' probe=' || TO_CHAR(v_base + v_probe,'YYYY-MM-DD Dy')
-        || ' cpu_gap=' || TO_CHAR(v_base + v_cpugap,'YYYY-MM-DD Dy'));
+        || ' cpu_gap=' || TO_CHAR(v_base + v_cpugap,'YYYY-MM-DD Dy')
+        || ' partial=' || TO_CHAR(v_base + v_partial,'YYYY-MM-DD Dy'));
 END;
 /
 
@@ -657,6 +728,8 @@ END;
 -- 18:00 -- including the restart-day hole (i = 60 has no 06:00 snapshot, and
 -- the counters reset), so the redo counter meets exactly the same restart
 -- guard the CPU counters do and the restart day produces no REDO_GB_DAY row.
+-- The redo counter also resets at the noon restart of the partial day, which
+-- therefore reads 1 GiB over 12 h (is_complete = 'N').
 --
 -- Closed forms (assume the shipped knobs train_days = 90, series_sat_pct = 90):
 --   SESSIONS   max_utilization = 200 + 2*i, limit 500 -> slope exactly 2/day,
@@ -681,6 +754,7 @@ DECLARE
     c_satpct CONSTANT NUMBER := 90;               -- shipped series_sat_pct
     v_redo   NUMBER := 0;
     v_probe  PLS_INTEGER;
+    v_partial PLS_INTEGER;
 
     PROCEDURE rlim(p_snap NUMBER, p_name VARCHAR2, p_cur NUMBER,
                    p_max NUMBER, p_lim NUMBER) IS
@@ -701,7 +775,8 @@ DECLARE
         rlim(p_snap, 'processes', 120,           150,           c_proclim);
     END;
 BEGIN
-    SELECT nval INTO v_probe FROM cap_fixture_meta WHERE mkey = 'PROBE_DAY';
+    SELECT nval INTO v_probe   FROM cap_fixture_meta WHERE mkey = 'PROBE_DAY';
+    SELECT nval INTO v_partial FROM cap_fixture_meta WHERE mkey = 'PARTIAL_DAY';
 
     FOR i IN 0 .. c_nd LOOP
         -- Resource limits: sampled at every snapshot that exists.
@@ -721,6 +796,7 @@ BEGIN
             -- to be absurd on the redo scale, so a missing filter is loud.
             sstat(2000 + 2 * i, 'user commits', 987654321 + i);
         END IF;
+        IF i = v_partial THEN v_redo := 0; END IF;
         v_redo := v_redo + c_gib;
         sstat(2001 + 2 * i, 'redo size', v_redo);
         sstat(2001 + 2 * i, 'user commits', 987654321 + i);
@@ -734,6 +810,7 @@ BEGIN
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PROC_CUR',   150);
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PROC_LIMIT', c_proclim);
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('REDO_PROBE_GB', 2);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('REDO_PARTIAL_GB', 1);
     COMMIT;
 
     DBMS_OUTPUT.PUT_LINE('M11 fixtures loaded: sessions 200..'

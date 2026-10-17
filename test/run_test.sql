@@ -294,7 +294,7 @@ BEGIN
       WHERE dbid = v_dbid AND metric = 'DB_CPU_SEC' AND days_to_sat IS NOT NULL;
     chk_int('DB_CPU_SEC has no days_to_sat (no ceiling)', v_n, 0);
 
-    DBMS_OUTPUT.PUT_LINE('=== M10.2 DB CPU as % of core capacity ===');
+    DBMS_OUTPUT.PUT_LINE('=== M10.2 DB CPU as % of logical-CPU capacity ===');
     SELECT db_cpu_sec, db_cpu_pct, db_cpu_peak_pct, host_share_pct
       INTO v_num, v_num2, v_num3, v_r2
       FROM capd_dbtime_daily
@@ -801,6 +801,229 @@ BEGIN
     EXCEPTION
         WHEN OTHERS THEN
             fail('M10.3/M10.5 block raised ' || SQLERRM);
+    END;
+
+    -- Seam / daily-layer contract: one counter-delta view, coverage columns,
+    -- the logical-CPU denominator and CAPV_CONTRACT. Every expectation is a
+    -- closed form recorded by fixture_install.sql.
+    DECLARE
+        d_part  DATE   := meta_d('PARTIAL_DAY');
+        d_base  DATE   := meta_d('BASE_DAY');
+        d_last  DATE   := meta_d('LAST_DAY');
+        d_gap   DATE   := meta_d('CPUGAP_DAY');
+        d_gnext DATE   := meta_d('CPUGAP_NEXT');
+        n_pdb   NUMBER := meta_n('PDB_CON_DBID');
+        n_full  NUMBER := meta_n('FULL_COVERED_SEC');
+        n_half  NUMBER := meta_n('PARTIAL_COVERED_SEC');
+        n_snaps NUMBER := 2 * (meta_d('LAST_DAY') - meta_d('BASE_DAY') + 1) - 1;
+        v_c     VARCHAR2(1);
+        v_g     VARCHAR2(1);
+        v_a     NUMBER;
+        v_b     NUMBER;
+        v_cnt0  NUMBER;
+        v_ts    DATE;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('=== logical-CPU denominator (NUM_CPUS 8, NUM_CPU_CORES 4) ===');
+        SELECT num_cpus, num_cpu_cores, db_cpu_per_core, db_cpu_pct, host_share_pct
+          INTO v_num, v_num2, v_num3, v_a, v_b
+          FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_probe;
+        chk_int  ('DBTIME probe num_cpus (logical)', v_num,  meta_n('NUM_CPUS'));
+        chk_int  ('DBTIME probe num_cpu_cores',      v_num2, meta_n('NUM_CPU_CORES'));
+        chk_close('DBTIME probe db_cpu_per_core stays on cores (400 s / 4)',
+                  v_num3, meta_n('DBCPU_PROBE_PER_CORE'), 0.000001);
+        SELECT busy_pct INTO v_num FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_probe;
+        chk_close('db_cpu_pct = busy_pct * host_share_pct / 100 (same scale as host busy%)',
+                  v_a, v_num * v_b / 100, 0.000001);
+        SELECT db_cpu_pct INTO v_num FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND day_dt = d_probe;
+        chk_close('PDB probe db_cpu_pct (sawtooth level of 8 logical CPUs)',
+                  v_num, meta_n('PDB_PROBE_PCT'), 0.000001);
+        -- The gap day has no OSSTAT row at all, but FIXPDB1 still has its
+        -- time model there: NUM_CPUS comes from the previous snapshot.
+        SELECT db_cpu_pct, num_cpus INTO v_num, v_num2 FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND day_dt = d_gap;
+        chk_close('PDB gap-day db_cpu_pct (NUM_CPUS carried forward)',
+                  v_num, meta_n('PDB_GAP_PCT'), 0.000001);
+        chk_int  ('PDB gap-day num_cpus carried forward', v_num2, meta_n('NUM_CPUS'));
+        -- No NUM_CPUS at all: the denominator falls back to NUM_CPU_CORES.
+        SAVEPOINT u3_ncpu;
+        BEGIN
+            DELETE FROM cap_fixture_osstat WHERE stat_name = 'NUM_CPUS';
+            SELECT db_cpu_pct INTO v_num FROM capd_dbtime_daily
+              WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_probe;
+            chk_close('db_cpu_pct with NUM_CPUS missing (falls back to 4 cores)',
+                      v_num, meta_n('DBCPU_PROBE_PCT_CORES'), 0.000001);
+        EXCEPTION
+            WHEN OTHERS THEN ROLLBACK TO SAVEPOINT u3_ncpu; RAISE;
+        END;
+        ROLLBACK TO SAVEPOINT u3_ncpu;
+
+        DBMS_OUTPUT.PUT_LINE('=== day coverage (covered_sec / is_complete) ===');
+        SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'complete_day_pct';
+        chk_int('knob complete_day_pct default', v_num, 80);
+        -- The partial day: its noon restart drops the 18:00 interval, so only
+        -- the 12 h night interval is left. No long interval, so no gap flag.
+        SELECT covered_sec, is_complete, gap_flag, max_interval_hours, n_intervals, busy_pct
+          INTO v_num, v_c, v_g, v_num2, v_n, v_num3
+          FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_part;
+        chk_int  ('CPU partial day covered_sec (12 h)', v_num, n_half);
+        chk_str  ('CPU partial day is_complete', v_c, 'N');
+        chk_str  ('CPU partial day gap_flag stays N', v_g, 'N');
+        chk_close('CPU partial day max_interval_hours', v_num2, 12, 0.000001);
+        chk_int  ('CPU partial day n_intervals', v_n, 1);
+        chk_close('CPU partial day busy_pct (night interval only)',
+                  v_num3, meta_n('PARTIAL_BUSY_PCT'), 0.000001);
+        SELECT covered_sec, is_complete, db_cpu_pct INTO v_num, v_c, v_num2
+          FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_part;
+        chk_int  ('DBTIME partial day covered_sec', v_num, n_half);
+        chk_str  ('DBTIME partial day is_complete', v_c, 'N');
+        chk_close('DBTIME partial day db_cpu_pct (over the 12 h covered)',
+                  v_num2, meta_n('PARTIAL_DBCPU_PCT'), 0.000001);
+        SELECT covered_sec, is_complete, db_cpu_pct INTO v_num, v_c, v_num2
+          FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND day_dt = d_part;
+        chk_int  ('PDB partial day covered_sec', v_num, n_half);
+        chk_str  ('PDB partial day is_complete', v_c, 'N');
+        chk_close('PDB partial day db_cpu_pct (level unchanged by coverage)',
+                  v_num2, meta_n('PDB_PARTIAL_PCT'), 0.000001);
+        SELECT value, covered_sec, is_complete INTO v_num, v_num2, v_c
+          FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'REDO_GB_DAY' AND day_dt = d_part;
+        chk_close('REDO partial day GiB (one 1 GiB interval)', v_num, meta_n('REDO_PARTIAL_GB'), 0.000001);
+        chk_int  ('REDO partial day covered_sec', v_num2, n_half);
+        chk_str  ('REDO partial day is_complete', v_c, 'N');
+
+        -- A normal day is complete in all three flow views.
+        SELECT covered_sec, is_complete INTO v_num, v_c FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_probe;
+        chk_int('CPU probe day covered_sec', v_num, n_full);
+        chk_str('CPU probe day is_complete', v_c, 'Y');
+        SELECT covered_sec, is_complete INTO v_num, v_c FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_probe;
+        chk_int('DBTIME probe day covered_sec', v_num, n_full);
+        chk_str('DBTIME probe day is_complete', v_c, 'Y');
+        SELECT covered_sec, is_complete INTO v_num, v_c FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'REDO_GB_DAY' AND day_dt = d_probe;
+        chk_int('REDO probe day covered_sec', v_num, n_full);
+        chk_str('REDO probe day is_complete', v_c, 'Y');
+
+        -- The first day of history: its 06:00 snapshot has no predecessor.
+        SELECT covered_sec, is_complete INTO v_num, v_c FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_base;
+        chk_int('CPU first day covered_sec (series start)', v_num, n_half);
+        chk_str('CPU first day is_complete', v_c, 'N');
+
+        -- The post-gap day covers 48 h. It is complete, gap-flagged, and its
+        -- db_cpu_pct is the average over those 48 h.
+        SELECT covered_sec, is_complete INTO v_num, v_c FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_gnext;
+        chk_int('CPU post-gap day covered_sec (36 h + 12 h)', v_num, meta_n('CPUGAP_COVERED_SEC'));
+        chk_str('CPU post-gap day is_complete', v_c, 'Y');
+        SELECT covered_sec, db_cpu_pct INTO v_num, v_num2 FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_gnext;
+        chk_int  ('DBTIME post-gap day covered_sec', v_num, meta_n('CPUGAP_COVERED_SEC'));
+        chk_close('DBTIME post-gap day db_cpu_pct (over 48 h covered)',
+                  v_num2, meta_n('CPUGAP_DBCPU_PCT'), 0.000001);
+
+        -- Exactly two incomplete days per flow series: the first day and the
+        -- partial day (the restart day and the gap day have no row at all).
+        SELECT COUNT(*) INTO v_n FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND is_complete = 'N';
+        chk_int('CPU incomplete days (first + partial)', v_n, 2);
+        SELECT COUNT(*) INTO v_n FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND is_complete = 'N';
+        chk_int('DBTIME root incomplete days', v_n, 2);
+        SELECT COUNT(*) INTO v_n FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND is_complete = 'N';
+        chk_int('DBTIME PDB incomplete days', v_n, 2);
+        SELECT COUNT(*) INTO v_n FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'REDO_GB_DAY' AND is_complete = 'N';
+        chk_int('REDO incomplete days', v_n, 2);
+        SELECT COUNT(*) INTO v_n FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'REDO_GB_DAY'
+            AND (covered_sec IS NULL
+                 OR is_complete <> CASE WHEN covered_sec >= 0.80 * 86400 THEN 'Y' ELSE 'N' END);
+        chk_int('REDO is_complete agrees with covered_sec on every row', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capd_series_daily
+          WHERE series IN ('PROCESSES','SESSIONS','DB_SIZE_GB')
+            AND (covered_sec IS NOT NULL OR is_complete <> 'Y');
+        chk_int('level series carry covered_sec NULL, is_complete Y', v_n, 0);
+
+        DBMS_OUTPUT.PUT_LINE('=== CAPD_COUNTER_DELTA (one LAG + restart rule) ===');
+        -- The restart day holds one interval per counter source, and it is
+        -- the restart: none survives, which is why the day has no CPU row.
+        FOR r IN (SELECT 'OSSTAT' AS src, v_dbid AS con FROM dual
+                  UNION ALL SELECT 'TIME_MODEL', v_dbid FROM dual
+                  UNION ALL SELECT 'SYSSTAT',    v_dbid FROM dual
+                  UNION ALL SELECT 'TIME_MODEL', n_pdb  FROM dual) LOOP
+            SELECT COUNT(DISTINCT CASE WHEN is_restart = 'Y' THEN snap_id END),
+                   COUNT(DISTINCT CASE WHEN is_restart = 'N' THEN snap_id END)
+              INTO v_a, v_b
+              FROM capd_counter_delta
+              WHERE dbid = v_dbid AND con_dbid = r.con AND source = r.src
+                AND TRUNC(end_time) = d_restart;
+            chk_int(r.src || ' con ' || r.con || ' restart-day is_restart=Y intervals', v_a, 1);
+            chk_int(r.src || ' con ' || r.con || ' restart-day is_restart=N intervals', v_b, 0);
+        END LOOP;
+        SELECT MAX(ivl_sec) INTO v_num FROM capd_counter_delta
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND source = 'OSSTAT'
+            AND TRUNC(end_time) = d_restart;
+        chk_int('restart interval spans 24 h (18:00 to 18:00)', v_num, 86400);
+        SELECT COUNT(*) INTO v_n FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND day_dt = d_restart;
+        chk_int('excluding is_restart=Y leaves no CPU row on the restart day', v_n, 0);
+        -- Over the whole series: the day-60 restart and the partial day's.
+        SELECT COUNT(DISTINCT snap_id) INTO v_n FROM capd_counter_delta
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND source = 'OSSTAT' AND is_restart = 'Y';
+        chk_int('OSSTAT restart intervals in the series', v_n, 2);
+
+        -- NULL startup_time (a warehouse may not fill it): the series must
+        -- survive, with restarts still caught by their negative deltas.
+        SELECT COUNT(*) INTO v_cnt0 FROM capd_cpu_daily WHERE dbid = v_dbid;
+        SAVEPOINT u3_nullstart;
+        BEGIN
+            UPDATE cap_fixture_snapshot SET startup_time = NULL;
+            SELECT COUNT(*) INTO v_n FROM capd_cpu_daily WHERE dbid = v_dbid;
+            chk_int('CPU rows with startup_time NULL = rows with it set', v_n, v_cnt0);
+            SELECT COUNT(DISTINCT snap_id) INTO v_n FROM capd_counter_delta
+              WHERE dbid = v_dbid AND con_dbid = v_dbid AND source = 'OSSTAT' AND is_restart = 'Y';
+            chk_int('restarts found by negative delta with startup_time NULL', v_n, 2);
+        EXCEPTION
+            WHEN OTHERS THEN ROLLBACK TO SAVEPOINT u3_nullstart; RAISE;
+        END;
+        ROLLBACK TO SAVEPOINT u3_nullstart;
+
+        DBMS_OUTPUT.PUT_LINE('=== CAPV_CONTRACT ===');
+        SELECT COUNT(*) INTO v_n FROM capv_contract;
+        chk_int('CAPV_CONTRACT one row per seam source', v_n, 6);
+        SELECT COUNT(*) INTO v_n FROM capv_contract
+          WHERE (source_name IN ('TBSPC_USAGE','TIME_MODEL','SYSSTAT')       AND per_container_expected = 'Y')
+             OR (source_name IN ('OSSTAT','RESOURCE_LIMIT','SNAPSHOT')       AND per_container_expected = 'N');
+        chk_int('CAPV_CONTRACT per_container_expected as specified', v_n, 6);
+        -- 121 days x 2 snapshots, minus the restart day's missing 06:00.
+        SELECT n_rows, max_snap_id, CAST(max_end_time AS DATE) INTO v_num, v_num2, v_ts
+          FROM capv_contract WHERE source_name = 'SNAPSHOT';
+        chk_int('CAPV_CONTRACT SNAPSHOT n_rows', v_num, n_snaps);
+        chk_int('CAPV_CONTRACT SNAPSHOT max_snap_id', v_num2, 2001 + 2 * (d_last - d_base));
+        chk_true('CAPV_CONTRACT SNAPSHOT max_end_time = last day 18:00',
+                 v_ts = d_last + 18/24);
+        -- OSSTAT: 4 names on every snapshot but the two of the gap day.
+        SELECT n_rows, n_con_dbid INTO v_num, v_num2
+          FROM capv_contract WHERE source_name = 'OSSTAT';
+        chk_int('CAPV_CONTRACT OSSTAT n_rows', v_num, 4 * (n_snaps - 2));
+        chk_int('CAPV_CONTRACT OSSTAT n_con_dbid (host level)', v_num2, 1);
+        -- TIME_MODEL: 3 names, root on the OSSTAT snapshots, FIXPDB1 on all.
+        SELECT n_rows, n_con_dbid INTO v_num, v_num2
+          FROM capv_contract WHERE source_name = 'TIME_MODEL';
+        chk_int('CAPV_CONTRACT TIME_MODEL n_rows', v_num, 3 * (n_snaps - 2) + 3 * n_snaps);
+        chk_int('CAPV_CONTRACT TIME_MODEL n_con_dbid (root + FIXPDB1)', v_num2, 2);
+    EXCEPTION
+        WHEN OTHERS THEN
+            fail('seam/daily contract block raised ' || SQLERRM);
     END;
 
     BEGIN
