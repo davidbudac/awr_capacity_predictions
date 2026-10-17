@@ -21,6 +21,7 @@ DECLARE
     -- OR REPLACE handles order on install -- but keeps DBA_DEPENDENCIES clean).
     TYPE name_list IS TABLE OF VARCHAR2(30);
     v_views name_list := name_list(
+        'CAPR_ALERTS',
         'CAPR_FORECAST_POINTS',
         'CAPR_BACKTEST',
         'CAPR_ESM_COMPARE',
@@ -35,7 +36,8 @@ DECLARE
         'CAPR_TBSPC_DAYS_TO_FULL',
         'CAPR_SERIES_ANOMALIES',
         'CAPR_SERIES',
-        'CAPR_ALERTS',
+        'CAPR_SEVERITY',
+        'CAPR_FRESHNESS',
         'CAPR_ANOMALIES',
         'CAPR_CONTAINER',
         'CAPF_SERIES_FORECAST',

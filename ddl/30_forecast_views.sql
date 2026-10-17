@@ -196,6 +196,7 @@ WITH d AS (
         SELECT dbid, con_dbid, tablespace_name, day_dt,
                day_dt - DATE '2020-01-01' AS day_n,
                used_bytes, limit_bytes, limit_source,
+               ovr_dtf_warn, ovr_dtf_crit, ovr_nearfull_warn_pct, ovr_nearfull_crit_pct,
                used_bytes - LAG(used_bytes) OVER (PARTITION BY dbid, con_dbid, tablespace_name
                                                   ORDER BY day_dt) AS used_delta
         FROM   capd_tbspc_daily
@@ -542,7 +543,12 @@ WITH d AS (
                MAX(limit_bytes) KEEP (DENSE_RANK LAST ORDER BY day_dt) AS limit_bytes,
                -- M9.5: where limit_bytes came from (OVERRIDE | AUTOEXTEND |
                -- ALLOCATED), so the report can flag a hand-set ceiling.
-               MAX(limit_source) KEEP (DENSE_RANK LAST ORDER BY day_dt) AS limit_source
+               MAX(limit_source) KEEP (DENSE_RANK LAST ORDER BY day_dt) AS limit_source,
+               -- Per-series constants (one override row per tablespace).
+               MAX(ovr_dtf_warn)          AS ovr_dtf_warn,
+               MAX(ovr_dtf_crit)          AS ovr_dtf_crit,
+               MAX(ovr_nearfull_warn_pct) AS ovr_nearfull_warn_pct,
+               MAX(ovr_nearfull_crit_pct) AS ovr_nearfull_crit_pct
         FROM   d
         GROUP  BY dbid, con_dbid, tablespace_name
      ),
@@ -677,7 +683,12 @@ SELECT f.dbid,
        f.last_day
          + CASE WHEN f.is_cyclic = 0 AND f.ci_slope > 0 AND f.use_ci IS NOT NULL
                 THEN GREATEST(0, FLOOR((c.limit_bytes - c.cur_used) / (f.ci_slope + f.use_ci)))
-           END                                            AS add_by_day
+           END                                            AS add_by_day,
+       -- CAP_TBSPC_OVERRIDE alert thresholds, NULL = the global knob.
+       c.ovr_dtf_warn,
+       c.ovr_dtf_crit,
+       c.ovr_nearfull_warn_pct,
+       c.ovr_nearfull_crit_pct
 FROM   fin f
 JOIN   cur  c ON c.dbid = f.dbid AND c.con_dbid = f.con_dbid
              AND c.tablespace_name = f.tablespace_name

@@ -16,6 +16,8 @@
 --                  near-full NOW -> M7.1 ranking + TBSPC_NEARFULL alert).
 --   FIX_FILLING  : 10 MiB/day against a small maxsize -> days_to_full = 20
 --                  (TBSPC_FULL CRIT alert), pct 86.7% (below near-full).
+--                  A CAP_TBSPC_OVERRIDE row with no ceiling sets its own
+--                  dtf_crit 25 / dtf_warn 60 (per-tablespace thresholds).
 --   FIX_ZIGZAG   : 10 MiB/day +-20 MiB alternating -- deterministic residuals
 --                  for the M9.1 prediction-interval + M9.4 backtest closed
 --                  forms (expectations computed in-loop below).
@@ -1548,6 +1550,24 @@ EXCEPTION
 END;
 /
 
+-- The per-tablespace alert thresholds, added the same way ddl/05_config.sql
+-- adds them (a table from an older install gains them here first, because
+-- the FIX_FILLING row below sets two of them).
+DECLARE
+    PROCEDURE add_col(p_def VARCHAR2) IS
+    BEGIN
+        EXECUTE IMMEDIATE 'ALTER TABLE cap_tbspc_override ADD (' || p_def || ')';
+    EXCEPTION
+        WHEN OTHERS THEN IF SQLCODE != -1430 THEN RAISE; END IF;
+    END;
+BEGIN
+    add_col('dtf_warn NUMBER');
+    add_col('dtf_crit NUMBER');
+    add_col('nearfull_warn_pct NUMBER');
+    add_col('nearfull_crit_pct NUMBER');
+END;
+/
+
 -- Re-runnable: clear only THIS fixture's rows (every fixture tablespace is
 -- named FIX_%, under dbid 42424242 or the wildcard 0), then re-seed. An
 -- operator's real rows in the same schema are never touched.
@@ -1574,6 +1594,26 @@ VALUES (42424242, 42424242, 'FIX_OVERFULL', 1073741824, 'N',
 INSERT INTO cap_tbspc_override (dbid, con_dbid, tablespace_name, limit_bytes, exclude_flag, note)
 VALUES (0, 0, 'FIX_EXCLUDED', NULL, 'Y',
         'M9.5: scratch tablespace -- excluded from every layer.');
+
+-- Per-tablespace thresholds: FIX_FILLING (days_to_full 20) gets dtf_crit 25
+-- and dtf_warn 60 and no ceiling, so its TBSPC_FULL stays CRIT but against
+-- 25 (threshold) / 60 (alarm_threshold) instead of the knobs' 30 / 90, and
+-- its limit_source stays AUTOEXTEND. FIX_OVERRIDE's rows above set no
+-- threshold column, so the knobs keep applying to it.
+INSERT INTO cap_tbspc_override (dbid, con_dbid, tablespace_name, limit_bytes, exclude_flag, note,
+                                dtf_warn, dtf_crit)
+VALUES (42424242, 42424242, 'FIX_FILLING', NULL, 'N',
+        'Per-tablespace thresholds: dtf_crit 25, dtf_warn 60.', 60, 25);
+DELETE FROM cap_fixture_meta WHERE mkey IN ('FILLING_OVR_DTF_WARN', 'FILLING_OVR_DTF_CRIT', 'DROPPED_DTF');
+INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('FILLING_OVR_DTF_WARN', 60);
+INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('FILLING_OVR_DTF_CRIT', 25);
+-- FIX_DROPPED is FIX_LINEAR's series cut 30 days short: 10 MiB/day against
+-- the same 50 GiB maxsize from DROPPED_CUR, so FLOOR((50 GiB - DROPPED_CUR)
+-- / 10 MiB) = LINEAR_DTF + 30 = 5020 days. Inside dtf_warn = 7000 it would
+-- alert, but it is not current (the CAPR_SEVERITY gate).
+INSERT INTO cap_fixture_meta (mkey, nval)
+SELECT 'DROPPED_DTF', FLOOR((53687091200 - nval) / 10485760)
+FROM   cap_fixture_meta WHERE mkey = 'DROPPED_CUR';
 
 COMMIT;
 

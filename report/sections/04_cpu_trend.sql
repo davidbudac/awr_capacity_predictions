@@ -13,6 +13,9 @@ PROMPT    (BEST empty = might never saturate).
 PROMPT    ANCHOR = median of the last shift_days complete days, where projections and
 PROMPT    DAYS_SAT start. SIG = Y when the slope is outside its own 95% CI. HOT = Y when
 PROMPT    the busy-hour metric (BUSY_P95 / DB_CPU_P95) is at or above &cpu_sat% now.
+PROMPT    SEV = the severity CAPR_ALERTS raises for the metric (CPU_SAT / DBCPU_SAT on an OK
+PROMPT    trend inside the warning window, CPU_HOT / DBCPU_HOT when HOT); GATE = why a
+PROMPT    would-be CPU_SAT / DBCPU_SAT does not page (low-q, short = the trend is not OK).
 
 COLUMN trend_cfg  FORMAT A110         HEADING 'TREND SETTINGS'
 SELECT CASE WHEN cpu_deseason = 1
@@ -37,6 +40,8 @@ COLUMN quality    FORMAT A20           HEADING 'QUALITY'
 COLUMN anchor     FORMAT 99999990.00  HEADING 'ANCHOR'
 COLUMN sig        FORMAT A3            HEADING 'SIG'
 COLUMN hot        FORMAT A3            HEADING 'HOT'
+COLUMN sev        FORMAT A4            HEADING 'SEV'
+COLUMN gate       FORMAT A8            HEADING 'GATE'
 
 SELECT db_pdb,
        metric,
@@ -50,6 +55,8 @@ SELECT db_pdb,
        quality,
        anchor_value  AS anchor,
        slope_sig     AS sig,
-       hot_now       AS hot
+       hot_now       AS hot,
+       sev,
+       gate
 FROM   capr_cpu_trend
 ORDER  BY con_dbid, metric;

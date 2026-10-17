@@ -55,6 +55,9 @@ SET DEFINE OFF
 -- tablespace and the LEFT JOIN cannot fan out. Applying it HERE -- the single
 -- entry point to the daily series -- means every downstream layer (delta,
 -- forecast, anomaly, alerts, reports) honours it with no further code.
+-- The same row's alert thresholds ride along as ovr_dtf_warn / ovr_dtf_crit
+-- / ovr_nearfull_warn_pct / ovr_nearfull_crit_pct (NULL = no override);
+-- CAPF_TBSPC_FORECAST carries them and CAPR_SEVERITY applies them.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capd_tbspc_daily AS
 WITH snap_time AS (
@@ -82,10 +85,12 @@ WITH snap_time AS (
      -- Built over the tablespace DIM (small) rather than the daily rows, so
      -- the ranking runs once per series, not once per day.
      ores AS (
-        SELECT dbid, con_dbid, tablespace_name, limit_bytes, exclude_flag
+        SELECT dbid, con_dbid, tablespace_name, limit_bytes, exclude_flag,
+               dtf_warn, dtf_crit, nearfull_warn_pct, nearfull_crit_pct
         FROM (
             SELECT t.dbid, t.con_dbid, t.tablespace_name,
                    o.limit_bytes, o.exclude_flag,
+                   o.dtf_warn, o.dtf_crit, o.nearfull_warn_pct, o.nearfull_crit_pct,
                    ROW_NUMBER() OVER (PARTITION BY t.dbid, t.con_dbid, t.tablespace_name
                                       ORDER BY CASE WHEN o.dbid     <> 0 THEN 0 ELSE 1 END,
                                                CASE WHEN o.con_dbid <> 0 THEN 0 ELSE 1 END) AS rn
@@ -123,7 +128,11 @@ SELECT l.dbid,
             ELSE                                'ALLOCATED'
        END                                                   AS limit_source,
        COALESCE(t.block_size, b.block_size)                  AS block_size,
-       l.n_samples
+       l.n_samples,
+       o.dtf_warn                                            AS ovr_dtf_warn,
+       o.dtf_crit                                            AS ovr_dtf_crit,
+       o.nearfull_warn_pct                                   AS ovr_nearfull_warn_pct,
+       o.nearfull_crit_pct                                   AS ovr_nearfull_crit_pct
 FROM   last_of_day l
 JOIN   capv_tablespace t
   ON   t.dbid = l.dbid AND t.con_dbid = l.con_dbid AND t.tablespace_id = l.tablespace_id

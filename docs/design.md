@@ -159,7 +159,12 @@ row per day.
   which rule produced `limit_bytes` and rides through `CAPF_TBSPC_FORECAST`
   to the report. Applying all of this at the single entry point to the daily
   series means every downstream layer — delta, forecast, anomaly, `CAPR_ALERTS`
-  — honours it with no further code.
+  — honours it with no further code. The same row can also carry the
+  tablespace's own alert thresholds (`dtf_warn`, `dtf_crit`,
+  `nearfull_warn_pct`, `nearfull_crit_pct`, NULL = the knob): they ride along
+  as `ovr_*` columns through `CAPF_TBSPC_FORECAST` and `CAPR_SEVERITY` applies
+  them (Layer 6). A fixed-size tablespace meant to run at 95% gets
+  `nearfull_warn_pct = 98` instead of an exclusion from every layer.
 - **`CAPD_TBSPC_DELTA`** — change since the previous *sampled* day. Exposes
   `day_gap` (calendar days since the last sample) and `used_rate_bpd =
   used_delta_bytes / day_gap`, so a multi-day AWR gap is not mistaken for a
@@ -335,8 +340,9 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   the same dbid, and `is_current = 'Y'` when `last_day >= newest_day −
   stale_days` (knob, default 3). A dropped tablespace or a series that stopped
   arriving keeps its last forecast until AWR purges it; `is_current = 'N'` says
-  so. The test uses the data only (no `SYSDATE`). The CAPR_ views pass the flag
-  through; nothing filters on it yet.
+  so. The test uses the data only (no `SYSDATE`). The forecast alert kinds
+  require `is_current = 'Y'` (`CAPR_SEVERITY` gates the rest as `NOT
+  CURRENT`); a whole database that stopped sending AWR is `DATA_STALE`'s job.
 - **Prediction intervals (M9.1)**, classic OLS closed forms so everything stays
   hand-auditable: `SSE = SYY − SXY²/SXX`, `resid_se = √(SSE/(n−2))`, and each
   projection gets a 95% new-observation band `± t·resid_se·√(1 + 1/n +
@@ -462,9 +468,10 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   `days_to_full` = days until the peak line, anchored at the last cycle
   maximum, reaches the limit, NULL unless `peak_slope_bpd > 0`.
   `days_to_full_lo/hi` and `accel_ratio` are NULL; the cycle columns other than
-  `cycle_n` are NULL on non-`CYCLIC` rows. `CAPR_ALERTS.TBSPC_FULL` needs
-  quality `OK`, so a `CYCLIC` row never pages on its countdown. The count does
-  not depend on `reset_on_shrink`. Fixture: `FIX_CYCLIC` (flat peaks, no
+  `cycle_n` are NULL on non-`CYCLIC` rows. A `CYCLIC` row pages
+  (`TBSPC_FULL`) only when its peak line reaches the limit inside the warn
+  window, and the message names the cycle; otherwise `CAPR_SEVERITY` gates it
+  as `QUALITY CYCLIC`. The count does not depend on `reset_on_shrink`. Fixture: `FIX_CYCLIC` (flat peaks, no
   countdown) and `FIX_CYCLIC_UP` (peaks +1 GiB a cycle, `peak_slope_bpd` =
   1 GiB/30 d); with the grade off `FIX_CYCLIC` raises the old false page.
 - **Quality** (priority order): `INSUFFICIENT_HISTORY` (`train_n <
@@ -949,7 +956,10 @@ calls the `cap_report_spool(p_dir)` procedure the same script creates. That
 procedure writes a pollable `<dir>/cap_alerts.txt` snapshot of `CAPR_ALERTS`
 through `UTL_FILE` — *not* the formatted report, because SQL\*Plus spooling
 cannot happen inside a scheduler job; keep driving `report/report.sql` from
-cron for that. The directory object is not created for you: the script checks
+cron for that. The file's header has one "data through" line per dbid (newest snapshot and
+its age, from `CAPR_FRESHNESS`) and `DATA_STALE` rows come first, so a
+stalled AWR cannot pass for a quiet system. The directory object is not
+created for you: the script checks
 `ALL_DIRECTORIES` and prints the exact `CREATE DIRECTORY` / `GRANT READ, WRITE`
 DDL if it is missing (`DEFINE report_dir` overrides the default `CAP_REPORTS`).
 The `_JOB` suffix on the second job is not decoration: jobs share the schema
@@ -969,19 +979,69 @@ M8.2, for the bundled reports themselves:
   (root/non-CDB → db name alone; PDB → `DBNAME/PDBNAME`; unnamed → the raw
   `con_dbid` as text). Defining the label once keeps text and HTML from
   drifting.
-- `CAPR_ALERTS` is the pollable alert surface: one row per current issue with
-  `severity` (CRIT/WARN/INFO + numeric `sev_rank`), `kind` (`TBSPC_FULL`,
-  `TBSPC_NEARFULL`, `TBSPC_ANOM`, `CPU_SAT`, `DBCPU_SAT`, `CPU_ANOM`,
-  `DBCPU_ANOM`, `CPU_SHIFT`, `SERIES_LIMIT`, `SERIES_NEARLIMIT`,
-  `SERIES_ANOM`), keys, `value` vs `threshold` (+ `unit`), a ready-to-page
-  `message`, `baseline_mode` (anomaly kinds only) and a unique `alert_key`
-  (`dbid|con_dbid|kind|series_key|YYYY-MM-DD|mode`, `-` for no mode). The forecast kinds
-  gate on `quality = 'OK'`; `TBSPC_NEARFULL` deliberately does **not** (M7.1:
-  a 97%-full tablespace with an unfittable series must still surface — that's
-  a fact about *today*, not a forecast). Anomaly kinds use the
-  `anomaly_report_days` knob as their window (the reports' `anomaly_days`
-  DEFINE is presentation-only). Both reports' at-a-glance blocks read this
-  view, so paging and reporting can never disagree.
+- `CAPR_SEVERITY` is the **single home of the forecast-type severities**:
+  one row per (kind, dbid, con_dbid, series_key) for `TBSPC_FULL`,
+  `TBSPC_NEARFULL`, `CPU_SAT`, `DBCPU_SAT`, `CPU_HOT`, `DBCPU_HOT`,
+  `SERIES_LIMIT` and `SERIES_NEARLIMIT`, alerting or not. It carries the
+  judged `value` and `unit`, `direction`, the effective `warn_threshold` /
+  `crit_threshold` (a tablespace's `CAP_TBSPC_OVERRIDE` columns where set,
+  `thr_source = OVERRIDE`, else the knobs), `raw_sev` (thresholds alone),
+  `sev` / `sev_rank`, `gated_by` (with a short `gate`), a `sev_reason` such as
+  `days_to_full 17 <= dtf_crit 30` and the alert `message`. The gates, first
+  match wins: `NOT CURRENT` (`is_current = 'N'`, on every row of a stale
+  series), `QUALITY CYCLIC` (a CYCLIC tablespace whose peak line stays outside
+  the warn window), `LIMIT BELOW USED` (a would-be `TBSPC_FULL` whose ceiling
+  is already under the usage; `TBSPC_NEARFULL` pages it) and `QUALITY
+  <grade>` (a would-be countdown alert on a fit that is not OK). The level
+  kinds gate on currency only: `TBSPC_NEARFULL` deliberately ignores fit
+  quality (M7.1: a 97%-full tablespace with an unfittable series must still
+  surface; that's a fact about *today*, not a forecast), and so do
+  `SERIES_NEARLIMIT` and the HOT kinds. `CAPR_TBSPC_DAYS_TO_FULL`,
+  `CAPR_CPU_TREND`, `CAPR_SERIES`, `CAPR_FIT` and `CAPR_ALERTS` all take their
+  severity from it, so section 1a/1b, section 4, section 7, the HTML report,
+  the point feeds and the pollers show the same CRIT / WARN / OK (upper case
+  everywhere). Each `CAPF_` view is read once: a small kind list is joined to
+  its rows rather than one `UNION` branch per kind.
+- `CAPR_FRESHNESS` is one row per dbid with the end time of its newest
+  `CAPV_SNAPSHOT` row, its age in hours against `SYSDATE` and `is_stale`
+  (`age_hours >= stale_hours`, knob 36). This is the **one deliberate
+  `SYSDATE`** in the analytics: every other staleness test compares the data
+  with itself, so when AWR stops arriving every series stays "current" and
+  every forecast freezes without a word. The fixtures are anchored to
+  `TRUNC(SYSDATE)` (newest snapshot today 18:00), so they never trip it.
+- `CAPR_ALERTS` (in `ddl/55`, because `MODEL_HEALTH` reads the Tier 2 health
+  view) is the pollable alert surface: one row per current issue with
+  `severity` (CRIT/WARN/INFO + numeric `sev_rank`), `kind`, keys, `value` vs
+  `threshold` (+ `unit`), a ready-to-page `message`, `baseline_mode` (anomaly
+  kinds only), `alert_key` and, appended, `state_key`, `direction`,
+  `alarm_threshold` and `is_current`. The kinds: the eight forecast kinds
+  above (every non-OK `CAPR_SEVERITY` row), `CPU_SHIFT` (UP = WARN, DOWN =
+  INFO), `DATA_STALE` (one WARN per dbid from `CAPR_FRESHNESS`),
+  `MODEL_HEALTH` (per container from `CAPF_ESM_HEALTH_SUMMARY`: WARN when a
+  forecast model failed its last build, INFO when none failed but some are
+  stale; no registry rows, no row, so a Tier 1 install stays silent; the
+  message carries the counts and the newest `last_error`), and the four
+  anomaly kinds `TBSPC_ANOM`, `CPU_ANOM`, `DBCPU_ANOM`, `SERIES_ANOM` (the
+  alerting `CAPR_ANOMALIES` rows; they use the `anomaly_report_days` knob as
+  their window, the reports' `anomaly_days` DEFINE is presentation-only).
+  `CPU_HOT` / `DBCPU_HOT` page a saturated CPU even without a trend: the
+  busy-hour p95 (`BUSY_P95` on the host, `DB_CPU_P95` per container) has a
+  recent median (`recent_p95_med`, the last `shift_days` complete days) at or
+  above `cpu_sat_pct`, at any fit quality. Two keys: `alert_key`
+  (`dbid|con_dbid|kind|series_key|YYYY-MM-DD|mode`, `-` for no mode) is
+  unique per row and changes with `day_dt`; `state_key`
+  (`kind|dbid|con_dbid|series_key|mode`) is stable from day to day, the key to
+  follow one issue across polls. `threshold` keeps its old meaning (on a
+  forecast kind the CRIT threshold on a CRIT row and the WARN one otherwise,
+  on an anomaly the bound crossed); `alarm_threshold` is the WARN level, the
+  same on every severity; `direction` says how `value` relates to it on an
+  alert: `LE` (the countdowns), `GE` (levels, HIGH anomalies, `DATA_STALE`,
+  `MODEL_HEALTH`), `ABS` (`CPU_SHIFT`, `|value| > alarm_threshold`), and `LE`
+  on a LOW anomaly. `is_current` is `'Y'` on every row today. So a poller can
+  key, de-duplicate and alarm without parsing `message`. Both reports'
+  at-a-glance blocks read this view (DATA_STALE first), and the section
+  severities come from the same `CAPR_SEVERITY` rows, so paging and reporting
+  cannot disagree.
 - `CAPR_ANOMALIES` is every flagged anomaly event: one row per (observation,
   baseline mode) from `CAPA_ANOM`, plus one per flagged `CAPA_CPU_SHIFT`.
   It is the **single home of anomaly severity, message and alert
@@ -1001,16 +1061,16 @@ the two drivers, and they cannot drift.
 
 | view | section | notes |
 | --- | --- | --- |
-| `CAPR_TBSPC_DAYS_TO_FULL` | 1a + 1b | `pct_used`, GiB/MiB numeric columns, `sev_dtf` (days) and `sev_nearfull` (percent) markers, the M9.1 `dtf_worst`/`dtf_best` range, plus `rank_dtf` / `rank_nearfull` (`ROW_NUMBER`) so a driver applies `top_n` with `WHERE rank_* <= n` instead of its own `ORDER BY … FETCH FIRST` |
+| `CAPR_TBSPC_DAYS_TO_FULL` | 1a + 1b | `pct_used`, GiB/MiB numeric columns, `sev_dtf` / `sev_nearfull` (the `CAPR_SEVERITY` TBSPC_FULL / TBSPC_NEARFULL `sev`, with `gated_by` / `gate` / `nearfull_gated_by` and the effective `eff_*` thresholds), the M9.1 `dtf_worst`/`dtf_best` range, plus `rank_dtf` / `rank_nearfull` (`ROW_NUMBER`) so a driver applies `top_n` with `WHERE rank_* <= n` instead of its own `ORDER BY … FETCH FIRST`. `rank_dtf` puts a CYCLIC row without a `days_to_full` after the rows that have one, so section 1a lists it under `top_n` like the rest and prints `gate` beside the severity |
 | `CAPR_TBSPC_FORECAST` | 2 | GiB projections + the +180 band, `train_n`, `r2`, `quality`, the Tier 2 `esm30`/`esm30_lo`/`esm30_hi` point, raw byte columns and `rank_chart` for the HTML chart grid, plus the M7.4 bound `is_reportable` / `rank_report` |
 | `CAPR_TBSPC_ANOMALIES` | 3 | one row per flagged (day, baseline mode), MiB conversions (`delta_mb`, `rate_mb`, `med_mb`, `thr_mb`), `n_hist`, `baseline_mode` / `mode_short` / `mode_rank`, `day_str`, and `days_ago` = `MAX(day_dt)` over `CAPD_TBSPC_DAILY` minus the row's day, so the report window is `WHERE days_ago < anomaly_days` |
-| `CAPR_CPU_TREND` | 4 | per (container, metric) trend with `sat_worst`/`sat_best` |
+| `CAPR_CPU_TREND` | 4 | per (container, metric) trend with `sat_worst`/`sat_best`, `hot_now`, and `sev` / `gated_by` / `gate` (the worst `CAPR_SEVERITY` sev of the metric's kinds, OK on a metric no kind judges) |
 | `CAPR_CPU_ANOMALIES` | 5a | every flagged CPU point, key `(dbid, con_dbid, metric, baseline_mode, ts)`: host `BUSY_PCT` and per-container `DB_CPU_PCT`, day rows (TRAILING, SAME_DOW) and hour rows (HOUR_OF_WEEK); `value_pct`, `median_pct`, `threshold_pct`, `z`, `n_hist`, `mode_short` / `mode_rank`, and `ts_str` (`YYYY-MM-DD`, or `YYYY-MM-DD Dy HH24:MI` for an hour, weekday NLS-proof) |
 | `CAPR_CPU_SHIFTS` | 5b | the M10.3 level shifts: flagged rows only, both medians, both window lengths and the N-of-M counts, ranked by `|shift_pct|` via `rank_shift` |
 | `CAPR_ESM_COMPARE` | 6a/6b | REGR vs ESM pivoted per (container, series, horizon), in raw units *and* GiB; filter on `series_kind`. Inherits `is_reportable` / `rank_report` from `CAPR_TBSPC_FORECAST` (CPU rows: always `'Y'`, rank 0) so 6a shows exactly section 2's tablespaces |
 | `CAPR_BACKTEST` | 6c | the M9.4 holdout scorecard pivoted per series, incl. the `better` verdict |
 | `CAPR_SERIES_ANOMALIES` | 7b | every flagged (day, baseline mode) of an M11 series: `value` (level, or GiB/day growth for `DB_SIZE_GB`), `raw_value`, `expected`, `threshold`, `z`, `n_hist`, `unit`, mode columns and `days_ago` from the last `CAPD_SERIES_DAILY` day |
-| `CAPR_SERIES` | 7 | the M11 fixed-ceiling series: `cur_val` / `cur_limit` / `sat_value` in the series' own `unit`, `pct_of_limit`, `days_to_limit` with its `limit_worst` / `limit_best` range, `quality`, a `sev` marker and `rank_series` (soonest to hit its limit first) |
+| `CAPR_SERIES` | 7 | the M11 fixed-ceiling series: `cur_val` / `cur_limit` / `sat_value` in the series' own `unit`, `pct_of_limit`, `days_to_limit` with its `limit_worst` / `limit_best` range, `quality`, `sev` (the worse `CAPR_SEVERITY` sev of SERIES_LIMIT and SERIES_NEARLIMIT) with `gated_by`, and `rank_series` (soonest to hit its limit first) |
 
 All of them resolve `db_pdb` through `CAPR_CONTAINER` themselves. The last
 three read `CAPF_COMPARE` / `CAPF_BACKTEST`, which `ddl/50_ml.sql` creates
@@ -1026,11 +1086,17 @@ chartable shape per record type. They only ever gain columns.
 
 | view | one row per | notes |
 | --- | --- | --- |
-| `CAPR_SERIES_POINTS` | `CAPD_*` daily row (exactly 1:1) | every kind in one shape; the anomaly verdict joins `CAPA_ANOM_DAY`, so it cannot fan out. `anomaly` is 1 when any day mode flagged or any HOUR_OF_WEEK hour of that day did, 0 on an unflagged scored point, NULL on a series nobody scores (`BUSY_P95`, `BUSY_PEAK`, `DB_CPU_P95`, `DB_CPU_SEC`); `anomaly_flag` / `z` / `expected` / `threshold` are the headline mode's; `anomaly_modes`, `how_hours_flagged`, `doc_key` (`obs|...|YYYY-MM-DD`) |
+| `CAPR_SERIES_POINTS` | `CAPD_*` daily row (exactly 1:1) | every kind in one shape; the anomaly verdict joins `CAPA_ANOM_DAY`, so it cannot fan out. `anomaly` is 1 when any day mode flagged or any HOUR_OF_WEEK hour of that day did, 0 on an unflagged scored point, NULL on a series nobody scores (`BUSY_P95`, `BUSY_PEAK`, `DB_CPU_P95`, `DB_CPU_SEC`, and the SERIES names outside `CAPA_OBS`: `ASM_DG`, `TEMP_PEAK`, `UNDO_PEAK`); `anomaly_flag` / `z` / `expected` / `threshold` are the headline mode's; `anomaly_modes`, `how_hours_flagged`, `doc_key` (`obs|...|YYYY-MM-DD`). CPU percent rows carry `limit_value` = `cpu_sat_pct` and `pct` = 100 × value / `cpu_sat_pct` |
 | `CAPR_HOURLY_POINTS` | `CAPD_CPU_HOURLY` row (exactly 1:1) | host `BUSY_PCT` and per-container `DB_CPU_PCT` per END hour, with `dow` (0 = Monday), `hour_of_day`, `gap`, `n_intervals` and that hour's HOUR_OF_WEEK verdict (`how_expected`, `how_threshold`, `how_z`, `how_flag`, `how_n_hist`); `doc_key` (`obsh|...|YYYY-MM-DDTHH`) |
 | `CAPR_ANOMALIES` | flagged (observation, mode), plus each flagged level shift | see above; `grain`, `n_hist`, `alerting`, `alert_kind`, `raw_value`, `doc_key` |
 
 `CAPR_FIT` (ddl/45) and `CAPR_FORECAST_POINTS` (ddl/55) complete the set.
+One CPU limit convention runs through all three CPU-carrying feeds
+(`CAPR_SERIES_POINTS`, `CAPR_FORECAST_POINTS`, `CAPR_FIT`): `limit_value` is
+the saturation line `cpu_sat_pct`, not 100, and `pct` is the value as a
+percent of it. `CAPR_FORECAST_POINTS`' CPU horizon 0 is `anchor_value`, where
+the projection starts. `CAPR_FIT.sev` is the worst `CAPR_SEVERITY` sev of the
+series.
 
 ## Report
 

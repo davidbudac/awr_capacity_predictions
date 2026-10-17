@@ -126,6 +126,7 @@ USING (
     UNION ALL SELECT 'alert_modes_tbspc',       1,        'M15 BITMASK of baseline modes raising TBSPC_ANOM: 1=TRAILING 2=SAME_DOW 4=HOUR_OF_WEEK (sum them), 0=none.' FROM dual
     UNION ALL SELECT 'alert_modes_cpu',         2,        'M15 BITMASK of baseline modes raising CPU_ANOM and DBCPU_ANOM: 1=TRAILING 2=SAME_DOW 4=HOUR_OF_WEEK, 0=none.' FROM dual
     UNION ALL SELECT 'alert_modes_series',      1,        'M15 BITMASK of baseline modes raising SERIES_ANOM: 1=TRAILING 2=SAME_DOW (4 has no effect: day grain only).' FROM dual
+    UNION ALL SELECT 'stale_hours',            36,        'CAPR_ALERTS raises DATA_STALE for a dbid whose newest AWR snapshot ended at least this many hours before SYSDATE (the dead-man check).' FROM dual
 ) s
 ON (c.cfg_name = s.cfg_name)
 WHEN MATCHED THEN
@@ -198,7 +199,8 @@ SELECT MAX(CASE WHEN cfg_name = 'train_days'             THEN cfg_value END) AS 
        MAX(CASE WHEN cfg_name = 'series_floor_gib'       THEN cfg_value END) AS series_floor_gib,
        MAX(CASE WHEN cfg_name = 'alert_modes_tbspc'      THEN cfg_value END) AS alert_modes_tbspc,
        MAX(CASE WHEN cfg_name = 'alert_modes_cpu'        THEN cfg_value END) AS alert_modes_cpu,
-       MAX(CASE WHEN cfg_name = 'alert_modes_series'     THEN cfg_value END) AS alert_modes_series
+       MAX(CASE WHEN cfg_name = 'alert_modes_series'     THEN cfg_value END) AS alert_modes_series,
+       MAX(CASE WHEN cfg_name = 'stale_hours'            THEN cfg_value END) AS stale_hours
 FROM   cap_config;
 
 COMMENT ON TABLE cap_cfg IS 'One row, one NUMBER column per CAP_CONFIG knob (column name = knob name). NULL = the knob row is missing.';
@@ -225,7 +227,7 @@ WITH u AS (
                cpu_deseason, suite_version,
                cpu_min_mad_pct_hour, hour_gap_ratio,
                series_floor_count, series_floor_gib, alert_modes_tbspc,
-               alert_modes_cpu, alert_modes_series))
+               alert_modes_cpu, alert_modes_series, stale_hours))
      ),
      r AS (
         SELECT u.knob, u.value,
@@ -265,7 +267,7 @@ WITH u AS (
                         THEN 'must be >= 0'
                    WHEN u.knob = 'complete_day_pct'    AND u.value NOT BETWEEN 1 AND 100
                         THEN 'must be between 1 and 100 (percent of a day)'
-                   WHEN u.knob = 'stale_days'          AND u.value < 0
+                   WHEN u.knob IN ('stale_days', 'stale_hours') AND u.value < 0
                         THEN 'must be >= 0'
                    WHEN u.knob = 'cyclic_min_cliffs'   AND (u.value <> TRUNC(u.value) OR u.value = 1 OR u.value < 0)
                         THEN 'must be 0 (off) or a whole number >= 2: one cliff is a purge, the M9.3 reset handles it'
@@ -302,7 +304,9 @@ COMMENT ON TABLE cap_cfg_check IS 'One row per knob: value, status OK / MISSING 
 -- against it produces a comfortable days-to-full that is a lie. A row here
 -- replaces the computed limit with the real ceiling. exclude_flag drops a
 -- staging / scratch / import tablespace out of the analytics entirely, so it
--- stops generating noise in the report and in CAPR_ALERTS.
+-- stops generating noise in the report and in CAPR_ALERTS. The four
+-- threshold columns (bottom of this file) replace the global dtf_* /
+-- nearfull_* knobs for one tablespace.
 --
 -- Matching (see CAPD_TBSPC_DAILY): tablespace_name is an EXACT match (no
 -- patterns), while dbid = 0 and/or con_dbid = 0 are WILDCARDS meaning "any".
@@ -330,10 +334,36 @@ EXCEPTION
 END;
 /
 
-COMMENT ON TABLE  cap_tbspc_override                 IS 'M9.5: per-tablespace limit overrides / exclusions. Applied by CAPD_TBSPC_DAILY; dbid/con_dbid = 0 mean "any".';
+COMMENT ON TABLE  cap_tbspc_override                 IS 'M9.5: per-tablespace limit overrides / exclusions / alert thresholds. Applied by CAPD_TBSPC_DAILY; dbid/con_dbid = 0 mean "any".';
 COMMENT ON COLUMN cap_tbspc_override.dbid            IS 'DBID this rule applies to, or 0 = any database.';
 COMMENT ON COLUMN cap_tbspc_override.con_dbid        IS 'CON_DBID this rule applies to, or 0 = any container.';
 COMMENT ON COLUMN cap_tbspc_override.tablespace_name IS 'Tablespace name, matched exactly (no patterns).';
 COMMENT ON COLUMN cap_tbspc_override.limit_bytes     IS 'Real ceiling in bytes, replacing the AWR-derived autoextend maxsize / allocated size. NULL = keep the computed limit.';
 COMMENT ON COLUMN cap_tbspc_override.exclude_flag    IS 'Y = drop this tablespace from CAPD_TBSPC_DAILY and everything downstream (forecasts, anomalies, alerts). N (default) = keep it.';
 COMMENT ON COLUMN cap_tbspc_override.note            IS 'Free-text reason, for whoever reads the table in six months.';
+
+-- Per-tablespace alert thresholds (CAPR_SEVERITY): a NULL column keeps the
+-- global knob, so a row that only sets limit_bytes changes no threshold. A
+-- fixed-size tablespace that is meant to run at 95% gets
+-- nearfull_warn_pct = 98 here instead of an exclusion from every layer.
+-- Added one column at a time so an install that already has some of them
+-- still gains the rest. ORA-01430 = the column already exists.
+DECLARE
+    PROCEDURE add_col(p_def VARCHAR2) IS
+    BEGIN
+        EXECUTE IMMEDIATE 'ALTER TABLE cap_tbspc_override ADD (' || p_def || ')';
+    EXCEPTION
+        WHEN OTHERS THEN IF SQLCODE != -1430 THEN RAISE; END IF;
+    END;
+BEGIN
+    add_col('dtf_warn NUMBER');
+    add_col('dtf_crit NUMBER');
+    add_col('nearfull_warn_pct NUMBER');
+    add_col('nearfull_crit_pct NUMBER');
+END;
+/
+
+COMMENT ON COLUMN cap_tbspc_override.dtf_warn          IS 'days_to_full at/below which TBSPC_FULL is a WARN for this tablespace. NULL = the dtf_warn knob.';
+COMMENT ON COLUMN cap_tbspc_override.dtf_crit          IS 'days_to_full at/below which TBSPC_FULL is a CRIT for this tablespace. NULL = the dtf_crit knob.';
+COMMENT ON COLUMN cap_tbspc_override.nearfull_warn_pct IS 'Percent used at/above which TBSPC_NEARFULL is a WARN for this tablespace. NULL = the nearfull_warn_pct knob.';
+COMMENT ON COLUMN cap_tbspc_override.nearfull_crit_pct IS 'Percent used at/above which TBSPC_NEARFULL is a CRIT for this tablespace. NULL = the nearfull_crit_pct knob.';

@@ -39,7 +39,14 @@ Enumerations:
 - `alert_kind`: `TBSPC_FULL`, `TBSPC_NEARFULL`, `TBSPC_ANOM`, `CPU_SAT`,
   `DBCPU_SAT`, `CPU_ANOM`, `DBCPU_ANOM`, `CPU_SHIFT`, `SERIES_LIMIT`,
   `SERIES_NEARLIMIT`, `SERIES_ANOM`. The `*_ANOM` kinds carry one row per
-  series, day and baseline mode; `alert_key` is unique per row.
+  series, day and baseline mode; `alert_key` is unique per row. CPU rows of
+  `series`, `forecast` and `fit` share one limit convention: `limit_value` is
+  the saturation line `cpu_sat_pct` (not 100) and `pct` is `value` as a
+  percent of it, and `CAPR_ALERTS` (the view behind `alerts`) now also has
+  the kinds `CPU_HOT`, `DBCPU_HOT`, `DATA_STALE`, `MODEL_HEALTH` and the
+  columns `state_key` (stable across days), `direction` (LE/GE/ABS),
+  `alarm_threshold` (the WARN level) and `is_current`, which the ORDS handler
+  does not select yet.
 
 Semantics are the same as the ELK records (see `elk/README.md`): `series`
 rows are the observed daily points with the CAPA_* flag joined on

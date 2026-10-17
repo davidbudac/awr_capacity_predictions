@@ -280,6 +280,9 @@ BEGIN
     chk_num('FIX_LINEAR health model_age_days', v_age, 0);
     chk_txt('FIX_LINEAR health stale_flag', v_txt, 'N');
     chk_txt('FIX_LINEAR health last_error', v_txt2, NULL);
+    -- Nothing failed, nothing stale: CAPR_ALERTS raises no MODEL_HEALTH.
+    SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'MODEL_HEALTH';
+    chk_num('MODEL_HEALTH after train_tablespaces (all OK, fresh)', v_n, 0);
 
     ------------------------------------------------------------------
     -- train_all refreshes the CPU backtest twins of the CPU series it trains,
@@ -435,6 +438,15 @@ BEGIN
         chk_txt('max age 2: FIX_LINEAR stale_flag', v_txt, 'Y');
         SELECT NVL(SUM(n_stale), 0) INTO v_n FROM capf_esm_health_summary;
         chk_num('max age 2: CAPF_ESM_HEALTH_SUMMARY n_stale', v_n, 1);
+        -- One stale model, none failed: an INFO for its container.
+        SELECT COUNT(*), MAX(severity), MAX(value), MAX(dbid), MAX(con_dbid)
+        INTO   v_n, v_txt, v_h, v_age, v_n2
+        FROM   capr_alerts WHERE kind = 'MODEL_HEALTH';
+        chk_num('max age 2: MODEL_HEALTH rows', v_n, 1);
+        chk_txt('max age 2: MODEL_HEALTH severity', v_txt, 'INFO');
+        chk_num('max age 2: MODEL_HEALTH value (stale models)', v_h, 1);
+        chk_txt('max age 2: MODEL_HEALTH container = FIX_LINEAR''s',
+                v_age || '/' || v_n2, v_dbid || '/' || v_con);
         SELECT COUNT(*) INTO v_n FROM capf_compare
         WHERE  engine = 'ESM' AND series_key = 'FIX_LINEAR';
         chk_num('max age 2: FIX_LINEAR ESM rows in CAPF_COMPARE', v_n, 0);
@@ -481,6 +493,19 @@ BEGIN
     chk_num('failed retrain: CAPF_COMPARE keeps the 3-day-old ESM row', v_n, 1);
     SELECT NVL(SUM(n_failed), 0) INTO v_n FROM capf_esm_health_summary;
     chk_num('failed retrain: CAPF_ESM_HEALTH_SUMMARY n_failed', v_n, 1);
+    -- The forced failure is a WARN naming the newest error.
+    SELECT SUBSTR(TRANSLATE(last_error, CHR(10) || CHR(13), '  '), 1, 60) INTO v_txt2
+    FROM   cap_ml_model WHERE model_name = v_model;
+    SELECT COUNT(*), MAX(severity), MAX(value), MAX(threshold), MAX(direction),
+           MAX(CASE WHEN INSTR(message, '1 failed') > 0 AND INSTR(message, v_txt2) > 0 THEN 'Y' ELSE 'N' END)
+    INTO   v_n, v_txt, v_h, v_age, v_type2, v_status
+    FROM   capr_alerts WHERE kind = 'MODEL_HEALTH';
+    chk_num('failed retrain: MODEL_HEALTH rows', v_n, 1);
+    chk_txt('failed retrain: MODEL_HEALTH severity', v_txt, 'WARN');
+    chk_num('failed retrain: MODEL_HEALTH value (failed models)', v_h, 1);
+    chk_num('failed retrain: MODEL_HEALTH threshold', v_age, 1);
+    chk_txt('failed retrain: MODEL_HEALTH direction', v_type2, 'GE');
+    chk_txt('failed retrain: MODEL_HEALTH message names the count and the error', v_status, 'Y');
     SELECT COUNT(*) INTO v_n FROM cap_ml_model
     WHERE  purpose = 'FORECAST' AND model_name <> v_model AND status <> 'OK';
     chk_num('failed retrain: every other forecast model still OK', v_n, 0);
@@ -497,6 +522,8 @@ BEGIN
     SELECT NVL(SUM(n_failed), 0), NVL(SUM(n_stale), 0) INTO v_n, v_h FROM capf_esm_health_summary;
     chk_num('after retrain: CAPF_ESM_HEALTH_SUMMARY n_failed', v_n, 0);
     chk_num('after retrain: CAPF_ESM_HEALTH_SUMMARY n_stale', v_h, 0);
+    SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'MODEL_HEALTH';
+    chk_num('after retrain: no MODEL_HEALTH', v_n, 0);
 
     -- A tablespace outside the quality gate is refused, not silently skipped.
     BEGIN

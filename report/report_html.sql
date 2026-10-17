@@ -456,6 +456,7 @@ DECLARE
   v_n_info    PLS_INTEGER := 0;
   v_n_cap     PLS_INTEGER := 0;
   v_n_beh     PLS_INTEGER := 0;
+  v_n_hlth    PLS_INTEGER := 0;
   v_first_crit VARCHAR2(300);
   v_p95_cur   NUMBER;
   v_p95_dts   NUMBER;
@@ -588,7 +589,7 @@ DECLARE
   BEGIN
     IF sev = 'CRIT' THEN RETURN '<span class="sev-crit">CRIT</span>';
     ELSIF sev = 'WARN' THEN RETURN '<span class="sev-warn">WARN</span>';
-    ELSE RETURN '<span class="sev-ok">ok</span>';
+    ELSE RETURN '<span class="sev-ok">OK</span>';
     END IF;
   END sev_pill;
 
@@ -667,6 +668,9 @@ DECLARE
                 WHEN 'DB_FULL'        THEN '#dbhero-' || TO_CHAR(p_con_dbid)
                 WHEN 'CPU_SAT'        THEN '#s4'
                 WHEN 'DBCPU_SAT'      THEN '#s4'
+                WHEN 'CPU_HOT'        THEN '#s4'
+                WHEN 'DBCPU_HOT'      THEN '#s4'
+                WHEN 'MODEL_HEALTH'   THEN '#s6'
                 WHEN 'CPU_SHIFT'      THEN '#s5'
                 WHEN 'CPU_ANOM'       THEN '#s5'
                 WHEN 'DBCPU_ANOM'     THEN '#s5'
@@ -1677,12 +1681,13 @@ BEGIN
   SELECT SUM(CASE WHEN severity = 'CRIT' THEN 1 ELSE 0 END),
          SUM(CASE WHEN severity = 'WARN' THEN 1 ELSE 0 END),
          SUM(CASE WHEN severity = 'INFO' THEN 1 ELSE 0 END),
-         SUM(CASE WHEN severity IN ('CRIT','WARN') AND kind IN ('TBSPC_FULL','TBSPC_NEARFULL','CPU_SAT','SERIES_LIMIT','SERIES_NEARLIMIT') THEN 1 ELSE 0 END),
-         SUM(CASE WHEN severity IN ('CRIT','WARN') AND kind IN ('TBSPC_ANOM','CPU_ANOM','DBCPU_ANOM','SERIES_ANOM','CPU_SHIFT') THEN 1 ELSE 0 END)
-    INTO v_n_crit, v_n_warn, v_n_info, v_n_cap, v_n_beh
+         SUM(CASE WHEN severity IN ('CRIT','WARN') AND kind IN ('TBSPC_FULL','TBSPC_NEARFULL','CPU_SAT','DBCPU_SAT','CPU_HOT','DBCPU_HOT','SERIES_LIMIT','SERIES_NEARLIMIT') THEN 1 ELSE 0 END),
+         SUM(CASE WHEN severity IN ('CRIT','WARN') AND kind IN ('TBSPC_ANOM','CPU_ANOM','DBCPU_ANOM','SERIES_ANOM','CPU_SHIFT') THEN 1 ELSE 0 END),
+         SUM(CASE WHEN severity IN ('CRIT','WARN') AND kind IN ('DATA_STALE','MODEL_HEALTH') THEN 1 ELSE 0 END)
+    INTO v_n_crit, v_n_warn, v_n_info, v_n_cap, v_n_beh, v_n_hlth
   FROM   capr_alerts;
   v_n_crit := NVL(v_n_crit, 0); v_n_warn := NVL(v_n_warn, 0); v_n_info := NVL(v_n_info, 0);
-  v_n_cap := NVL(v_n_cap, 0); v_n_beh := NVL(v_n_beh, 0);
+  v_n_cap := NVL(v_n_cap, 0); v_n_beh := NVL(v_n_beh, 0); v_n_hlth := NVL(v_n_hlth, 0);
   v_first_crit := NULL;
   FOR a IN (SELECT series_key, kind, value, unit FROM capr_alerts WHERE severity = 'CRIT'
             ORDER BY sev_rank, value FETCH FIRST 1 ROW ONLY) LOOP
@@ -1717,7 +1722,8 @@ BEGIN
     || TO_CHAR(v_n_crit, 'FM999990') || '</div><div class="s">' || NVL(v_first_crit, 'nothing critical') || '</div></div>');
   p('<div class="kpi' || CASE WHEN v_n_warn > 0 THEN ' warn' END || '"><div class="l">Warnings</div><div class="v">'
     || TO_CHAR(v_n_warn, 'FM999990') || '</div><div class="s">' || TO_CHAR(v_n_cap, 'FM999990') || ' capacity &middot; '
-    || TO_CHAR(v_n_beh, 'FM999990') || ' behaviour</div></div>');
+    || TO_CHAR(v_n_beh, 'FM999990') || ' behaviour'
+    || CASE WHEN v_n_hlth > 0 THEN ' &middot; ' || TO_CHAR(v_n_hlth, 'FM999990') || ' health' END || '</div></div>');
   p('<div class="kpi' || CASE WHEN NVL(v_cov_total, 0) > 0 AND v_cov_ok = v_cov_total THEN ' ok' END
     || '"><div class="l">Forecast quality</div><div class="v">' || TO_CHAR(NVL(v_cov_ok, 0), 'FM999990')
     || '<small> / ' || TO_CHAR(NVL(v_cov_total, 0), 'FM999990') || '</small></div><div class="s">tablespaces rated OK</div></div>');
@@ -1800,13 +1806,16 @@ BEGIN
     FOR a IN (
       SELECT severity, kind, dbid, con_dbid, db_pdb, series_key, day_dt, value, threshold, unit, message,
              baseline_mode,
-             CASE kind WHEN 'TBSPC_FULL' THEN 1 WHEN 'CPU_SAT' THEN 2 WHEN 'SERIES_LIMIT' THEN 3
+             CASE kind WHEN 'DATA_STALE' THEN 0
+                       WHEN 'TBSPC_FULL' THEN 1 WHEN 'CPU_SAT' THEN 2 WHEN 'DBCPU_SAT' THEN 2 WHEN 'SERIES_LIMIT' THEN 3
                        WHEN 'CPU_SHIFT' THEN 4 WHEN 'TBSPC_NEARFULL' THEN 5 WHEN 'SERIES_NEARLIMIT' THEN 6
+                       WHEN 'CPU_HOT' THEN 6 WHEN 'DBCPU_HOT' THEN 6
                        WHEN 'TBSPC_ANOM' THEN 7 WHEN 'CPU_ANOM' THEN 8 WHEN 'DBCPU_ANOM' THEN 9
-                       WHEN 'SERIES_ANOM' THEN 10 ELSE 11 END AS kord
+                       WHEN 'SERIES_ANOM' THEN 10 WHEN 'MODEL_HEALTH' THEN 12 ELSE 11 END AS kord
       FROM   capr_alerts
       WHERE  severity IN ('CRIT','WARN')
-      ORDER  BY sev_rank, kord, value
+      -- a stale AWR qualifies every other row, so it leads whatever its rank
+      ORDER  BY CASE kind WHEN 'DATA_STALE' THEN 0 ELSE 1 END, sev_rank, kord, value
     ) LOOP
       v_main := NULL; v_sub := NULL; v_big := NULL; v_small := NULL; v_kind_lbl := NULL;
       v_tmp := CASE WHEN v_con_count > 1 THEN esc(a.db_pdb) || ' &middot; ' END;
@@ -1945,7 +1954,8 @@ BEGIN
                               WHEN 'PCT'  THEN TO_CHAR(a.value, 'FM990.0') || '%'
                               WHEN 'BYTES' THEN fmt_size_gb(a.value / 1073741824)
                               WHEN 'COUNT' THEN TO_CHAR(a.value, 'FM99999999990')
-                              WHEN 'GIB'   THEN fmt_size_gb(a.value) END;
+                              WHEN 'GIB'   THEN fmt_size_gb(a.value)
+                              WHEN 'HOURS' THEN TO_CHAR(a.value, 'FM9999990.0') || ' h' END;
       END IF;
       v_sub := v_sub || evidence_link(a.kind, a.con_dbid, a.series_key);
       attn_row(a.severity, v_kind_lbl, v_main, v_sub, v_big, v_small);
@@ -2014,7 +2024,7 @@ BEGIN
     SELECT c.db_pdb, c.cur_val, c.days_to_sat, c.quality
     FROM   capr_cpu_trend c
     WHERE  c.metric = 'BUSY_P95'
-      AND  NOT EXISTS (SELECT 1 FROM capr_alerts a WHERE a.con_dbid = c.con_dbid AND a.kind = 'CPU_SAT')
+      AND  NOT EXISTS (SELECT 1 FROM capr_alerts a WHERE a.con_dbid = c.con_dbid AND a.kind IN ('CPU_SAT', 'CPU_HOT'))
     ORDER  BY c.con_dbid
   ) LOOP
     v_tmp := v_tmp || '<span class="chip' || CASE WHEN r.quality <> 'OK' THEN ' q' END || '">Host CPU'
@@ -2248,6 +2258,7 @@ BEGIN
            dtf_worst AS days_to_full_lo,
            dtf_best  AS days_to_full_hi,
            sev_dtf   AS sev,
+           gate,
            quality,
            accel,
            cycle_days,
@@ -2255,11 +2266,11 @@ BEGIN
            need_gib_90,
            add_by_day
     FROM   capr_tbspc_days_to_full
-    -- CYCLIC rows are always listed: their days_to_full is the peak line's
-    -- crossing, often empty, and the row explains why a purge cycle is not
-    -- paging.
-    WHERE  (days_to_full IS NOT NULL AND rank_dtf <= top_n)
-       OR  quality = 'CYCLIC'
+    -- CYCLIC rows are listed even without a days_to_full (their peak line's
+    -- crossing, often empty): rank_dtf puts them after the rows that have
+    -- one, so top_n bounds them like every other row.
+    WHERE  (days_to_full IS NOT NULL OR quality = 'CYCLIC')
+      AND  rank_dtf <= top_n
     ORDER  BY rank_dtf
   ) LOOP
     IF NOT any_rows THEN
@@ -2270,7 +2281,7 @@ BEGIN
         || '</th><th>Used / limit' || info_icon('how much is used against its allocated limit today (CAPR columns: CUR_GB, LIMIT_GB, PCT_USED)')
         || '</th><th class="num">Growth (MiB/day)' || info_icon('the average mebibytes (MiB) this tablespace grows per day (CAPR column: SLOPE_MB)')
         || '</th><th class="num">Days to full' || info_icon('estimated days until it reaches its allocated limit at the current rate (CAPR column: DAYS_TO_FULL)')
-        || '</th><th>Severity' || info_icon('how urgent this is: CRIT is within the critical window, WARN within the warning window (CAPR column: SEV_DTF)')
+        || '</th><th>Severity' || info_icon('the severity CAPR_ALERTS raises: CRIT within the critical window, WARN within the warning window, on an OK fit or a CYCLIC peak line; a grey tag says why a row inside the window does not page: low-q / short = fit not OK, cyclic = purge cycle judged on its peaks, stale = no longer reported, lim&lt;used = limit under the usage (CAPR columns: SEV_DTF, GATE)')
         || '</th><th>Quality' || info_icon('reliability of the estimate -- only OK is a dependable forecast (CAPR column: QUALITY)')
         || '</th><th>Sizing ask' || info_icon('space to add so the worst case (the upper 95% band) stays under the limit for 90 days, and the worst-case fill date (CAPR columns: NEED_GIB_90, ADD_BY_DAY)')
         || '</th></tr></thead><tbody>');
@@ -2284,7 +2295,7 @@ BEGIN
                         CASE r.sev WHEN 'CRIT' THEN 'crit' WHEN 'WARN' THEN 'warn' ELSE '' END) || '</td>'
       || '<td class="num">' || nz(r.slope_mb, 'FM9999990.000') || '</td>'
       || '<td class="num">' || dtf_cell(r.days_to_full, r.quality, 'FM99999990') || '</td>'
-      || '<td>' || sev_pill(r.sev) || '</td>'
+      || '<td>' || sev_pill(r.sev) || CASE WHEN r.gate IS NOT NULL THEN ' <span class="na">' || esc(r.gate) || '</span>' END || '</td>'
       || '<td>' || quality_pill(r.quality) || '</td>'
       || '<td>' || NVL(ask_txt(r.need_gib_90, r.add_by_day), '&ndash;') || '</td></tr>');
 
@@ -2956,7 +2967,9 @@ BEGIN
            quality,
            anchor_value,
            slope_sig,
-           hot_now
+           hot_now,
+           sev,
+           gate
     FROM   capr_cpu_trend
     ORDER  BY con_dbid, metric
   ) LOOP
@@ -2975,6 +2988,7 @@ BEGIN
         || '</th><th class="num">Anchor' || info_icon('median of the last shift_days complete days, where projections and days to saturation start (CAPR column: ANCHOR_VALUE)')
         || '</th><th>Sig.' || info_icon('Y when the slope is outside its own 95% range (CAPR column: SLOPE_SIG)')
         || '</th><th>Hot now' || info_icon('BUSY_P95 / DB_CPU_P95 only: Y when the recent busy-hour median is at or above the saturation threshold (CAPR column: HOT_NOW)')
+        || '</th><th>Severity' || info_icon('the severity CAPR_ALERTS raises for this metric: CPU_SAT / DBCPU_SAT on an OK trend inside the warning window, CPU_HOT / DBCPU_HOT when hot now; a grey tag says why a would-be CPU_SAT / DBCPU_SAT does not page (CAPR columns: SEV, GATE)')
         || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
@@ -2998,7 +3012,8 @@ BEGIN
       || '<td class="num">' || nz(r.anchor_value, 'FM99999990.00') || '</td>'
       || '<td>' || esc(r.slope_sig) || '</td>'
       || '<td>' || CASE r.hot_now WHEN 'Y' THEN '<span class="sev-crit">Y</span>'
-                                  WHEN 'N' THEN 'N' ELSE '&ndash;' END || '</td></tr>');
+                                  WHEN 'N' THEN 'N' ELSE '&ndash;' END || '</td>'
+      || '<td>' || sev_pill(r.sev) || CASE WHEN r.gate IS NOT NULL THEN ' <span class="na">' || esc(r.gate) || '</span>' END || '</td></tr>');
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');

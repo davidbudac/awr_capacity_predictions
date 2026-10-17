@@ -123,6 +123,9 @@ AS
     -- NOT the full capacity report -- that needs SQL*Plus formatting; this is
     -- the CAPR_ALERTS view flattened to one line per alert plus a header.
     -- Format: SEVERITY|KIND|DB_PDB|SERIES_KEY|DAY|VALUE|THRESHOLD|UNIT|MESSAGE
+    -- The header says how fresh the data is (one "data through" line per dbid,
+    -- from CAPR_FRESHNESS) and DATA_STALE rows come first: a stalled AWR
+    -- would otherwise read as a quiet system.
     c_file  CONSTANT VARCHAR2(30) := 'cap_alerts.txt';
     l_f     UTL_FILE.FILE_TYPE;
     l_crit  PLS_INTEGER := 0;
@@ -145,6 +148,14 @@ BEGIN
     UTL_FILE.PUT_LINE(l_f, '# database  : ' || SYS_CONTEXT('USERENV', 'DB_NAME')
                            || ' / ' || NVL(SYS_CONTEXT('USERENV', 'CON_NAME'), 'non-CDB'));
     UTL_FILE.PUT_LINE(l_f, '# schema    : ' || SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'));
+    FOR d IN (SELECT dbid, db_name, newest_snap, age_hours, is_stale
+              FROM   capr_freshness
+              ORDER  BY dbid) LOOP
+        UTL_FILE.PUT_LINE(l_f, '# data through: ' || d.db_name || ' (dbid ' || d.dbid || ') '
+                               || TO_CHAR(d.newest_snap, 'YYYY-MM-DD HH24:MI') || ', '
+                               || TO_CHAR(d.age_hours, 'FM9999990.0') || ' h ago'
+                               || CASE WHEN d.is_stale = 'Y' THEN ' (STALE)' END);
+    END LOOP;
     UTL_FILE.PUT_LINE(l_f, '# alerts    : ' || l_tot || ' total  ('
                            || l_crit || ' CRIT, ' || l_warn || ' WARN, '
                            || l_info || ' INFO)');
@@ -158,7 +169,8 @@ BEGIN
         FOR r IN (SELECT severity, kind, db_pdb, series_key, day_dt,
                          value, threshold, unit, message
                   FROM   capr_alerts
-                  ORDER  BY sev_rank, kind, db_pdb, series_key) LOOP
+                  ORDER  BY CASE kind WHEN 'DATA_STALE' THEN 0 ELSE 1 END,
+                            sev_rank, kind, db_pdb, series_key) LOOP
             UTL_FILE.PUT_LINE(l_f,
                 r.severity                                  || '|' ||
                 r.kind                                      || '|' ||

@@ -151,9 +151,9 @@ already have for the suite. Put ORDS behind TLS outside a lab.
   is fresh (`cap_forecast_ml.train_all`, weekly retrain, 30-step cap); the
   charts never depend on it.
 - **CPU reference lines.** The saturation line is `cpu_sat_pct` from
-  `CAP_CONFIG` (80 by default). `CAPR_FIT.limit_value` for CPU is that
-  threshold, while the point feeds carry 100; the app draws the line from
-  the config value.
+  `CAP_CONFIG` (80 by default). `CAPR_FIT` and the point feeds all carry it
+  as the CPU `limit_value` (and `pct` as a percent of it); the app draws the
+  line from the config value.
 - **Host CPU is a root-container series.** OSSTAT records under the CDB's
   own `con_dbid`, so with a PDB selected the host CPU chart shows its CDB
   root's rows (the same host) rather than nothing. Local mode has no per-PDB

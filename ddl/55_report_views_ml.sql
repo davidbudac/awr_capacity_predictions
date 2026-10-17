@@ -2,10 +2,11 @@
 -- ddl/55_report_views_ml.sql -- CAPR_* report views that need Tier 2 (M8.2).
 -- =====================================================================
 -- The rest of the CAPR_* report layer lives in ddl/45_report_views.sql. These
--- views are split out ONLY because they read CAPF_COMPARE /
--- CAPF_BACKTEST, which ddl/50_ml.sql creates AFTER 45 -- so install.sql loads
--- this file last (see its [55] step). Same contract as the others: every
--- derived number, label and unit conversion is computed here so
+-- views are split out ONLY because they read CAPF_COMPARE / CAPF_BACKTEST /
+-- CAPF_ESM_HEALTH_SUMMARY and CAP_ML_MODEL, which ddl/50_ml.sql creates AFTER
+-- 45 -- so install.sql loads this file last (see its [55] step). Same
+-- contract as the others: every derived number, label and unit conversion
+-- is computed here so
 -- report/report.sql and report/report_html.sql only format.
 --
 --   CAPR_TBSPC_FORECAST -- section 2 body: per-tablespace REGR projections in
@@ -29,6 +30,9 @@
 --                          (M10.4) the ESM model-type pick + its rationale.
 --   CAPR_FORECAST_POINTS -- REGR anchors + the ESM point as chartable
 --                          rows, for grafana/API.md and elk/.
+--   CAPR_ALERTS         -- the pollable alert surface (bottom of this file):
+--                          here because its MODEL_HEALTH kind reads the
+--                          Tier 2 health view.
 --
 -- Read-only, like everything else in the suite.
 --
@@ -233,10 +237,12 @@ GROUP  BY f.dbid, f.con_dbid, f.series_kind, f.series_key;
 -- --------------------------------------------------------------------
 -- CAPR_FORECAST_POINTS -- the projected points to chart after the observed
 -- series (grafana/API.md, elk/export_capacity.sql): the REGR points at
--- horizon 0 (the actual current value) and +30/+90 (+180/+365 for TBSPC)
--- with their M9.1 bands, plus the ESM point. The CAPF_ projections are
--- anchored on that current value, so horizon 0 and the REGR horizons sit on
--- one straight line. ts = last observed day +
+-- horizon 0 (the anchor every projection starts from: the current value,
+-- or for CPU the smoothed anchor_value) and +30/+90 (+180/+365 for TBSPC)
+-- with their M9.1 bands, plus the ESM point. horizon 0 and the REGR horizons
+-- therefore sit on one straight line. CPU percent rows carry the saturation
+-- line cpu_sat_pct as limit_value (as CAPR_FIT) and pct = 100 * value /
+-- cpu_sat_pct; DB_CPU_SEC has neither. ts = last observed day +
 -- horizon on every row. CAPF_COMPARE folds DB CPU into kind CPU under
 -- DB_CPU_SEC. The ESM value sits at trained_through + esm_horizon_days, so
 -- its horizon here is esm_horizon_days - model_age_days (22 for a fresh
@@ -278,10 +284,12 @@ FROM  (
         SELECT t.dbid, t.con_dbid, t.last_day + h.h, 'CPU',
                t.metric, CASE t.metric WHEN 'DB_CPU_SEC' THEN 'sec' ELSE 'pct' END, 'REGR',
                h.h, h.val, h.lo, h.hi,
-               CASE WHEN t.metric <> 'DB_CPU_SEC' THEN 100 END,
-               CASE WHEN t.metric <> 'DB_CPU_SEC' THEN h.val END, t.quality
+               CASE WHEN t.metric <> 'DB_CPU_SEC' THEN cfg.cpu_sat_pct END,
+               CASE WHEN t.metric <> 'DB_CPU_SEC'
+                    THEN ROUND(100 * h.val / NULLIF(cfg.cpu_sat_pct, 0), 2) END, t.quality
         FROM   capf_cpu_trend t
-        CROSS  APPLY (SELECT 0 AS h, t.cur_val AS val, CAST(NULL AS NUMBER) AS lo, CAST(NULL AS NUMBER) AS hi FROM dual UNION ALL
+        CROSS  JOIN cap_cfg cfg
+        CROSS  APPLY (SELECT 0 AS h, t.anchor_value AS val, CAST(NULL AS NUMBER) AS lo, CAST(NULL AS NUMBER) AS hi FROM dual UNION ALL
                       SELECT 30, t.proj_30, t.proj_30_lo, t.proj_30_hi FROM dual UNION ALL
                       SELECT 90, t.proj_90, t.proj_90_lo, t.proj_90_hi FROM dual) h
         WHERE  t.quality <> 'INSUFFICIENT_HISTORY'
@@ -310,9 +318,9 @@ FROM  (
                       last_day, limit_bytes AS limit_val, quality
                FROM   capf_tbspc_forecast
                UNION ALL
-               SELECT dbid, con_dbid, 'CPU', metric, last_day,
-                      CASE WHEN metric <> 'DB_CPU_SEC' THEN 100 END, quality
-               FROM   capf_cpu_trend) f
+               SELECT t.dbid, t.con_dbid, 'CPU', t.metric, t.last_day,
+                      CASE WHEN t.metric <> 'DB_CPU_SEC' THEN cfg.cpu_sat_pct END, t.quality
+               FROM   capf_cpu_trend t CROSS JOIN cap_cfg cfg) f
           ON   f.dbid = t.dbid AND f.con_dbid = t.con_dbid
          AND   f.series_kind = t.series_kind AND f.series_key = t.series_key
         WHERE  t.engine = 'ESM'
@@ -320,3 +328,212 @@ FROM  (
       ) p
 LEFT   JOIN capr_container c
   ON   c.dbid = p.dbid AND c.con_dbid = p.con_dbid;
+
+-- --------------------------------------------------------------------
+-- CAPR_ALERTS -- one row per current issue, pollable by OEM metric
+-- extensions / Zabbix / Nagios / a scheduler job (cap_report_spool).
+--   severity   CRIT | WARN | INFO  (sev_rank 1 | 2 | 3)
+--   kind       forecast kinds (every non-OK CAPR_SEVERITY row; the rules
+--              and their gates are documented there):
+--                TBSPC_FULL       days_to_full <= dtf_warn on an OK fit, or a
+--                                 CYCLIC tablespace's peak line inside it
+--                TBSPC_NEARFULL   pct_used >= nearfull_warn_pct, any quality
+--                CPU_SAT          host BUSY_P95 (BUSY_PCT when
+--                                 cpu_sat_on_p95 = 0) days_to_sat <= dtf_warn
+--                DBCPU_SAT        a container's DB_CPU_PCT, same rule
+--                CPU_HOT          host BUSY_P95 recent_p95_med >= cpu_sat_pct
+--                                 now (CAPF_CPU_TREND.hot_now), any quality,
+--                                 WARN only
+--                DBCPU_HOT        a container's DB_CPU_P95, same rule
+--                SERIES_LIMIT     days_to_limit <= dtf_warn on an OK fit
+--                SERIES_NEARLIMIT pct_of_limit >= nearfull_warn_pct
+--              Every forecast kind needs is_current = 'Y'; per-tablespace
+--              thresholds come from CAP_TBSPC_OVERRIDE.
+--              CPU_SHIFT (M10.3) a flagged sustained level shift, UP = WARN,
+--              DOWN = INFO; capa_cpu_shift holds only the current state.
+--              DATA_STALE   the dbid's newest AWR snapshot is stale_hours or
+--              more old (CAPR_FRESHNESS, the one SYSDATE test), WARN.
+--              MODEL_HEALTH Tier 2 FORECAST models per container: WARN when
+--              any failed its last build, INFO when none failed but some are
+--              stale. No registry rows, no row: a Tier 1 install stays silent.
+--              TBSPC_ANOM / CPU_ANOM / DBCPU_ANOM / SERIES_ANOM: the alerting
+--              CAPR_ANOMALIES rows (alert_modes_<family> enables the mode and
+--              the day lies within anomaly_report_days), one row per (series,
+--              day, baseline_mode); HIGH = WARN, LOW = INFO.
+--   value, unit       the number that crossed (DAYS, PCT, HOURS, COUNT, BYTES,
+--                     GIB)
+--   threshold         the level it crossed: on the forecast kinds the CRIT
+--                     threshold on a CRIT row and the WARN one otherwise; on
+--                     an anomaly kind the bound crossed (expected +/- the
+--                     allowed deviation)
+--   alarm_threshold   the threshold that defines the WARN level, the same on
+--                     every severity (dtf_warn for TBSPC_FULL, the bound for an
+--                     anomaly, stale_hours for DATA_STALE, 1 model for
+--                     MODEL_HEALTH)
+--   direction         how value relates to alarm_threshold on an alert: LE
+--                     (value <= it: the countdowns), GE (value >= it: levels,
+--                     HIGH anomalies, DATA_STALE, MODEL_HEALTH), ABS
+--                     (|value| > it: CPU_SHIFT); a LOW anomaly is LE
+--   is_current        'Y' on every row today: forecast kinds require it,
+--                     the others are dated events or current states
+--   baseline_mode     the anomaly kinds' mode, NULL for every other kind
+--   alert_key         dbid|con_dbid|kind|series_key|YYYY-MM-DD|mode ('-' when
+--                     none): unique per ROW, so it changes with day_dt
+--   state_key         kind|dbid|con_dbid|series_key|mode: stable across days,
+--                     the key to track one issue from poll to poll
+-- So a poller can key, de-duplicate and alarm without parsing message.
+-- db_pdb resolves through CAPR_CONTAINER; unknown containers degrade to the
+-- raw con_dbid string.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capr_alerts AS
+WITH alerts AS (
+        -- ---- forecast kinds: CAPR_SEVERITY reads each CAPF_ view once ----
+        SELECT s.sev                   AS severity,
+               s.kind,
+               s.dbid, s.con_dbid,
+               s.series_key,
+               s.day_dt,
+               s.value,
+               s.threshold,
+               s.unit,
+               s.message,
+               CAST(NULL AS VARCHAR2(12)) AS baseline_mode,
+               s.direction,
+               s.alarm_threshold,
+               s.is_current
+        FROM   capr_severity s
+        WHERE  s.sev <> 'OK'
+        UNION ALL
+        -- ---- CPU_SHIFT: a sustained step in a CPU series (M10.3). Not a
+        -- forecast and not an outlier -- the level the machine runs at TODAY
+        -- differs from the level it ran at a month ago, which is a capacity
+        -- fact even when no single day ever looked odd. UP is a WARN (someone
+        -- added load); DOWN is INFO (load left -- worth knowing, not paging).
+        SELECT CASE WHEN s.shift_flag = 'UP' THEN 'WARN' ELSE 'INFO' END,
+               'CPU_SHIFT',
+               s.dbid, s.con_dbid,
+               s.metric,
+               s.last_day,
+               s.shift_pct,
+               s.threshold_pct,
+               'PCT',
+               CASE s.metric WHEN 'DB_CPU_PCT' THEN 'DB CPU' ELSE 'Host CPU' END
+                 || ' (' || s.metric || ') shifted '
+                 || TO_CHAR(s.shift_pct, 'FMS9999990.0') || ' pts: last '
+                 || TO_CHAR(s.recent_days, 'FM9999990') || ' days median '
+                 || TO_CHAR(s.recent_med, 'FM99999990.0') || '% vs prior '
+                 || TO_CHAR(s.base_days, 'FM9999990') || ' days '
+                 || TO_CHAR(s.base_med, 'FM99999990.0') || '%',
+               NULL,
+               'ABS',
+               s.threshold_pct,
+               'Y'
+        FROM   capa_cpu_shift s
+        WHERE  s.shift_flag IS NOT NULL
+        UNION ALL
+        -- ---- DATA_STALE: the dead-man check. A stalled AWR otherwise reads
+        -- as "no alerts" because every other test compares data with data.
+        SELECT 'WARN',
+               'DATA_STALE',
+               f.dbid, f.dbid,
+               'AWR_SNAPSHOT',
+               f.newest_day,
+               ROUND(f.age_hours, 1),
+               f.stale_hours,
+               'HOURS',
+               'No AWR snapshot for ' || f.db_name || ' (dbid ' || TO_CHAR(f.dbid) || ') since '
+                 || TO_CHAR(f.newest_snap, 'YYYY-MM-DD HH24:MI') || ', '
+                 || TO_CHAR(f.age_hours, 'FM9999990.0') || ' hours ago (stale_hours '
+                 || TO_CHAR(f.stale_hours) || '): its forecasts and alerts are frozen at that point',
+               NULL,
+               'GE',
+               f.stale_hours,
+               'Y'
+        FROM   capr_freshness f
+        WHERE  f.is_stale = 'Y'
+        UNION ALL
+        -- ---- MODEL_HEALTH: Tier 2 training that failed or went stale. The
+        -- newest error comes straight from the registry (CAPF_ESM_HEALTH
+        -- passes last_error / failed_at through unchanged).
+        SELECT CASE WHEN h.n_failed > 0 THEN 'WARN' ELSE 'INFO' END,
+               'MODEL_HEALTH',
+               h.dbid, h.con_dbid,
+               'ESM_MODELS',
+               TRUNC(CASE WHEN h.n_failed > 0 THEN h.last_failed_at ELSE h.last_trained_at END),
+               CASE WHEN h.n_failed > 0 THEN h.n_failed ELSE h.n_stale END,
+               1,
+               'COUNT',
+               'Tier 2 ESM forecast models: ' || TO_CHAR(h.n_failed) || ' failed, '
+                 || TO_CHAR(h.n_stale) || ' stale, ' || TO_CHAR(h.n_ok) || ' OK of '
+                 || TO_CHAR(h.n_models)
+                 || CASE WHEN e.last_error IS NOT NULL
+                         THEN '; newest error: '
+                              || SUBSTR(TRANSLATE(e.last_error, CHR(10) || CHR(13), '  '), 1, 120) END,
+               NULL,
+               'GE',
+               1,
+               'Y'
+        FROM   capf_esm_health_summary h
+        LEFT   JOIN (SELECT dbid, con_dbid,
+                            MAX(last_error) KEEP (DENSE_RANK LAST ORDER BY failed_at NULLS FIRST) AS last_error
+                     FROM   cap_ml_model
+                     WHERE  purpose = 'FORECAST' AND status = 'FAILED'
+                     GROUP  BY dbid, con_dbid) e
+          ON   e.dbid = h.dbid AND e.con_dbid = h.con_dbid
+        WHERE  h.n_failed > 0 OR h.n_stale > 0
+        UNION ALL
+        -- ---- TBSPC_ANOM / CPU_ANOM / DBCPU_ANOM / SERIES_ANOM (M15): the
+        -- alerting rows of CAPR_ANOMALIES, one per (series, day, baseline
+        -- mode). An HOUR_OF_WEEK day carries its worst hour (largest |z|,
+        -- earliest on a tie) and says how many hours flagged; it is a WARN
+        -- when any of them is. threshold = the bound crossed.
+        SELECT CASE WHEN x.day_rank = 2 THEN 'WARN' ELSE 'INFO' END,
+               x.alert_kind,
+               x.dbid, x.con_dbid,
+               x.series,
+               x.obs_day,
+               x.value,
+               x.expected + SIGN(x.value - x.expected) * x.threshold,
+               CASE x.unit WHEN 'bytes_per_day' THEN 'BYTES' WHEN 'pct' THEN 'PCT'
+                           WHEN 'count' THEN 'COUNT' ELSE 'GIB' END,
+               x.message || CASE WHEN x.n_events > 1
+                                 THEN '; ' || x.n_events || ' hours flagged that day' END,
+               x.baseline_mode,
+               CASE WHEN x.anomaly_flag = 'LOW' THEN 'LE' ELSE 'GE' END,
+               x.expected + SIGN(x.value - x.expected) * x.threshold,
+               'Y'
+        FROM  (SELECT a.*,
+                      ROW_NUMBER() OVER (PARTITION BY a.alert_kind, a.dbid, a.con_dbid, a.series,
+                                                      a.baseline_mode, a.obs_day
+                                         ORDER BY ABS(a.z) DESC NULLS LAST, a.ts) AS rn,
+                      COUNT(*)        OVER (PARTITION BY a.alert_kind, a.dbid, a.con_dbid, a.series,
+                                                     a.baseline_mode, a.obs_day)  AS n_events,
+                      MIN(a.sev_rank) OVER (PARTITION BY a.alert_kind, a.dbid, a.con_dbid, a.series,
+                                                     a.baseline_mode, a.obs_day)  AS day_rank
+               FROM   capr_anomalies a
+               WHERE  a.alerting = 'Y' AND a.anomaly_kind <> 'CPU_SHIFT') x
+        WHERE  x.rn = 1
+     )
+SELECT a.severity,
+       CASE a.severity WHEN 'CRIT' THEN 1 WHEN 'WARN' THEN 2 ELSE 3 END AS sev_rank,
+       a.kind,
+       a.dbid,
+       a.con_dbid,
+       NVL(c.db_pdb, TO_CHAR(a.con_dbid)) AS db_pdb,
+       a.series_key,
+       a.day_dt,
+       a.value,
+       a.threshold,
+       a.unit,
+       a.message,
+       a.baseline_mode,
+       a.dbid || '|' || a.con_dbid || '|' || a.kind || '|' || a.series_key || '|'
+         || TO_CHAR(a.day_dt, 'YYYY-MM-DD') || '|' || NVL(a.baseline_mode, '-') AS alert_key,
+       a.kind || '|' || a.dbid || '|' || a.con_dbid || '|' || a.series_key || '|'
+         || NVL(a.baseline_mode, '-')                                      AS state_key,
+       a.direction,
+       a.alarm_threshold,
+       a.is_current
+FROM   alerts a
+LEFT   JOIN capr_container c
+  ON   c.dbid = a.dbid AND c.con_dbid = a.con_dbid;
