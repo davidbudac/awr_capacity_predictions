@@ -682,7 +682,9 @@ come from one inline `ufloor (unit, grain)` table and are expressed as
 **threshold** floors in value units. `CAPA_OBS` also carries `gap_flag`,
 `is_complete`, `day_gap`, `ivl_hours`, the family's `alert_modes` bitmask and
 `headline_bit` (below). `CAPA_CPU_SHIFT` is not in the registry: it compares
-windows, not points.
+windows, not points. `anomaly_hour_grain = 0` drops the HOUR branch: no
+hourly scoring, alerts or ring tooltips, and every reader skips the hour
+history. The day verdicts do not change (the test flips it and counts them).
 
 ### Modes select the reference set
 
@@ -875,6 +877,20 @@ Self-join cost is O(points · window) for TRAILING at day grain (fine for
 reads `CAPA_OBS` through one CTE that Oracle materializes. Joined directly,
 the optimizer pushed the history join into `CAPA_OBS` and recomputed the daily
 sources per scored point. No hints are used.
+
+The two medians are where the time goes. Inside a large plan (`CAPR_ALERTS`,
+`CAPR_SERIES_POINTS`) every sort gets a small work area, and the median sorts
+over ~150 000 history rows (the demo story) went 70-plus passes to temp. The
+engine therefore reads the history rows once: `med` takes the median as an
+analytic `MEDIAN() OVER (PARTITION BY pid)`, `madc` the MAD about it with one
+`GROUP BY pid`, and both sorts carry only `(pid, value)`. `pid` numbers the
+scored point, `obs_id × 8 + mode_bit`, with `obs_id` a `ROW_NUMBER()` over the
+`CAPA_OBS` key, so it is deterministic. On the demo story this took
+`CAPR_ALERTS` from 26 s to 12 s and `CAPR_SERIES_POINTS` from 27 s to 8 s on
+the test VM; the results are identical (a `MINUS` both ways over every column
+returned no rows). `kind_last_day` (the newest DAY `ts` of the kind) rides
+along, so `CAPR_ANOMALIES` and `CAPR_CPU_ANOMALIES` need no second `CAPA_OBS`
+read for their windows.
 
 ## Layer 5 — Tier 2 OML ESM
 
@@ -1107,7 +1123,8 @@ the two drivers, and they cannot drift.
 | `CAPR_CPU_TREND` | 4 | per (container, metric) trend with `sat_worst`/`sat_best`, `hot_now`, and `sev` / `gated_by` / `gate` (the worst `CAPR_SEVERITY` sev of the metric's kinds, OK on a metric no kind judges) |
 | `CAPR_CPU_ANOMALIES` | 5a | every flagged CPU point, key `(dbid, con_dbid, metric, baseline_mode, ts)`: host `BUSY_PCT` and per-container `DB_CPU_PCT`, day rows (TRAILING, SAME_DOW) and hour rows (HOUR_OF_WEEK); `value_pct`, `median_pct`, `threshold_pct`, `z`, `n_hist`, `mode_short` / `mode_rank`, and `ts_str` (`YYYY-MM-DD`, or `YYYY-MM-DD Dy HH24:MI` for an hour, weekday NLS-proof) |
 | `CAPR_CPU_SHIFTS` | 5b | the M10.3 level shifts: flagged rows only, both medians, both window lengths and the N-of-M counts, ranked by `|shift_pct|` via `rank_shift` |
-| `CAPR_ESM_COMPARE` | 6a/6b | REGR vs ESM pivoted per (container, series, horizon), in raw units *and* GiB; filter on `series_kind`. Inherits `is_reportable` / `rank_report` from `CAPR_TBSPC_FORECAST` (CPU rows: always `'Y'`, rank 0) so 6a shows exactly section 2's tablespaces |
+| `CAPR_ESM_COMPARE` | 6a/6b | REGR vs ESM pivoted per (container, series, horizon), in raw units *and* GiB; filter on `series_kind`. Reads `is_reportable` / `rank_report` from `CAPR_TBSPC_RANK`, as `CAPR_TBSPC_FORECAST` does (CPU rows: always `'Y'`, rank 0), so 6a shows exactly section 2's tablespaces |
+| `CAPR_TBSPC_RANK` | 2, 6a | the M7.4 bound and the ranks (`is_reportable`, `rank_report`, `rank_chart`) over `CAPF_TBSPC_FORECAST`, decided once for both views above |
 | `CAPR_BACKTEST` | 6c | the M9.4 holdout scorecard pivoted per series, incl. the `better` verdict |
 | `CAPR_SERIES_ANOMALIES` | 7b | every flagged (day, baseline mode) of an M11 series: `value` (level, or GiB/day growth for `DB_SIZE_GB`), `raw_value`, `expected`, `threshold`, `z`, `n_hist`, `unit`, mode columns and `days_ago` from the last `CAPD_SERIES_DAILY` day |
 | `CAPR_SERIES` | 7 | the M11 fixed-ceiling series: `cur_val` / `cur_limit` / `sat_value` in the series' own `unit`, `pct_of_limit`, `days_to_limit` with its `limit_worst` / `limit_best` range, `quality`, `sev` (the worse `CAPR_SEVERITY` sev of SERIES_LIMIT and SERIES_NEARLIMIT) with `gated_by`, and `rank_series` (soonest to hit its limit first) |
@@ -1241,6 +1258,13 @@ Section 0 of the text report and the HTML header print the last run
 HTML "All clear" banner needs at least one dbid that is not retired. Both
 reports still evaluate the live views; the snapshot does not replace them.
 
+Each refresh also keeps `CAPR_COVERAGE` on its `CAP_RUN` row: `cov_n_dbid`,
+`cov_n_current` (not retired) and `cov_summary`, the per-dbid summaries joined
+with `|` (the HTML header's own aggregation). Columns on `CAP_RUN` rather
+than a table, so uninstall and purge need nothing new. SNAPSHOT reports print
+`cov_summary` (every dbid, not scoped); a run older than these columns falls
+back to its run summary. `CAPR_RUNS` exposes them last.
+
 The fixture (`test/run_test.sql`) runs a backdated run with FIX_LINEAR's and
 FIX_ZIGZAG's last 7 days hidden, so the digest and the accuracy view see a
 forecast genuinely issued a week earlier: FIX_LINEAR's error is 0 and its
@@ -1310,9 +1334,12 @@ order, `top_n` counted inside the scope, identical to `rank_*` when no scope
 is given. Section 6a joins section 2's scoped rank, so both list the same
 tablespaces. `source` is `LIVE` (default) or `SNAPSHOT`: SNAPSHOT reads the
 alert list from `CAPR_ALERTS_LATEST`, the section 1 and 7 tables from
-`CAPR_FIT_HISTORY` of the newest OK live refresh run, and prints that run's
-summary as the coverage line (`CAPR_COVERAGE` is not snapshotted); the header
-says which run. A section with a constant false predicate on the other
+`CAPR_FIT_HISTORY` of the newest OK live refresh run, and prints the
+`CAPR_COVERAGE` roll-up that run kept (`CAP_RUN.cov_summary`) as the coverage
+line; the header says which run. Sections 2 to 6 stay live in SNAPSHOT:
+`CAP_FIT_HIST` has the fit columns but not what those sections print beside
+them (the +30/+90/+180 projections and bands, the ESM point, the CPU anchor
+and gate, the anomaly rows, the ESM compare and backtest). A section with a constant false predicate on the other
 source never evaluates it, so SNAPSHOT skips the live `CAPR_ALERTS`
 evaluation. `report/report_csv.sql [dbid] [con_dbid]` writes one quoted CSV
 per CAPR section view (`SET MARKUP CSV ON QUOTE ON`, header line, every row
@@ -1330,6 +1357,27 @@ failing query closes any open table, prints a red "Section N failed:
 footer says how many sections failed. The healthy-chip groups of section 0
 (tablespaces, series, hosts) each stop at 30 chips and print "+N more", so
 a fleet cannot overflow the 32000-byte accumulator.
+
+**Report cost (U12).** Each read of a `CAPA_ANOM`-backed or forecast view
+re-runs its chain, so a view read many times dominates. The HTML driver reads
+each heavy view once into a PL/SQL collection at the header (the alert list
+with the orders of its three consumers precomputed as `ROW_NUMBER()` columns,
+the flagged series points, the three anomaly views with their strip
+aggregates and dot order, days-to-full, the CPU trend with its projection
+columns, the series and the level shifts) and every consumer iterates the
+copy; the section tables with a SNAPSHOT branch keep their own query. A
+collection that failed to load fails only the sections that use it. Section
+0 of the text report reads the alert source once: a materialized `WITH`
+feeds both a `TOTAL` row (the counts by severity) and the list. Section 6
+reads `CAPR_TBSPC_RANK` for section 2's rank, so it no longer walks
+`CAPF_COMPARE` twice, and both headers read `CAPF_ESM_HEALTH_SUMMARY` once.
+`DEFINE timing = Y` before a run prints the wall seconds per section (text:
+a `TIMING START` / `STOP` pair per section through
+`report/sections/timing_*.sql`; HTML: an HTML comment at the end, from
+`DBMS_UTILITY.GET_TIME`). On the demo story on the test VM the HTML went from
+673 s to 164 s and the text from 222 s to 103 s; most of what is left is the
+forecast chain (`CAPF_COMPARE`, `CAPR_FIT`, `CAPR_COVERAGE`) sorting through
+small work areas on a 2-CPU VM whose PGA is overcommitted.
 
 **M21 — Prometheus.** `grafana/ords/awrcap_module.sql` publishes a PL/SQL GET
 handler `metrics` next to the JSON ones: the text exposition format over

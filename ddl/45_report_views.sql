@@ -80,24 +80,18 @@ FROM   capv_container c;
 --   doc_key       the stable id input for exporters (unique).
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_anomalies AS
-WITH lastd AS (
-        SELECT kind, MAX(ts) AS last_day
-        FROM   capa_obs
-        WHERE  grain = 'DAY'
-        GROUP  BY kind
-     ),
-     pt AS (
+WITH pt AS (
         SELECT a.*,
                CASE WHEN a.alerting_mode = 'Y'
-                     AND TRUNC(a.ts) > l.last_day - cfg.anomaly_report_days
+                     AND TRUNC(a.ts) > a.kind_last_day - cfg.anomaly_report_days
                     THEN 'Y' ELSE 'N' END                                     AS alerting,
                DECODE(a.dow, 0, 'Mon', 1, 'Tue', 2, 'Wed', 3, 'Thu',
                              4, 'Fri', 5, 'Sat', 'Sun')                        AS dy,
                cfg.mad_window_days, cfg.train_days
         FROM   capa_anom a
         CROSS  JOIN cap_cfg cfg
-        JOIN   lastd l ON l.kind = a.kind
         WHERE  a.anomaly_flag IS NOT NULL
+          AND  a.kind_last_day IS NOT NULL
      ),
      fmt AS (
         SELECT p.*,
@@ -121,7 +115,7 @@ WITH lastd AS (
                                ELSE ' grew less than usual: ' END
                        || TO_CHAR(ABS(p.raw_value), 'FM99999990.00') || ' GiB'
                    WHEN 'CPU_BUSY'   THEN 'Host CPU ' || TO_CHAR(p.value, 'FM990.0') || '% busy'
-                   WHEN 'DBCPU_BUSY' THEN 'DB CPU ' || TO_CHAR(p.value, 'FM990.0') || '% of host CPUs'
+                   WHEN 'DBCPU_BUSY' THEN 'DB CPU ' || TO_CHAR(p.value, 'FM990.0') || '% of logical CPUs'
                    ELSE p.series || ' at '
                         || CASE p.unit WHEN 'COUNT' THEN TO_CHAR(p.value, 'FM99999999990')
                                        ELSE TO_CHAR(p.value, 'FM9999990.00') || ' GiB/day' END
@@ -355,7 +349,7 @@ WITH src AS (
                        || ' days (now ' || TO_CHAR(t.cur_val, 'FM990.0') || '% busy)'
                    WHEN 'DBCPU_SAT' THEN
                        'DB CPU forecast to reach ' || TO_CHAR(cfg.cpu_sat_pct, 'FM990')
-                       || '% of host core capacity in ' || TO_CHAR(t.days_to_sat, 'FM9999990')
+                       || '% of logical CPUs in ' || TO_CHAR(t.days_to_sat, 'FM9999990')
                        || ' days (now ' || TO_CHAR(t.cur_val, 'FM990.0') || '%)'
                    WHEN 'CPU_HOT' THEN
                        'Host CPU busy-hour p95 has been at ' || TO_CHAR(t.recent_p95_med, 'FM990.0')
@@ -363,7 +357,7 @@ WITH src AS (
                        || ' complete days) vs the saturation line ' || TO_CHAR(cfg.cpu_sat_pct, 'FM990') || '%'
                    ELSE
                        'DB CPU busy-hour p95 has been at ' || TO_CHAR(t.recent_p95_med, 'FM990.0')
-                       || '% of host core capacity (median of the last ' || TO_CHAR(cfg.shift_days, 'FM9990')
+                       || '% of logical CPUs (median of the last ' || TO_CHAR(cfg.shift_days, 'FM9990')
                        || ' complete days) vs the saturation line ' || TO_CHAR(cfg.cpu_sat_pct, 'FM990') || '%'
                END
         FROM   capf_cpu_trend t
@@ -689,7 +683,7 @@ SELECT a.dbid,
        NVL(c.db_pdb, TO_CHAR(a.con_dbid))    AS db_pdb,
        TRUNC(a.ts)                           AS day_dt,
        TO_CHAR(a.ts, 'YYYY-MM-DD')           AS day_str,
-       (SELECT MAX(ts) FROM capa_obs WHERE kind = 'CPU' AND grain = 'DAY') - TRUNC(a.ts) AS days_ago,
+       a.kind_last_day - TRUNC(a.ts)         AS days_ago,
        a.value                               AS value_pct,
        a.expected                            AS median_pct,
        a.threshold                           AS threshold_pct,

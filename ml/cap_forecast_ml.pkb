@@ -323,7 +323,7 @@ CREATE OR REPLACE PACKAGE BODY cap_forecast_ml AS
             v_model := model_name_for('CBTC', r.dbid, r.con_dbid, 'BUSY_PCT');
             v_q := 'SELECT day_dt, busy_pct FROM capd_cpu_daily'
                 || ' WHERE dbid=' || r.dbid || ' AND con_dbid=' || r.con_dbid
-                || ' AND busy_pct IS NOT NULL'
+                || ' AND busy_pct IS NOT NULL AND is_complete = ''Y'''
                 || ' AND day_dt <= DATE ''' || TO_CHAR(v_cut, 'YYYY-MM-DD') || '''';
             build_model(v_model, 'CPU', r.dbid, r.con_dbid, 'BUSY_PCT',
                         c_addw, c_addw_seas, v_q, 'BUSY_PCT', v_cut, 'BACKTEST');
@@ -336,7 +336,7 @@ CREATE OR REPLACE PACKAGE BODY cap_forecast_ml AS
             v_model := model_name_for('CBTD', r.dbid, r.con_dbid, 'DB_CPU_SEC');
             v_q := 'SELECT day_dt, db_cpu_sec FROM capd_dbtime_daily'
                 || ' WHERE dbid=' || r.dbid || ' AND con_dbid=' || r.con_dbid
-                || ' AND db_cpu_sec IS NOT NULL'
+                || ' AND db_cpu_sec IS NOT NULL AND is_complete = ''Y'''
                 || ' AND day_dt <= DATE ''' || TO_CHAR(v_cut, 'YYYY-MM-DD') || '''';
             build_model(v_model, 'DBCPU', r.dbid, r.con_dbid, 'DB_CPU_SEC',
                         c_addw, c_addw_seas, v_q, 'DB_CPU_SEC', v_cut, 'BACKTEST');
@@ -455,13 +455,14 @@ CREATE OR REPLACE PACKAGE BODY cap_forecast_ml AS
         v_q     CLOB;
     BEGIN
         -- host busy% : Holt-Winters additive, weekly season. M10.4: only where
-        -- the Tier 1 CPU fit is OK / LOW_CONFIDENCE.
+        -- the Tier 1 CPU fit is OK / LOW_CONFIDENCE. Complete days only, as the
+        -- Tier 1 fit: a partial first, restart or current day reads low.
         FOR r IN (SELECT dbid, con_dbid, last_day FROM capf_cpu_trend
                   WHERE  metric = 'BUSY_PCT' AND quality IN ('OK', 'LOW_CONFIDENCE')) LOOP
             v_model := model_name_for('CAPC', r.dbid, r.con_dbid, 'BUSY_PCT');
             v_q := 'SELECT day_dt, busy_pct FROM capd_cpu_daily'
                 || ' WHERE dbid=' || r.dbid || ' AND con_dbid=' || r.con_dbid
-                || ' AND busy_pct IS NOT NULL';
+                || ' AND busy_pct IS NOT NULL AND is_complete = ''Y''';
             build_model(v_model, 'CPU', r.dbid, r.con_dbid, 'BUSY_PCT',
                         c_addw, c_addw_seas, v_q, 'BUSY_PCT', r.last_day);
         END LOOP;
@@ -472,7 +473,7 @@ CREATE OR REPLACE PACKAGE BODY cap_forecast_ml AS
             v_model := model_name_for('CAPD', r.dbid, r.con_dbid, 'DB_CPU_SEC');
             v_q := 'SELECT day_dt, db_cpu_sec FROM capd_dbtime_daily'
                 || ' WHERE dbid=' || r.dbid || ' AND con_dbid=' || r.con_dbid
-                || ' AND db_cpu_sec IS NOT NULL';
+                || ' AND db_cpu_sec IS NOT NULL AND is_complete = ''Y''';
             build_model(v_model, 'DBCPU', r.dbid, r.con_dbid, 'DB_CPU_SEC',
                         c_addw, c_addw_seas, v_q, 'DB_CPU_SEC', r.last_day);
         END LOOP;

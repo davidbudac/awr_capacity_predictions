@@ -23,7 +23,9 @@
 -- Arguments are positional and optional (M7.6); each one omitted (or '-')
 -- falls back to report/defaults.sql. show_esm is AUTO | Y | N. [dbid]
 -- [con_dbid] scope every section and rank top_n inside the scope; [source]
--- LIVE (default) or SNAPSHOT, as in report/report.sql.
+-- LIVE (default) or SNAPSHOT, as in report/report.sql. DEFINE timing = Y
+-- before the run adds the wall seconds per section in an HTML comment at the
+-- end of the page.
 --
 -- Each section renders inside its own exception handler: a failing query
 -- prints a visible "section N failed" block and the page carries on; the
@@ -70,6 +72,12 @@ COLUMN 5 NEW_VALUE 5 NOPRINT
 COLUMN 6 NEW_VALUE 6 NOPRINT
 SELECT NULL AS "1", NULL AS "2", NULL AS "3",
        NULL AS "4", NULL AS "5", NULL AS "6" FROM dual WHERE 1 = 0;
+
+-- DEFINE timing = Y before the run prints seconds per section in an HTML
+-- comment at the end of the page. Same zero-row trick: an undefined timing
+-- becomes empty (off), a defined one is kept.
+COLUMN cap_tm NEW_VALUE timing NOPRINT
+SELECT NULL AS cap_tm FROM dual WHERE 1 = 0;
 
 -- Effective knobs = positional argument, else the defaults.sql value. An
 -- omitted argument is the empty string, and '' IS NULL in Oracle, so NVL
@@ -137,14 +145,17 @@ SELECT c.dtf_warn                                         AS dtf_warn,
        c.nearfull_warn_pct                                AS nf_warn,
        c.nearfull_crit_pct                                AS nf_crit,
        -- Tier 2 health, FORECAST models only (same counts as report.sql).
-       (SELECT NVL(SUM(n_ok), 0)     FROM capf_esm_health_summary) AS esm_ok,
-       (SELECT NVL(SUM(n_failed), 0) FROM capf_esm_health_summary) AS esm_failed,
-       (SELECT NVL(SUM(n_stale), 0)  FROM capf_esm_health_summary) AS esm_stale,
+       h.n_ok                                             AS esm_ok,
+       h.n_failed                                         AS esm_failed,
+       h.n_stale                                          AS esm_stale,
        c.train_days                                       AS train_days,
        c.min_train_days                                   AS min_train_days,
        c.r2_gate                                          AS r2_gate,
        c.report_min_gb                                    AS min_gb
-FROM   cap_cfg c;
+FROM   cap_cfg c
+CROSS  JOIN (SELECT NVL(SUM(n_ok), 0) AS n_ok, NVL(SUM(n_failed), 0) AS n_failed,
+                    NVL(SUM(n_stale), 0) AS n_stale
+             FROM   capf_esm_health_summary) h;
 
 -- --------------------------------------------------------------------
 -- Bind the substitution-variable knobs into SQL*Plus bind variables while
@@ -178,6 +189,7 @@ VARIABLE b_cap_file     VARCHAR2(200)
 VARIABLE b_sdbid        NUMBER
 VARIABLE b_scon         NUMBER
 VARIABLE b_src          VARCHAR2(10)
+VARIABLE b_timing       VARCHAR2(10)
 
 BEGIN
   :b_top_n        := &top_n;
@@ -203,6 +215,7 @@ BEGIN
   :b_sdbid        := &cap_sdbid;
   :b_scon         := &cap_scon;
   :b_src          := '&cap_src';
+  :b_timing       := UPPER(TRIM('&timing'));
 END;
 /
 
@@ -454,6 +467,208 @@ DECLARE
   v_chips     PLS_INTEGER := 0;
   v_last_day  DATE;
   v_tmp       VARCHAR2(32000);
+  -- DEFINE timing = Y: wall seconds per section (tmark), printed at the end.
+  v_timing    BOOLEAN := :b_timing = 'Y';
+  v_t0        PLS_INTEGER := DBMS_UTILITY.GET_TIME;
+  v_tlast     PLS_INTEGER := DBMS_UTILITY.GET_TIME;
+  v_tlog      VARCHAR2(4000);
+
+  ----------------------------------------------------------------------
+  -- Views read ONCE, in the header block, then iterated by every consumer:
+  -- each read of a CAPA_ANOM-backed view re-runs the anomaly engine.
+  -- t_al  the alert source (CAPR_ALERTS, or CAPR_ALERTS_LATEST under
+  --       SNAPSHOT), every row; in_scope marks the scoped ones, and
+  --       o_first / o_attn / o_info number the KPI's first critical item,
+  --       the attention list and the informational fold in their order.
+  -- t_sp  the CAPR_SERIES_POINTS rows the charts draw: the flagged points
+  --       (anomaly rings) and the DB_SIZE_GB history (the size hero).
+  ----------------------------------------------------------------------
+  CURSOR c_al IS
+    SELECT a.*,
+           CASE WHEN a.in_scope = 1 AND a.severity = 'CRIT'
+                THEN ROW_NUMBER() OVER (PARTITION BY a.in_scope, a.severity
+                                        ORDER BY a.sev_rank, a.value) END            AS o_first,
+           CASE WHEN a.in_scope = 1 AND a.severity IN ('CRIT','WARN')
+                THEN ROW_NUMBER() OVER (PARTITION BY a.in_scope, CASE WHEN a.severity IN ('CRIT','WARN') THEN 1 END
+                                        ORDER BY CASE a.kind WHEN 'DATA_STALE' THEN 0 ELSE 1 END,
+                                                 a.sev_rank, a.kord, a.value) END   AS o_attn,
+           CASE WHEN a.in_scope = 1 AND a.severity = 'INFO'
+                THEN ROW_NUMBER() OVER (PARTITION BY a.in_scope, a.severity
+                                        ORDER BY a.kind, a.value) END               AS o_info
+    FROM  (SELECT u.*,
+                  CASE WHEN (s_dbid IS NULL OR u.dbid = s_dbid) AND (s_con IS NULL OR u.con_dbid = s_con)
+                       THEN 1 ELSE 0 END AS in_scope,
+                  CASE u.kind WHEN 'DATA_STALE' THEN 0
+                              WHEN 'TBSPC_FULL' THEN 1 WHEN 'CPU_SAT' THEN 2 WHEN 'DBCPU_SAT' THEN 2 WHEN 'SERIES_LIMIT' THEN 3
+                              WHEN 'CPU_SHIFT' THEN 4 WHEN 'TBSPC_NEARFULL' THEN 5 WHEN 'SERIES_NEARLIMIT' THEN 6
+                              WHEN 'CPU_HOT' THEN 6 WHEN 'DBCPU_HOT' THEN 6
+                              WHEN 'TBSPC_ANOM' THEN 7 WHEN 'CPU_ANOM' THEN 8 WHEN 'DBCPU_ANOM' THEN 9
+                              WHEN 'SERIES_ANOM' THEN 10 WHEN 'MODEL_HEALTH' THEN 12 ELSE 11 END AS kord
+           FROM  (SELECT severity, sev_rank, kind, dbid, con_dbid, db_pdb, series_key, day_dt, value,
+                         threshold, unit, message, baseline_mode
+                  FROM   capr_alerts        WHERE v_src = 'LIVE'
+                  UNION ALL
+                  SELECT severity, sev_rank, kind, dbid, con_dbid, db_pdb, series_key, day_dt, value,
+                         threshold, unit, message, baseline_mode
+                  FROM   capr_alerts_latest WHERE v_src = 'SNAPSHOT') u) a;
+  TYPE al_tab IS TABLE OF c_al%ROWTYPE INDEX BY PLS_INTEGER;
+  TYPE ix_tab IS TABLE OF PLS_INTEGER INDEX BY PLS_INTEGER;
+  t_al     al_tab;
+  ix_attn  ix_tab;
+  ix_info  ix_tab;
+  v_al_ok  BOOLEAN := FALSE;
+  CURSOR c_sp IS
+    SELECT dbid, con_dbid, kind, series, ts, value, anomaly, anomaly_modes, how_hours_flagged
+    FROM   capr_series_points
+    WHERE  anomaly = 1 OR (kind = 'SERIES' AND series = 'DB_SIZE_GB')
+    ORDER  BY dbid, con_dbid, kind, series, ts;
+  TYPE sp_tab IS TABLE OF c_sp%ROWTYPE INDEX BY PLS_INTEGER;
+  t_sp     sp_tab;
+  v_sp_err VARCHAR2(4000);
+  -- t_ta / t_ca / t_xa: CAPR_TBSPC_ANOMALIES / CAPR_CPU_ANOMALIES /
+  -- CAPR_SERIES_ANOMALIES, every flagged row, in the order of the section's
+  -- detail table. in_win = inside the report's anomaly_days, in_scope = the
+  -- scope. The strip columns are the section's strip aggregates (over the
+  -- in-window rows in scope) and strip_rank their order; rn_dot = 1 marks
+  -- the row that draws a strip dot (largest |z| of its day or hour), dot_ord
+  -- the dots' order (by time), n_modes how many baselines flagged the point.
+  CURSOR c_ta IS
+    SELECT y.*,
+           CASE WHEN y.in_win = 1 AND y.in_scope = 1
+                THEN DENSE_RANK() OVER (PARTITION BY y.in_win, y.in_scope
+                                        ORDER BY y.n_all DESC, y.max_z DESC, y.tablespace_name,
+                                                 y.con_dbid, y.db_pdb) END                AS strip_rank,
+           CASE WHEN y.in_win = 1 AND y.rn_dot = 1
+                THEN ROW_NUMBER() OVER (PARTITION BY CASE WHEN y.in_win = 1 AND y.rn_dot = 1 THEN 1 END
+                                        ORDER BY y.con_dbid, y.tablespace_name, y.day_dt) END AS dot_ord
+    FROM  (SELECT x.*,
+                  COUNT(DISTINCT CASE WHEN x.in_win = 1 AND x.in_scope = 1 THEN x.day_dt END)
+                    OVER (PARTITION BY x.con_dbid, x.tablespace_name, x.db_pdb)            AS n_all,
+                  COUNT(DISTINCT CASE WHEN x.in_win = 1 AND x.in_scope = 1 AND x.anomaly_flag = 'HIGH' THEN x.day_dt END)
+                    OVER (PARTITION BY x.con_dbid, x.tablespace_name, x.db_pdb)            AS n_hi,
+                  COUNT(DISTINCT CASE WHEN x.in_win = 1 AND x.in_scope = 1 AND x.anomaly_flag = 'LOW' THEN x.day_dt END)
+                    OVER (PARTITION BY x.con_dbid, x.tablespace_name, x.db_pdb)            AS n_lo,
+                  MAX(CASE WHEN x.in_win = 1 AND x.in_scope = 1 THEN ABS(x.delta_mb) END)
+                    OVER (PARTITION BY x.con_dbid, x.tablespace_name, x.db_pdb)            AS max_delta,
+                  MAX(CASE WHEN x.in_win = 1 AND x.in_scope = 1 THEN ABS(x.z) END)
+                    OVER (PARTITION BY x.con_dbid, x.tablespace_name, x.db_pdb)            AS max_z,
+                  ROW_NUMBER() OVER (PARTITION BY x.con_dbid, x.tablespace_name, x.in_win, x.day_dt
+                                     ORDER BY ABS(x.z) DESC NULLS LAST, x.mode_rank)       AS rn_dot,
+                  COUNT(*)     OVER (PARTITION BY x.con_dbid, x.tablespace_name, x.in_win, x.day_dt) AS n_modes
+           FROM  (SELECT t.dbid, t.con_dbid, t.db_pdb, t.tablespace_name, t.day_dt, t.day_str, t.days_ago,
+                         t.gap, t.delta_mb, t.rate_mb, t.med_mb, t.thr_mb, t.z, t.pct_vs_med, t.pct_vs_avg,
+                         t.anomaly_flag, t.baseline_mode, t.mode_rank,
+                         CASE WHEN t.days_ago < anomaly_days THEN 1 ELSE 0 END             AS in_win,
+                         CASE WHEN (s_dbid IS NULL OR t.dbid = s_dbid) AND (s_con IS NULL OR t.con_dbid = s_con)
+                              THEN 1 ELSE 0 END                                            AS in_scope
+                  FROM   capr_tbspc_anomalies t) x) y
+    ORDER  BY y.con_dbid, y.tablespace_name, y.days_ago, y.mode_rank, y.dbid;
+  TYPE ta_tab IS TABLE OF c_ta%ROWTYPE INDEX BY PLS_INTEGER;
+  t_ta     ta_tab;
+  ix_tstr  ix_tab;
+  ix_tdot  ix_tab;
+  v_ta_err VARCHAR2(4000);
+  CURSOR c_ca IS
+    SELECT y.*,
+           CASE WHEN y.in_win = 1 AND y.in_scope = 1
+                THEN DENSE_RANK() OVER (PARTITION BY y.in_win, y.in_scope
+                                        ORDER BY y.n_all DESC, y.con_dbid, y.metric, y.db_pdb) END AS strip_rank,
+           CASE WHEN y.in_win = 1 AND y.rn_dot = 1
+                THEN ROW_NUMBER() OVER (PARTITION BY CASE WHEN y.in_win = 1 AND y.rn_dot = 1 THEN 1 END
+                                        ORDER BY y.con_dbid, y.metric, y.grain, y.ts) END AS dot_ord
+    FROM  (SELECT x.*,
+                  COUNT(DISTINCT CASE WHEN x.in_win = 1 AND x.in_scope = 1 THEN x.grain || TO_CHAR(x.ts, 'YYYYMMDDHH24') END)
+                    OVER (PARTITION BY x.con_dbid, x.db_pdb, x.metric)                     AS n_all,
+                  COUNT(DISTINCT CASE WHEN x.in_win = 1 AND x.in_scope = 1 AND x.anomaly_flag = 'HIGH'
+                                      THEN x.grain || TO_CHAR(x.ts, 'YYYYMMDDHH24') END)
+                    OVER (PARTITION BY x.con_dbid, x.db_pdb, x.metric)                     AS n_hi,
+                  COUNT(DISTINCT CASE WHEN x.in_win = 1 AND x.in_scope = 1 AND x.anomaly_flag = 'LOW'
+                                      THEN x.grain || TO_CHAR(x.ts, 'YYYYMMDDHH24') END)
+                    OVER (PARTITION BY x.con_dbid, x.db_pdb, x.metric)                     AS n_lo,
+                  MAX(CASE WHEN x.in_win = 1 AND x.in_scope = 1 THEN x.value_pct END)
+                    OVER (PARTITION BY x.con_dbid, x.db_pdb, x.metric)                     AS max_busy,
+                  ROW_NUMBER() OVER (PARTITION BY x.con_dbid, x.metric, x.in_win, x.grain, x.ts
+                                     ORDER BY ABS(x.z) DESC NULLS LAST, x.mode_rank)       AS rn_dot,
+                  COUNT(*)     OVER (PARTITION BY x.con_dbid, x.metric, x.in_win, x.grain, x.ts) AS n_modes
+           FROM  (SELECT c.dbid, c.con_dbid, c.db_pdb, c.day_dt, c.days_ago, c.value_pct, c.median_pct,
+                         c.threshold_pct, c.z, c.pct_vs_med, c.anomaly_flag, c.metric, c.baseline_mode,
+                         c.mode_rank, c.grain, c.ts, c.ts_str,
+                         CASE WHEN c.days_ago < anomaly_days THEN 1 ELSE 0 END             AS in_win,
+                         CASE WHEN (s_dbid IS NULL OR c.dbid = s_dbid) AND (s_con IS NULL OR c.con_dbid = s_con)
+                              THEN 1 ELSE 0 END                                            AS in_scope
+                  FROM   capr_cpu_anomalies c) x) y
+    ORDER  BY y.days_ago, y.con_dbid, y.metric, y.mode_rank, y.ts, y.dbid;
+  TYPE ca_tab IS TABLE OF c_ca%ROWTYPE INDEX BY PLS_INTEGER;
+  t_ca     ca_tab;
+  ix_cstr  ix_tab;
+  ix_cdot  ix_tab;
+  v_ca_err VARCHAR2(4000);
+  CURSOR c_xa IS
+    SELECT x.dbid, x.con_dbid, x.db_pdb, x.series, x.unit, x.day_dt, x.day_str, x.days_ago, x.baseline_mode,
+           x.mode_rank, x.value, x.expected, x.threshold, x.z, x.n_hist, x.pct_vs_med, x.anomaly_flag,
+           CASE WHEN x.days_ago < anomaly_days THEN 1 ELSE 0 END                           AS in_win,
+           CASE WHEN (s_dbid IS NULL OR x.dbid = s_dbid) AND (s_con IS NULL OR x.con_dbid = s_con)
+                THEN 1 ELSE 0 END                                                          AS in_scope
+    FROM   capr_series_anomalies x
+    ORDER  BY x.days_ago, x.con_dbid, x.series, x.mode_rank, x.dbid;
+  TYPE xa_tab IS TABLE OF c_xa%ROWTYPE INDEX BY PLS_INTEGER;
+  t_xa     xa_tab;
+  v_xa_err VARCHAR2(4000);
+  v_ca_n    PLS_INTEGER;
+  v_ca_best PLS_INTEGER;
+  -- t_dtf / t_ct / t_se / t_cs: CAPR_TBSPC_DAYS_TO_FULL, CAPR_CPU_TREND (with
+  -- the CAPF_CPU_TREND projection columns the charts draw), CAPR_SERIES and
+  -- CAPR_CPU_SHIFTS, every row, for the header KPIs, the attention list's
+  -- detail lines, the healthy chips, the heroes and the section 4 cards. The
+  -- section tables keep their own query (one read each).
+  CURSOR c_dtf IS
+    SELECT t.dbid, t.con_dbid, t.db_pdb, t.tablespace_name, t.slope_mb, t.cur_gb, t.limit_gb, t.dtf_worst,
+           t.accel, t.pct_used, t.days_to_full, t.need_gib_90, t.add_by_day, t.quality,
+           CASE WHEN (s_dbid IS NULL OR t.dbid = s_dbid) AND (s_con IS NULL OR t.con_dbid = s_con)
+                THEN 1 ELSE 0 END                                                          AS in_scope,
+           ROW_NUMBER() OVER (ORDER BY CASE WHEN t.quality = 'OK' AND t.days_to_full IS NOT NULL THEN 0 ELSE 1 END,
+                                       t.days_to_full, t.tablespace_name, t.con_dbid, t.dbid) AS o_chip
+    FROM   capr_tbspc_days_to_full t
+    ORDER  BY t.con_dbid, t.tablespace_name, t.dbid;
+  TYPE dtf_tab IS TABLE OF c_dtf%ROWTYPE INDEX BY PLS_INTEGER;
+  t_dtf    dtf_tab;
+  ix_dchip ix_tab;
+  v_dtf_ok BOOLEAN := FALSE;
+  CURSOR c_ct IS
+    SELECT t.dbid, t.con_dbid, t.db_pdb, t.metric, t.cur_val, t.days_to_sat, t.sat_worst, t.sat_best, t.r2,
+           t.quality, t.slope_per_day, t.last_day, t.anchor_value,
+           f.proj_30, f.proj_90, f.proj_30_lo, f.proj_30_hi, f.proj_90_lo, f.proj_90_hi,
+           CASE WHEN (s_dbid IS NULL OR t.dbid = s_dbid) AND (s_con IS NULL OR t.con_dbid = s_con)
+                THEN 1 ELSE 0 END                                                          AS in_scope
+    FROM   capr_cpu_trend t
+    LEFT   JOIN capf_cpu_trend f ON f.dbid = t.dbid AND f.con_dbid = t.con_dbid AND f.metric = t.metric
+    ORDER  BY t.con_dbid, t.metric, t.dbid;
+  TYPE ct_tab IS TABLE OF c_ct%ROWTYPE INDEX BY PLS_INTEGER;
+  t_ct     ct_tab;
+  v_ct_ok  BOOLEAN := FALSE;
+  CURSOR c_se IS
+    SELECT s.dbid, s.con_dbid, s.db_pdb, s.series, s.cur_val, s.cur_limit, s.unit, s.pct_of_limit,
+           s.slope_per_day, s.sat_value, s.days_to_limit, s.limit_worst, s.limit_best, s.quality,
+           s.last_day, s.rank_series,
+           CASE WHEN (s_dbid IS NULL OR s.dbid = s_dbid) AND (s_con IS NULL OR s.con_dbid = s_con)
+                THEN 1 ELSE 0 END                                                          AS in_scope,
+           CASE WHEN s.series = 'DB_SIZE_GB'
+                THEN ROW_NUMBER() OVER (PARTITION BY CASE WHEN s.series = 'DB_SIZE_GB' THEN 1 END
+                                        ORDER BY s.dbid, s.con_dbid) END                    AS o_hero
+    FROM   capr_series s
+    ORDER  BY s.rank_series;
+  TYPE se_tab IS TABLE OF c_se%ROWTYPE INDEX BY PLS_INTEGER;
+  t_se     se_tab;
+  ix_hero  ix_tab;
+  v_se_err VARCHAR2(4000);
+  CURSOR c_cs IS
+    SELECT dbid, con_dbid, metric, recent_days, base_days, recent_med, base_med, n_above, n_below, n_recent,
+           shift_flag, last_day, shift_pct, sev, rank_shift
+    FROM   capr_cpu_shifts
+    ORDER  BY rank_shift;
+  TYPE cs_tab IS TABLE OF c_cs%ROWTYPE INDEX BY PLS_INTEGER;
+  t_cs     cs_tab;
+  v_cs_err VARCHAR2(4000);
   c_chip_cap  CONSTANT PLS_INTEGER := 30;   -- healthy chips per group (tablespaces, series, hosts)
   v_n         NUMBER;
   v_horizon   NUMBER;
@@ -471,6 +686,51 @@ DECLARE
   BEGIN
     DBMS_OUTPUT.PUT_LINE(line);
   END p;
+
+  PROCEDURE tmark(p_lbl IN VARCHAR2) IS
+    v_now PLS_INTEGER := DBMS_UTILITY.GET_TIME;
+  BEGIN
+    IF v_timing THEN
+      v_tlog := v_tlog || CHR(10) || RPAD(p_lbl, 10) || TO_CHAR((v_now - v_tlast) / 100, 'FM999990.00');
+    END IF;
+    v_tlast := v_now;
+  END tmark;
+
+  -- A consumer of t_al / t_sp fails its section like a failed query would.
+  PROCEDURE need_al IS
+  BEGIN
+    IF NOT v_al_ok THEN RAISE_APPLICATION_ERROR(-20001, 'the alert list could not be read (see the header)'); END IF;
+  END need_al;
+  PROCEDURE need_sp IS
+  BEGIN
+    IF v_sp_err IS NOT NULL THEN RAISE_APPLICATION_ERROR(-20001, v_sp_err); END IF;
+  END need_sp;
+  PROCEDURE need_anom(p_err IN VARCHAR2) IS
+  BEGIN
+    IF p_err IS NOT NULL THEN RAISE_APPLICATION_ERROR(-20001, p_err); END IF;
+  END need_anom;
+  PROCEDURE need_fit IS
+  BEGIN
+    IF NOT (v_dtf_ok AND v_ct_ok) THEN
+      RAISE_APPLICATION_ERROR(-20001, 'the forecast views could not be read (see the header)');
+    END IF;
+  END need_fit;
+
+  -- TRUE when an alert of the con_dbid (and series, unless p_key is NULL) has
+  -- one of p_kinds (',K1,K2,'), CRIT or WARN only when p_cw: the healthy chips
+  -- leave those series out.
+  FUNCTION alert_on(p_con IN NUMBER, p_key IN VARCHAR2, p_kinds IN VARCHAR2, p_cw IN BOOLEAN) RETURN BOOLEAN IS
+  BEGIN
+    FOR i IN 1 .. t_al.COUNT LOOP
+      IF t_al(i).con_dbid = p_con
+         AND (p_key IS NULL OR t_al(i).series_key = p_key)
+         AND INSTR(p_kinds, ',' || t_al(i).kind || ',') > 0
+         AND (NOT p_cw OR t_al(i).severity IN ('CRIT', 'WARN')) THEN
+        RETURN TRUE;
+      END IF;
+    END LOOP;
+    RETURN FALSE;
+  END alert_on;
 
   ----------------------------------------------------------------------
   -- sec_failed: called from a section's exception handler. Closes whatever
@@ -1697,58 +1957,75 @@ BEGIN
                    || TO_CHAR(r.started_at, 'YYYY-MM-DD HH24:MI') || ' (as of ' || TO_CHAR(r.as_of_day, 'YYYY-MM-DD') || ')';
     END LOOP;
   END IF;
-  -- The alert source: CAPR_ALERTS (LIVE) or CAPR_ALERTS_LATEST (SNAPSHOT).
-  -- The branch whose constant predicate is false is never evaluated.
-  SELECT SUM(CASE WHEN severity = 'CRIT' THEN 1 ELSE 0 END),
-         SUM(CASE WHEN severity = 'WARN' THEN 1 ELSE 0 END),
-         SUM(CASE WHEN severity = 'INFO' THEN 1 ELSE 0 END),
-         SUM(CASE WHEN severity IN ('CRIT','WARN') AND kind IN ('TBSPC_FULL','TBSPC_NEARFULL','CPU_SAT','DBCPU_SAT','CPU_HOT','DBCPU_HOT','SERIES_LIMIT','SERIES_NEARLIMIT') THEN 1 ELSE 0 END),
-         SUM(CASE WHEN severity IN ('CRIT','WARN') AND kind IN ('TBSPC_ANOM','CPU_ANOM','DBCPU_ANOM','SERIES_ANOM','CPU_SHIFT') THEN 1 ELSE 0 END),
-         SUM(CASE WHEN severity IN ('CRIT','WARN') AND kind IN ('DATA_STALE','MODEL_HEALTH') THEN 1 ELSE 0 END)
-    INTO v_n_crit, v_n_warn, v_n_info, v_n_cap, v_n_beh, v_n_hlth
-  FROM  (SELECT severity, kind, dbid, con_dbid FROM capr_alerts        WHERE v_src = 'LIVE'
-         UNION ALL
-         SELECT severity, kind, dbid, con_dbid FROM capr_alerts_latest WHERE v_src = 'SNAPSHOT')
-  WHERE  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con);
-  v_n_crit := NVL(v_n_crit, 0); v_n_warn := NVL(v_n_warn, 0); v_n_info := NVL(v_n_info, 0);
-  v_n_cap := NVL(v_n_cap, 0); v_n_beh := NVL(v_n_beh, 0); v_n_hlth := NVL(v_n_hlth, 0);
+  -- The alert source: CAPR_ALERTS (LIVE) or CAPR_ALERTS_LATEST (SNAPSHOT),
+  -- read once into t_al. The branch whose constant predicate is false is
+  -- never evaluated.
+  OPEN c_al;
+  FETCH c_al BULK COLLECT INTO t_al;
+  CLOSE c_al;
+  v_al_ok := TRUE;
   v_first_crit := NULL;
-  FOR a IN (SELECT series_key, kind, value, unit
-            FROM  (SELECT severity, sev_rank, series_key, kind, value, unit, dbid, con_dbid
-                   FROM   capr_alerts        WHERE v_src = 'LIVE'
-                   UNION ALL
-                   SELECT severity, sev_rank, series_key, kind, value, unit, dbid, con_dbid
-                   FROM   capr_alerts_latest WHERE v_src = 'SNAPSHOT')
-            WHERE  severity = 'CRIT'
-              AND  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con)
-            ORDER BY sev_rank, value FETCH FIRST 1 ROW ONLY) LOOP
-    v_first_crit := esc(a.series_key)
-                    || CASE WHEN a.unit = 'DAYS' THEN ', ' || TO_CHAR(a.value, 'FM999990') || ' days'
-                            WHEN a.unit = 'PCT'  THEN ', ' || TO_CHAR(a.value, 'FM990.0') || '%' END;
+  FOR i IN 1 .. t_al.COUNT LOOP
+    IF t_al(i).in_scope = 1 THEN
+      IF t_al(i).severity = 'CRIT' THEN v_n_crit := v_n_crit + 1; END IF;
+      IF t_al(i).severity = 'WARN' THEN v_n_warn := v_n_warn + 1; END IF;
+      IF t_al(i).severity = 'INFO' THEN v_n_info := v_n_info + 1; END IF;
+      IF t_al(i).severity IN ('CRIT','WARN') THEN
+        IF t_al(i).kind IN ('TBSPC_FULL','TBSPC_NEARFULL','CPU_SAT','DBCPU_SAT','CPU_HOT','DBCPU_HOT','SERIES_LIMIT','SERIES_NEARLIMIT') THEN
+          v_n_cap := v_n_cap + 1;
+        ELSIF t_al(i).kind IN ('TBSPC_ANOM','CPU_ANOM','DBCPU_ANOM','SERIES_ANOM','CPU_SHIFT') THEN
+          v_n_beh := v_n_beh + 1;
+        ELSIF t_al(i).kind IN ('DATA_STALE','MODEL_HEALTH') THEN
+          v_n_hlth := v_n_hlth + 1;
+        END IF;
+      END IF;
+    END IF;
+    IF t_al(i).o_first = 1 THEN
+      v_first_crit := esc(t_al(i).series_key)
+                      || CASE WHEN t_al(i).unit = 'DAYS' THEN ', ' || TO_CHAR(t_al(i).value, 'FM999990') || ' days'
+                              WHEN t_al(i).unit = 'PCT'  THEN ', ' || TO_CHAR(t_al(i).value, 'FM990.0') || '%' END;
+    END IF;
+    IF t_al(i).o_attn IS NOT NULL THEN ix_attn(t_al(i).o_attn) := i; END IF;
+    IF t_al(i).o_info IS NOT NULL THEN ix_info(t_al(i).o_info) := i; END IF;
   END LOOP;
-  -- forecast quality rollup (reused by the healthy line further down)
-  SELECT COUNT(*),
-         SUM(CASE WHEN quality = 'OK'                   THEN 1 ELSE 0 END),
-         SUM(CASE WHEN quality = 'FLAT'                 THEN 1 ELSE 0 END),
-         SUM(CASE WHEN quality = 'LOW_CONFIDENCE'       THEN 1 ELSE 0 END),
-         SUM(CASE WHEN quality = 'INSUFFICIENT_HISTORY' THEN 1 ELSE 0 END)
-    INTO v_cov_total, v_cov_ok, v_n_flat, v_n_low, v_n_insuf
-  FROM   capr_tbspc_days_to_full
-  WHERE  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con);
+  -- forecast quality rollup (reused by the healthy line further down); the
+  -- SUMs stay NULL on an empty scope, as SQL's would
+  OPEN c_dtf;
+  FETCH c_dtf BULK COLLECT INTO t_dtf;
+  CLOSE c_dtf;
+  v_dtf_ok := TRUE;
+  v_cov_total := 0; v_cov_ok := 0; v_n_flat := 0; v_n_low := 0; v_n_insuf := 0;
+  FOR i IN 1 .. t_dtf.COUNT LOOP
+    ix_dchip(t_dtf(i).o_chip) := i;
+    IF t_dtf(i).in_scope = 1 THEN
+      v_cov_total := v_cov_total + 1;
+      IF t_dtf(i).quality = 'OK'                   THEN v_cov_ok    := v_cov_ok + 1;    END IF;
+      IF t_dtf(i).quality = 'FLAT'                 THEN v_n_flat    := v_n_flat + 1;    END IF;
+      IF t_dtf(i).quality = 'LOW_CONFIDENCE'       THEN v_n_low     := v_n_low + 1;     END IF;
+      IF t_dtf(i).quality = 'INSUFFICIENT_HISTORY' THEN v_n_insuf   := v_n_insuf + 1;   END IF;
+    END IF;
+  END LOOP;
+  IF v_cov_total = 0 THEN
+    v_cov_ok := NULL; v_n_flat := NULL; v_n_low := NULL; v_n_insuf := NULL;
+  END IF;
   -- host CPU busy-hour p95 (first container that has one)
+  OPEN c_ct;
+  FETCH c_ct BULK COLLECT INTO t_ct;
+  CLOSE c_ct;
+  v_ct_ok := TRUE;
   v_p95_cur := NULL; v_p95_dts := NULL; v_p95_q := NULL;
-  FOR c IN (SELECT cur_val, days_to_sat, quality FROM capr_cpu_trend
-            WHERE metric = 'BUSY_P95'
-              AND (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con)
-            ORDER BY con_dbid FETCH FIRST 1 ROW ONLY) LOOP
-    v_p95_cur := c.cur_val; v_p95_dts := c.days_to_sat; v_p95_q := c.quality;
+  FOR i IN 1 .. t_ct.COUNT LOOP
+    IF t_ct(i).metric = 'BUSY_P95' AND t_ct(i).in_scope = 1 THEN
+      v_p95_cur := t_ct(i).cur_val; v_p95_dts := t_ct(i).days_to_sat; v_p95_q := t_ct(i).quality;
+      EXIT;
+    END IF;
   END LOOP;
   SELECT COUNT(*) INTO v_bt_rows FROM capr_backtest WHERE esm_mape IS NOT NULL
      AND (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con);
   -- Results layer and coverage lines (ddl/60). Both views answer on an
   -- install that never ran cap_results.refresh. CAPR_COVERAGE is read once,
-  -- here; under SNAPSHOT the line is the refresh run's own summary, since
-  -- coverage is not snapshotted.
+  -- here; under SNAPSHOT the line is the coverage the refresh run kept on
+  -- CAP_RUN (the run's own summary on a run older than that column).
   SELECT NVL(MAX(CASE WHEN r.is_last = 'Y'
                       THEN 'last ' || r.summary
                            || CASE WHEN r.stale_run = 'Y'
@@ -1758,7 +2035,8 @@ BEGIN
     INTO v_run_line
     FROM capr_runs r CROSS JOIN cap_cfg cfg;
   IF v_src = 'SNAPSHOT' THEN
-    SELECT COUNT(*), 1, MAX('coverage as of ' || summary)
+    SELECT NVL(MAX(cov_n_dbid), COUNT(*)), NVL(MAX(cov_n_current), 1),
+           MAX(NVL(cov_summary, 'coverage as of ' || summary))
       INTO v_n_dbid, v_n_current, v_cov_line
       FROM capr_runs WHERE run_id = last_ok_run_id;
   ELSE
@@ -1859,8 +2137,67 @@ BEGIN
   -- Everything below is SELECT-only over the same CAPR_/CAPF_/CAPD_ views
   -- the detailed sections use; nothing new is computed.
   ----------------------------------------------------------------------
+  BEGIN
+    OPEN c_sp;
+    FETCH c_sp BULK COLLECT INTO t_sp;
+    CLOSE c_sp;
+  EXCEPTION
+    WHEN OTHERS THEN v_sp_err := SQLERRM;
+  END;
+  BEGIN
+    OPEN c_ta;
+    FETCH c_ta BULK COLLECT INTO t_ta;
+    CLOSE c_ta;
+    FOR i IN 1 .. t_ta.COUNT LOOP
+      IF t_ta(i).strip_rank IS NOT NULL AND NOT ix_tstr.EXISTS(t_ta(i).strip_rank) THEN
+        ix_tstr(t_ta(i).strip_rank) := i;
+      END IF;
+      IF t_ta(i).dot_ord IS NOT NULL THEN ix_tdot(t_ta(i).dot_ord) := i; END IF;
+    END LOOP;
+  EXCEPTION
+    WHEN OTHERS THEN v_ta_err := SQLERRM;
+  END;
+  BEGIN
+    OPEN c_ca;
+    FETCH c_ca BULK COLLECT INTO t_ca;
+    CLOSE c_ca;
+    FOR i IN 1 .. t_ca.COUNT LOOP
+      IF t_ca(i).strip_rank IS NOT NULL AND NOT ix_cstr.EXISTS(t_ca(i).strip_rank) THEN
+        ix_cstr(t_ca(i).strip_rank) := i;
+      END IF;
+      IF t_ca(i).dot_ord IS NOT NULL THEN ix_cdot(t_ca(i).dot_ord) := i; END IF;
+    END LOOP;
+  EXCEPTION
+    WHEN OTHERS THEN v_ca_err := SQLERRM;
+  END;
+  BEGIN
+    OPEN c_xa;
+    FETCH c_xa BULK COLLECT INTO t_xa;
+    CLOSE c_xa;
+  EXCEPTION
+    WHEN OTHERS THEN v_xa_err := SQLERRM;
+  END;
+  BEGIN
+    OPEN c_se;
+    FETCH c_se BULK COLLECT INTO t_se;
+    CLOSE c_se;
+    FOR i IN 1 .. t_se.COUNT LOOP
+      IF t_se(i).o_hero IS NOT NULL THEN ix_hero(t_se(i).o_hero) := i; END IF;
+    END LOOP;
+  EXCEPTION
+    WHEN OTHERS THEN v_se_err := SQLERRM;
+  END;
+  BEGIN
+    OPEN c_cs;
+    FETCH c_cs BULK COLLECT INTO t_cs;
+    CLOSE c_cs;
+  EXCEPTION
+    WHEN OTHERS THEN v_cs_err := SQLERRM;
+  END;
+  tmark('header');
   p('<section id="s0">');
   BEGIN
+  need_al;
   p('<h2>At a glance</h2>');
   p('<p class="desc">What needs attention, ranked, then everything that is fine in one line. '
       || 'Every row comes from CAPR_ALERTS, the same view a monitoring system would poll.</p>');
@@ -1882,36 +2219,23 @@ BEGIN
       || CASE WHEN v_n_info > 0 THEN ' ' || TO_CHAR(v_n_info, 'FM999990') || ' informational item(s) below.' END || '</div>');
   ELSE
     p('<div class="attn">');
-    FOR a IN (
-      SELECT severity, kind, dbid, con_dbid, db_pdb, series_key, day_dt, value, threshold, unit, message,
-             baseline_mode,
-             CASE kind WHEN 'DATA_STALE' THEN 0
-                       WHEN 'TBSPC_FULL' THEN 1 WHEN 'CPU_SAT' THEN 2 WHEN 'DBCPU_SAT' THEN 2 WHEN 'SERIES_LIMIT' THEN 3
-                       WHEN 'CPU_SHIFT' THEN 4 WHEN 'TBSPC_NEARFULL' THEN 5 WHEN 'SERIES_NEARLIMIT' THEN 6
-                       WHEN 'CPU_HOT' THEN 6 WHEN 'DBCPU_HOT' THEN 6
-                       WHEN 'TBSPC_ANOM' THEN 7 WHEN 'CPU_ANOM' THEN 8 WHEN 'DBCPU_ANOM' THEN 9
-                       WHEN 'SERIES_ANOM' THEN 10 WHEN 'MODEL_HEALTH' THEN 12 ELSE 11 END AS kord
-      FROM  (SELECT severity, sev_rank, kind, dbid, con_dbid, db_pdb, series_key, day_dt, value,
-                    threshold, unit, message, baseline_mode
-             FROM   capr_alerts        WHERE v_src = 'LIVE'
-             UNION ALL
-             SELECT severity, sev_rank, kind, dbid, con_dbid, db_pdb, series_key, day_dt, value,
-                    threshold, unit, message, baseline_mode
-             FROM   capr_alerts_latest WHERE v_src = 'SNAPSHOT')
-      WHERE  severity IN ('CRIT','WARN')
-        AND  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con)
-      -- a stale AWR qualifies every other row, so it leads whatever its rank
-      ORDER  BY CASE kind WHEN 'DATA_STALE' THEN 0 ELSE 1 END, sev_rank, kord, value
-    ) LOOP
+    -- t_al in o_attn order: CRIT / WARN in scope; a stale AWR qualifies every
+    -- other row, so it leads whatever its rank.
+    FOR k IN 1 .. ix_attn.COUNT LOOP
+      DECLARE
+        a c_al%ROWTYPE := t_al(ix_attn(k));
+      BEGIN
       v_main := NULL; v_sub := NULL; v_big := NULL; v_small := NULL; v_kind_lbl := NULL;
       v_tmp := CASE WHEN v_con_count > 1 THEN esc(a.db_pdb) || ' &middot; ' END;
 
       IF a.kind = 'TBSPC_FULL' THEN
         v_kind_lbl := 'Days to full';
-        FOR t IN (SELECT slope_mb, cur_gb, limit_gb, dtf_worst, accel, pct_used, days_to_full,
-                         need_gib_90, add_by_day
-                  FROM capr_tbspc_days_to_full WHERE con_dbid = a.con_dbid AND tablespace_name = a.series_key
-                  FETCH FIRST 1 ROW ONLY) LOOP
+        need_fit;
+        FOR i_t_dtf IN 1 .. t_dtf.COUNT LOOP
+          IF t_dtf(i_t_dtf).con_dbid = a.con_dbid AND t_dtf(i_t_dtf).tablespace_name = a.series_key THEN
+          DECLARE
+            t c_dtf%ROWTYPE := t_dtf(i_t_dtf);
+          BEGIN
           v_main := '<b>' || esc(a.series_key) || '</b> fills at ' || fmt_rate_mb(t.slope_mb)
                     || CASE WHEN t.accel >= 1.5 THEN ', growth &times;' || TO_CHAR(t.accel, 'FM990.0') || ' vs its longer-term pace' END;
           v_sub  := v_tmp || fmt_size_gb(t.cur_gb) || ' of ' || fmt_size_gb(t.limit_gb) || ' (' || TO_CHAR(t.pct_used, 'FM990.0') || '%)'
@@ -1920,12 +2244,18 @@ BEGIN
                     || CASE WHEN t.need_gib_90 > 0 THEN ' &middot; ' || ask_txt(t.need_gib_90, t.add_by_day) END;
           v_big  := TO_CHAR(a.value, 'FM999990') || ' days';
           v_small := '&asymp; ' || dfmt(NVL(v_last_day, SYSDATE) + a.value);
+          END;
+          EXIT;
+          END IF;
         END LOOP;
       ELSIF a.kind = 'TBSPC_NEARFULL' THEN
         v_kind_lbl := 'Near full';
-        FOR t IN (SELECT slope_mb, cur_gb, limit_gb, days_to_full, quality
-                  FROM capr_tbspc_days_to_full WHERE con_dbid = a.con_dbid AND tablespace_name = a.series_key
-                  FETCH FIRST 1 ROW ONLY) LOOP
+        need_fit;
+        FOR i_t_dtf IN 1 .. t_dtf.COUNT LOOP
+          IF t_dtf(i_t_dtf).con_dbid = a.con_dbid AND t_dtf(i_t_dtf).tablespace_name = a.series_key THEN
+          DECLARE
+            t c_dtf%ROWTYPE := t_dtf(i_t_dtf);
+          BEGIN
           v_main := '<b>' || esc(a.series_key) || '</b> is ' || TO_CHAR(a.value, 'FM990.0') || '% full now'
                     || CASE WHEN t.quality = 'FLAT' THEN ', not growing'
                             WHEN t.days_to_full IS NOT NULL AND t.days_to_full > 365 THEN ', growing slowly'
@@ -1937,37 +2267,58 @@ BEGIN
                             || ' full in ' || time_phrase(t.days_to_full) END;
           v_big  := TO_CHAR(a.value, 'FM990.0') || '%';
           v_small := 'now';
+          END;
+          EXIT;
+          END IF;
         END LOOP;
       ELSIF a.kind = 'CPU_SAT' THEN
         v_kind_lbl := 'CPU saturation';
-        FOR t IN (SELECT cur_val, slope_per_day, sat_worst, sat_best FROM capr_cpu_trend
-                  WHERE con_dbid = a.con_dbid AND metric = a.series_key FETCH FIRST 1 ROW ONLY) LOOP
+        need_fit;
+        FOR i_t_ct IN 1 .. t_ct.COUNT LOOP
+          IF t_ct(i_t_ct).con_dbid = a.con_dbid AND t_ct(i_t_ct).metric = a.series_key THEN
+          DECLARE
+            t c_ct%ROWTYPE := t_ct(i_t_ct);
+          BEGIN
           v_main := '<b>Host CPU</b> ' || CASE a.series_key WHEN 'BUSY_P95' THEN 'busy-hour p95' WHEN 'BUSY_PEAK' THEN 'peak-window busy%'
                                                              ELSE 'daily average busy%' END
                     || ' is trending toward the ' || TO_CHAR(cpu_sat, 'FM990') || '% line';
           v_sub  := v_tmp || 'now ' || TO_CHAR(t.cur_val, 'FM990.0') || '% &middot; slope +' || TO_CHAR(t.slope_per_day, 'FM990.00') || ' pts/day'
                     || CASE WHEN t.sat_worst IS NOT NULL THEN ' &middot; ' || TO_CHAR(t.sat_worst, 'FM999990') || '&ndash;'
                             || NVL(TO_CHAR(t.sat_best, 'FM999990'), 'never') || ' day range' END;
+          END;
+          EXIT;
+          END IF;
         END LOOP;
         v_big := TO_CHAR(a.value, 'FM999990') || ' days';
         v_small := '&asymp; ' || dfmt(NVL(v_last_day, SYSDATE) + a.value);
       ELSIF a.kind = 'CPU_SHIFT' THEN
         v_kind_lbl := 'Level shift';
-        FOR t IN (SELECT recent_days, base_days, recent_med, base_med, n_above, n_below, n_recent, shift_flag, last_day
-                  FROM capr_cpu_shifts WHERE con_dbid = a.con_dbid AND metric = a.series_key FETCH FIRST 1 ROW ONLY) LOOP
+        need_anom(v_cs_err);
+        FOR i_t_cs IN 1 .. t_cs.COUNT LOOP
+          IF t_cs(i_t_cs).con_dbid = a.con_dbid AND t_cs(i_t_cs).metric = a.series_key THEN
+          DECLARE
+            t c_cs%ROWTYPE := t_cs(i_t_cs);
+          BEGIN
           v_main := '<b>' || esc(a.db_pdb) || '</b> ' || CASE a.series_key WHEN 'DB_CPU_PCT' THEN 'DB CPU' ELSE esc(a.series_key) END
                     || CASE WHEN t.shift_flag = 'UP' THEN ' stepped up and stayed up' ELSE ' stepped down and stayed down' END;
           v_sub  := 'last ' || TO_CHAR(t.recent_days, 'FM990') || ' days median ' || TO_CHAR(t.recent_med, 'FM990.0')
                     || '% vs ' || TO_CHAR(t.base_med, 'FM990.0') || '% over the ' || TO_CHAR(t.base_days, 'FM990') || ' days before &middot; '
                     || TO_CHAR(GREATEST(t.n_above, t.n_below), 'FM990') || ' of ' || TO_CHAR(t.n_recent, 'FM990') || ' days past the baseline';
           v_small := 'since ' || dfmt(t.last_day - t.recent_days + 1);
+          END;
+          EXIT;
+          END IF;
         END LOOP;
         v_big := CASE WHEN a.value >= 0 THEN '+' ELSE '' END || TO_CHAR(a.value, 'FM9990.0') || ' pts';
       ELSIF a.kind IN ('SERIES_LIMIT', 'SERIES_NEARLIMIT') THEN
         v_kind_lbl := CASE a.series_key WHEN 'SESSIONS' THEN 'Sessions' WHEN 'PROCESSES' THEN 'Processes'
                                         WHEN 'DB_SIZE_GB' THEN 'Database size' ELSE esc(a.series_key) END;
-        FOR t IN (SELECT cur_val, cur_limit, unit, pct_of_limit, slope_per_day, sat_value, days_to_limit
-                  FROM capr_series WHERE con_dbid = a.con_dbid AND series = a.series_key FETCH FIRST 1 ROW ONLY) LOOP
+        need_anom(v_se_err);
+        FOR i_t_se IN 1 .. t_se.COUNT LOOP
+          IF t_se(i_t_se).con_dbid = a.con_dbid AND t_se(i_t_se).series = a.series_key THEN
+          DECLARE
+            t c_se%ROWTYPE := t_se(i_t_se);
+          BEGIN
           IF a.kind = 'SERIES_LIMIT' THEN
             v_main := '<b>' || esc(a.series_key) || '</b> heading for ' || TO_CHAR(ROUND(100 * t.sat_value / NULLIF(t.cur_limit, 0)), 'FM990')
                       || '% of its limit';
@@ -1982,53 +2333,76 @@ BEGIN
                    || ' ' || LOWER(esc(t.unit))
                    || CASE WHEN t.slope_per_day IS NOT NULL AND t.slope_per_day <> 0
                            THEN ' &middot; ' || CASE WHEN t.slope_per_day > 0 THEN '+' END || TO_CHAR(t.slope_per_day, 'FM99990.00') || ' per day' END;
+          END;
+          EXIT;
+          END IF;
         END LOOP;
       ELSIF a.kind = 'TBSPC_ANOM' THEN
         v_kind_lbl := 'Anomaly';
-        FOR t IN (SELECT delta_mb, med_mb, z, anomaly_flag, day_str FROM capr_tbspc_anomalies
-                  WHERE dbid = a.dbid AND con_dbid = a.con_dbid AND tablespace_name = a.series_key
-                    AND baseline_mode = a.baseline_mode AND day_dt = a.day_dt) LOOP
-          v_main := '<b>' || esc(a.series_key) || '</b> ' || CASE WHEN t.delta_mb >= 0 THEN 'grew ' ELSE 'shrank ' END
-                    || fmt_size_gb(ABS(t.delta_mb) / 1024) || ' in one day'
-                    || CASE WHEN t.med_mb IS NOT NULL THEN ' (normal ' || mode_phrase(a.baseline_mode, a.day_dt)
-                            || ': ' || fmt_rate_mb(t.med_mb) || ')' END;
-          v_sub  := v_tmp || dfmt(a.day_dt) || ' &middot; robust z ' || TO_CHAR(t.z, 'FM99990.0')
-                    || ' &middot; one day; the forecast is not driven by it';
-          v_big  := CASE WHEN t.delta_mb >= 0 THEN '+' ELSE '&minus;' END || fmt_size_gb(ABS(t.delta_mb) / 1024);
+        need_anom(v_ta_err);
+        FOR i IN 1 .. t_ta.COUNT LOOP
+          IF t_ta(i).dbid = a.dbid AND t_ta(i).con_dbid = a.con_dbid AND t_ta(i).tablespace_name = a.series_key
+             AND t_ta(i).baseline_mode = a.baseline_mode AND t_ta(i).day_dt = a.day_dt THEN
+            v_main := '<b>' || esc(a.series_key) || '</b> ' || CASE WHEN t_ta(i).delta_mb >= 0 THEN 'grew ' ELSE 'shrank ' END
+                      || fmt_size_gb(ABS(t_ta(i).delta_mb) / 1024) || ' in one day'
+                      || CASE WHEN t_ta(i).med_mb IS NOT NULL THEN ' (normal ' || mode_phrase(a.baseline_mode, a.day_dt)
+                              || ': ' || fmt_rate_mb(t_ta(i).med_mb) || ')' END;
+            v_sub  := v_tmp || dfmt(a.day_dt) || ' &middot; robust z ' || TO_CHAR(t_ta(i).z, 'FM99990.0')
+                      || ' &middot; one day; the forecast is not driven by it';
+            v_big  := CASE WHEN t_ta(i).delta_mb >= 0 THEN '+' ELSE '&minus;' END || fmt_size_gb(ABS(t_ta(i).delta_mb) / 1024);
+          END IF;
         END LOOP;
         v_small := dfmt(a.day_dt);
       ELSIF a.kind IN ('CPU_ANOM', 'DBCPU_ANOM') THEN
         v_kind_lbl := 'Anomaly';
         -- an hour-of-week alert carries its worst hour: largest |z|, earliest
         -- on a tie, the same pick CAPR_ALERTS makes
-        FOR t IN (SELECT value_pct, median_pct, z, grain, ts, ts_str, COUNT(*) OVER () AS n_events
-                  FROM capr_cpu_anomalies
-                  WHERE dbid = a.dbid AND con_dbid = a.con_dbid AND metric = a.series_key
-                    AND baseline_mode = a.baseline_mode AND day_dt = a.day_dt
-                  ORDER BY ABS(z) DESC NULLS LAST, ts FETCH FIRST 1 ROW ONLY) LOOP
+        need_anom(v_ca_err);
+        -- the worst matching point: largest |z| (NULL last), earliest ts
+        v_ca_n := 0; v_ca_best := NULL;
+        FOR i IN 1 .. t_ca.COUNT LOOP
+          IF t_ca(i).dbid = a.dbid AND t_ca(i).con_dbid = a.con_dbid AND t_ca(i).metric = a.series_key
+             AND t_ca(i).baseline_mode = a.baseline_mode AND t_ca(i).day_dt = a.day_dt THEN
+            v_ca_n := v_ca_n + 1;
+            IF v_ca_best IS NULL
+               OR (t_ca(i).z IS NOT NULL AND t_ca(v_ca_best).z IS NULL)
+               OR ABS(t_ca(i).z) > ABS(t_ca(v_ca_best).z)
+               OR (ABS(t_ca(i).z) = ABS(t_ca(v_ca_best).z) AND t_ca(i).ts < t_ca(v_ca_best).ts)
+               OR (t_ca(i).z IS NULL AND t_ca(v_ca_best).z IS NULL AND t_ca(i).ts < t_ca(v_ca_best).ts) THEN
+              v_ca_best := i;
+            END IF;
+          END IF;
+        END LOOP;
+        IF v_ca_best IS NOT NULL THEN
+          DECLARE
+            t c_ca%ROWTYPE := t_ca(v_ca_best);
+          BEGIN
           v_main := '<b>' || CASE a.kind WHEN 'CPU_ANOM' THEN 'Host CPU' ELSE esc(a.db_pdb) || ' DB CPU' END || '</b> ran '
-                    || TO_CHAR(t.value_pct, 'FM990.0') || CASE a.kind WHEN 'CPU_ANOM' THEN '% busy' ELSE '% of host cores' END
+                    || TO_CHAR(t.value_pct, 'FM990.0') || CASE a.kind WHEN 'CPU_ANOM' THEN '% busy' ELSE '% of logical CPUs' END
                     || ' vs the usual ' || TO_CHAR(t.median_pct, 'FM990.0') || '% ' || mode_phrase(a.baseline_mode, t.ts);
           v_sub  := v_tmp || CASE WHEN t.grain = 'HOUR' THEN esc(t.ts_str) ELSE dfmt(a.day_dt) END
                     || ' &middot; robust z ' || TO_CHAR(t.z, 'FM99990.0') || ' &middot; '
-                    || CASE WHEN t.n_events > 1 THEN TO_CHAR(t.n_events, 'FM990') || ' hours flagged that day'
+                    || CASE WHEN v_ca_n > 1 THEN TO_CHAR(v_ca_n, 'FM990') || ' hours flagged that day'
                             WHEN t.grain = 'HOUR' THEN 'single hour' ELSE 'single day' END;
           v_big  := CASE WHEN t.value_pct >= t.median_pct THEN '+' ELSE '&minus;' END
                     || TO_CHAR(ABS(t.value_pct - t.median_pct), 'FM990') || ' pts';
-        END LOOP;
+          END;
+        END IF;
         v_small := dfmt(a.day_dt);
       ELSIF a.kind = 'SERIES_ANOM' THEN
         v_kind_lbl := 'Anomaly';
-        FOR t IN (SELECT value, expected, z, unit FROM capr_series_anomalies
-                  WHERE dbid = a.dbid AND con_dbid = a.con_dbid AND series = a.series_key
-                    AND baseline_mode = a.baseline_mode AND day_dt = a.day_dt) LOOP
-          v_main := '<b>' || esc(a.series_key) || '</b> '
-                    || CASE WHEN a.series_key = 'DB_SIZE_GB' THEN 'grew ' ELSE 'at ' END
-                    || series_val(t.value, t.unit) || ' vs the usual ' || series_val(t.expected, t.unit)
-                    || ' ' || mode_phrase(a.baseline_mode, a.day_dt);
-          v_sub  := v_tmp || dfmt(a.day_dt) || ' &middot; robust z ' || TO_CHAR(t.z, 'FM99990.0') || ' &middot; single day';
-          v_big  := CASE WHEN t.value >= t.expected THEN '+' ELSE '&minus;' END
-                    || series_val(ABS(t.value - t.expected), t.unit);
+        need_anom(v_xa_err);
+        FOR i IN 1 .. t_xa.COUNT LOOP
+          IF t_xa(i).dbid = a.dbid AND t_xa(i).con_dbid = a.con_dbid AND t_xa(i).series = a.series_key
+             AND t_xa(i).baseline_mode = a.baseline_mode AND t_xa(i).day_dt = a.day_dt THEN
+            v_main := '<b>' || esc(a.series_key) || '</b> '
+                      || CASE WHEN a.series_key = 'DB_SIZE_GB' THEN 'grew ' ELSE 'at ' END
+                      || series_val(t_xa(i).value, t_xa(i).unit) || ' vs the usual ' || series_val(t_xa(i).expected, t_xa(i).unit)
+                      || ' ' || mode_phrase(a.baseline_mode, a.day_dt);
+            v_sub  := v_tmp || dfmt(a.day_dt) || ' &middot; robust z ' || TO_CHAR(t_xa(i).z, 'FM99990.0') || ' &middot; single day';
+            v_big  := CASE WHEN t_xa(i).value >= t_xa(i).expected THEN '+' ELSE '&minus;' END
+                      || series_val(ABS(t_xa(i).value - t_xa(i).expected), t_xa(i).unit);
+          END IF;
         END LOOP;
         v_small := dfmt(a.day_dt);
       END IF;
@@ -2045,6 +2419,7 @@ BEGIN
       END IF;
       v_sub := v_sub || evidence_link(a.kind, a.con_dbid, a.series_key);
       attn_row(a.severity, v_kind_lbl, v_main, v_sub, v_big, v_small);
+      END;
     END LOOP;
     p('</div>');  -- .attn
   END IF;
@@ -2053,16 +2428,9 @@ BEGIN
   IF v_n_info > 0 THEN
     p('<details class="fold"><summary>' || TO_CHAR(v_n_info, 'FM999990') || ' informational item'
       || CASE WHEN v_n_info = 1 THEN '' ELSE 's' END || ' (shrinks and low-side days)</summary><div class="fold-body"><ul class="attn-list" style="margin:0">');
-    FOR a IN (SELECT message, kind, con_dbid, series_key
-              FROM  (SELECT severity, message, kind, dbid, con_dbid, series_key, value
-                     FROM   capr_alerts        WHERE v_src = 'LIVE'
-                     UNION ALL
-                     SELECT severity, message, kind, dbid, con_dbid, series_key, value
-                     FROM   capr_alerts_latest WHERE v_src = 'SNAPSHOT')
-              WHERE  severity = 'INFO'
-                AND  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con)
-              ORDER BY kind, value) LOOP
-      p('<li>' || esc(a.message) || evidence_link(a.kind, a.con_dbid, a.series_key) || '</li>');
+    FOR k IN 1 .. ix_info.COUNT LOOP
+      p('<li>' || esc(t_al(ix_info(k)).message)
+        || evidence_link(t_al(ix_info(k)).kind, t_al(ix_info(k)).con_dbid, t_al(ix_info(k)).series_key) || '</li>');
     END LOOP;
     p('</ul></div></details>');
   END IF;
@@ -2074,18 +2442,13 @@ BEGIN
   -- Each chip group stops at c_chip_cap chips and says "+N more", so a fleet
   -- cannot overflow the v_tmp accumulator (32000 bytes, about 150 per chip).
   v_chips := 0; v_tmp := NULL;
-  FOR r IN (
-    SELECT t.tablespace_name, t.db_pdb, t.days_to_full, t.quality, t.pct_used
-    FROM   capr_tbspc_days_to_full t
-    WHERE  (s_dbid IS NULL OR t.dbid = s_dbid) AND (s_con IS NULL OR t.con_dbid = s_con)
-      AND  NOT EXISTS (SELECT 1
-                       FROM  (SELECT con_dbid, series_key, kind, severity FROM capr_alerts        WHERE v_src = 'LIVE'
-                              UNION ALL
-                              SELECT con_dbid, series_key, kind, severity FROM capr_alerts_latest WHERE v_src = 'SNAPSHOT') a
-                       WHERE a.con_dbid = t.con_dbid AND a.series_key = t.tablespace_name
-                         AND a.kind IN ('TBSPC_FULL','TBSPC_NEARFULL') AND a.severity IN ('CRIT','WARN'))
-    ORDER  BY CASE WHEN t.quality = 'OK' AND t.days_to_full IS NOT NULL THEN 0 ELSE 1 END, t.days_to_full, t.tablespace_name
-  ) LOOP
+  need_fit;
+  FOR k_t_dtf IN 1 .. ix_dchip.COUNT LOOP
+    IF t_dtf(ix_dchip(k_t_dtf)).in_scope = 1 THEN
+    DECLARE
+      r c_dtf%ROWTYPE := t_dtf(ix_dchip(k_t_dtf));
+    BEGIN
+    CONTINUE WHEN alert_on(r.con_dbid, r.tablespace_name, ',TBSPC_FULL,TBSPC_NEARFULL,', TRUE);
     v_chips := v_chips + 1;
     IF v_chips <= c_chip_cap THEN
       v_tmp := v_tmp || '<span class="chip' || CASE WHEN r.quality <> 'OK' THEN ' q' END || '">'
@@ -2097,23 +2460,20 @@ BEGIN
                        WHEN r.quality = 'INSUFFICIENT_HISTORY' THEN 'new'
                        ELSE LOWER(esc(r.quality)) END || '</span>';
     END IF;
+    END;
+    END IF;
   END LOOP;
   IF v_chips > c_chip_cap THEN
     v_tmp := v_tmp || '<span class="chip q">+' || TO_CHAR(v_chips - c_chip_cap, 'FM999990') || ' more</span>';
   END IF;
   v_chips := 0;
-  FOR r IN (
-    SELECT s.series, s.db_pdb, s.pct_of_limit, s.days_to_limit, s.quality, s.cur_val, s.unit
-    FROM   capr_series s
-    WHERE  (s_dbid IS NULL OR s.dbid = s_dbid) AND (s_con IS NULL OR s.con_dbid = s_con)
-      AND  NOT EXISTS (SELECT 1
-                       FROM  (SELECT con_dbid, series_key, kind, severity FROM capr_alerts        WHERE v_src = 'LIVE'
-                              UNION ALL
-                              SELECT con_dbid, series_key, kind, severity FROM capr_alerts_latest WHERE v_src = 'SNAPSHOT') a
-                       WHERE a.con_dbid = s.con_dbid AND a.series_key = s.series
-                         AND a.kind IN ('SERIES_LIMIT','SERIES_NEARLIMIT') AND a.severity IN ('CRIT','WARN'))
-    ORDER  BY s.rank_series
-  ) LOOP
+  need_anom(v_se_err);
+  FOR k_t_se IN 1 .. t_se.COUNT LOOP
+    IF t_se(k_t_se).in_scope = 1 THEN
+    DECLARE
+      r c_se%ROWTYPE := t_se(k_t_se);
+    BEGIN
+    CONTINUE WHEN alert_on(r.con_dbid, r.series, ',SERIES_LIMIT,SERIES_NEARLIMIT,', TRUE);
     v_chips := v_chips + 1;
     CONTINUE WHEN v_chips > c_chip_cap;
     v_tmp := v_tmp || '<span class="chip' || CASE WHEN r.quality <> 'OK' THEN ' q' END || '">'
@@ -2127,23 +2487,20 @@ BEGIN
                      WHEN r.quality = 'OK' THEN ''
                      WHEN r.quality = 'LOW_CONFIDENCE' THEN ' &middot; erratic'
                      ELSE ' &middot; new' END || '</span>';
+    END;
+    END IF;
   END LOOP;
   IF v_chips > c_chip_cap THEN
     v_tmp := v_tmp || '<span class="chip q">+' || TO_CHAR(v_chips - c_chip_cap, 'FM999990') || ' more series</span>';
   END IF;
   v_chips := 0;
-  FOR r IN (
-    SELECT c.db_pdb, c.cur_val, c.days_to_sat, c.quality
-    FROM   capr_cpu_trend c
-    WHERE  c.metric = 'BUSY_P95'
-      AND  (s_dbid IS NULL OR c.dbid = s_dbid) AND (s_con IS NULL OR c.con_dbid = s_con)
-      AND  NOT EXISTS (SELECT 1
-                       FROM  (SELECT con_dbid, kind FROM capr_alerts        WHERE v_src = 'LIVE'
-                              UNION ALL
-                              SELECT con_dbid, kind FROM capr_alerts_latest WHERE v_src = 'SNAPSHOT') a
-                       WHERE a.con_dbid = c.con_dbid AND a.kind IN ('CPU_SAT', 'CPU_HOT'))
-    ORDER  BY c.con_dbid
-  ) LOOP
+  need_fit;
+  FOR k_t_ct IN 1 .. t_ct.COUNT LOOP
+    IF t_ct(k_t_ct).metric = 'BUSY_P95' AND t_ct(k_t_ct).in_scope = 1 THEN
+    DECLARE
+      r c_ct%ROWTYPE := t_ct(k_t_ct);
+    BEGIN
+    CONTINUE WHEN alert_on(r.con_dbid, NULL, ',CPU_SAT,CPU_HOT,', FALSE);
     v_chips := v_chips + 1;
     CONTINUE WHEN v_chips > c_chip_cap;
     v_tmp := v_tmp || '<span class="chip' || CASE WHEN r.quality <> 'OK' THEN ' q' END || '">Host CPU'
@@ -2154,6 +2511,8 @@ BEGIN
                      WHEN r.quality = 'LOW_CONFIDENCE' THEN ' &middot; erratic'
                      WHEN r.quality = 'FLAT' THEN ' &middot; flat'
                      ELSE ' &middot; new' END || '</span>';
+    END;
+    END IF;
   END LOOP;
   IF v_chips > c_chip_cap THEN
     v_tmp := v_tmp || '<span class="chip q">+' || TO_CHAR(v_chips - c_chip_cap, 'FM999990') || ' more hosts</span>';
@@ -2175,12 +2534,12 @@ BEGIN
   -- CAPR_FORECAST_POINTS (anchored at today by the view, +30 and +90).
   ----------------------------------------------------------------------
   p('<div class="hero-duo">');
-  FOR hf IN (SELECT dbid, con_dbid, db_pdb, cur_val, cur_limit, sat_value, slope_per_day,
-                    days_to_limit, limit_worst, limit_best, quality, last_day
-             FROM   capr_series
-             WHERE  series = 'DB_SIZE_GB'
-               AND  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con)
-             ORDER  BY dbid, con_dbid) LOOP
+  need_anom(v_se_err);
+  FOR k_t_se IN 1 .. ix_hero.COUNT LOOP
+    IF t_se(ix_hero(k_t_se)).in_scope = 1 THEN
+    DECLARE
+      hf c_se%ROWTYPE := t_se(ix_hero(k_t_se));
+    BEGIN
     v_hlabel := 'Whole database' || CASE WHEN v_con_count > 1 THEN ' (' || hf.db_pdb || ')' END;
     v_hquality   := hf.quality;
     v_hero_gb    := hf.cur_val;
@@ -2211,13 +2570,14 @@ BEGIN
               'dbhero-' || TO_CHAR(hf.con_dbid));
 
     xs.DELETE; ys.DELETE; v_cnt := 0; v_cnt2 := 0; v_nband := 0; v_nanom := 0; v_has_proj := FALSE;
-    FOR d IN (SELECT ts, value FROM capr_series_points
-              WHERE  dbid = hf.dbid AND con_dbid = hf.con_dbid
-                AND  kind = 'SERIES' AND series = 'DB_SIZE_GB'
-              ORDER  BY ts) LOOP
-      v_cnt := v_cnt + 1;
-      xs(v_cnt) := d.ts - c_epoch;
-      ys(v_cnt) := d.value;
+    need_sp;
+    FOR i IN 1 .. t_sp.COUNT LOOP
+      IF t_sp(i).dbid = hf.dbid AND t_sp(i).con_dbid = hf.con_dbid
+         AND t_sp(i).kind = 'SERIES' AND t_sp(i).series = 'DB_SIZE_GB' THEN
+        v_cnt := v_cnt + 1;
+        xs(v_cnt) := t_sp(i).ts - c_epoch;
+        ys(v_cnt) := t_sp(i).value;
+      END IF;
     END LOOP;
 
     IF v_cnt = 0 THEN
@@ -2274,20 +2634,18 @@ BEGIN
       END IF;
     END IF;
     p('</div>');  -- .chart-card
+    END;
+    END IF;
   END LOOP;
 
   -- Host CPU hero: busy-hour p95 (what saturates) with the daily average as
   -- a faint second line; projection, band and crossing from CAPF_CPU_TREND.
-  FOR ch IN (
-    SELECT t.db_pdb, t.con_dbid, t.dbid, t.cur_val, t.days_to_sat, t.sat_worst, t.sat_best, t.r2, t.quality, t.slope_per_day,
-           t.last_day, t.anchor_value,
-           f.proj_30_lo, f.proj_30_hi, f.proj_90_lo, f.proj_90_hi, f.proj_30, f.proj_90
-    FROM   capr_cpu_trend t
-    LEFT   JOIN capf_cpu_trend f ON f.dbid = t.dbid AND f.con_dbid = t.con_dbid AND f.metric = t.metric
-    WHERE  t.metric = 'BUSY_P95'
-      AND  (s_dbid IS NULL OR t.dbid = s_dbid) AND (s_con IS NULL OR t.con_dbid = s_con)
-    ORDER  BY t.con_dbid
-  ) LOOP
+  need_fit;
+  FOR k_t_ct IN 1 .. t_ct.COUNT LOOP
+    IF t_ct(k_t_ct).metric = 'BUSY_P95' AND t_ct(k_t_ct).in_scope = 1 THEN
+    DECLARE
+      ch c_ct%ROWTYPE := t_ct(k_t_ct);
+    BEGIN
     v_hlabel := 'Host CPU busy-hour p95' || CASE WHEN v_con_count > 1 THEN ' (' || ch.db_pdb || ')' END;
     v_big := NULL; v_big_lbl := NULL; v_big_cls := NULL; v_accent := NULL;
     IF ch.quality = 'OK' AND ch.days_to_sat IS NOT NULL THEN
@@ -2336,10 +2694,13 @@ BEGIN
       IF v_proj_y IS NOT NULL AND v_proj_y > v_ymax THEN v_ymax := v_proj_y; END IF;
       IF v_nband = 2 AND bhi(2) > v_ymax THEN v_ymax := bhi(2); END IF;
       v_ymax := v_ymax * 1.06;
-      FOR a IN (SELECT ts, value, anomaly_modes, how_hours_flagged FROM capr_series_points
-                WHERE con_dbid = ch.con_dbid AND kind = 'CPU' AND series = 'BUSY_PCT' AND anomaly = 1) LOOP
-        v_nanom := v_nanom + 1; ax(v_nanom) := a.ts - c_epoch; ay(v_nanom) := a.value;
-        atip(v_nanom) := ring_tip(a.ts, TO_CHAR(a.value, 'FM990.0') || '% busy (daily average)', a.anomaly_modes, a.how_hours_flagged);
+      need_sp;
+      FOR i IN 1 .. t_sp.COUNT LOOP
+        IF t_sp(i).con_dbid = ch.con_dbid AND t_sp(i).kind = 'CPU' AND t_sp(i).series = 'BUSY_PCT' AND t_sp(i).anomaly = 1 THEN
+          v_nanom := v_nanom + 1; ax(v_nanom) := t_sp(i).ts - c_epoch; ay(v_nanom) := t_sp(i).value;
+          atip(v_nanom) := ring_tip(t_sp(i).ts, TO_CHAR(t_sp(i).value, 'FM990.0') || '% busy (daily average)',
+                                    t_sp(i).anomaly_modes, t_sp(i).how_hours_flagged);
+        END IF;
       END LOOP;
       v_cross_x := NULL; v_cross_lbl := NULL;
       IF ch.quality = 'OK' AND ch.days_to_sat IS NOT NULL AND ch.days_to_sat <= 90 THEN
@@ -2353,12 +2714,15 @@ BEGIN
                 v_cross_x, cpu_sat, v_cross_lbl, 250);
     END IF;
     p('</div>');  -- .chart-card
+    END;
+    END IF;
   END LOOP;
   p('</div>');  -- .hero-duo
   EXCEPTION
     WHEN OTHERS THEN sec_failed('0 (at a glance)', SQLERRM);
   END;
   p('</section>');
+  tmark('s0');
 
   ----------------------------------------------------------------------
   -- Section 1: days-to-full ranking
@@ -2568,6 +2932,7 @@ BEGIN
     WHEN OTHERS THEN sec_failed('1 (days to full)', SQLERRM);
   END;
   p('</section>');
+  tmark('s1');
 
   ----------------------------------------------------------------------
   -- Section 2: tablespace forecast
@@ -2575,13 +2940,13 @@ BEGIN
   p('<section id="s2">');
   BEGIN
   -- M7.4: the table below is bounded (is_reportable + rank_report, decided in
-  -- CAPR_TBSPC_FORECAST), so say so in the heading -- exactly like the text
+  -- CAPR_TBSPC_RANK), so say so in the heading -- exactly like the text
   -- report's section 2 header. Ranks are re-numbered inside the scope.
-  SELECT COUNT(*) INTO v_ts_all FROM capr_tbspc_forecast
+  SELECT COUNT(*) INTO v_ts_all FROM capr_tbspc_rank
   WHERE  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con);
   SELECT COUNT(*) INTO v_ts_shown
   FROM  (SELECT is_reportable, ROW_NUMBER() OVER (ORDER BY rank_report) AS s_rank
-         FROM   capr_tbspc_forecast
+         FROM   capr_tbspc_rank
          WHERE  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con))
   WHERE  is_reportable = 'Y' AND s_rank <= top_n;
   v_total_ts := v_ts_all;
@@ -2722,11 +3087,13 @@ BEGIN
         FOR i IN 1 .. v_nband LOOP blo(i) := GREATEST(blo(i), 0); END LOOP;
         IF v_esm_lo IS NOT NULL THEN v_esm_lo := GREATEST(v_esm_lo, 0); END IF;
 
-        FOR a IN (SELECT ts, value / 1073741824 AS gb, anomaly_modes FROM capr_series_points
-                  WHERE  dbid = f.dbid AND con_dbid = f.con_dbid
-                    AND  kind = 'TBSPC' AND series = f.tablespace_name AND anomaly = 1) LOOP
-          v_nanom := v_nanom + 1; ax(v_nanom) := a.ts - c_epoch; ay(v_nanom) := a.gb;
-          atip(v_nanom) := ring_tip(a.ts, fmt_size_gb(a.gb) || ' used', a.anomaly_modes, NULL);
+        need_sp;
+        FOR i IN 1 .. t_sp.COUNT LOOP
+          IF t_sp(i).dbid = f.dbid AND t_sp(i).con_dbid = f.con_dbid
+             AND t_sp(i).kind = 'TBSPC' AND t_sp(i).series = f.tablespace_name AND t_sp(i).anomaly = 1 THEN
+            v_nanom := v_nanom + 1; ax(v_nanom) := t_sp(i).ts - c_epoch; ay(v_nanom) := t_sp(i).value / 1073741824;
+            atip(v_nanom) := ring_tip(t_sp(i).ts, fmt_size_gb(t_sp(i).value / 1073741824) || ' used', t_sp(i).anomaly_modes, NULL);
+          END IF;
         END LOOP;
         v_cross_x := NULL; v_cross_lbl := NULL;
         IF v_show_limit AND f.quality = 'OK' AND f.days_to_full IS NOT NULL AND f.days_to_full <= v_horizon THEN
@@ -2851,6 +3218,7 @@ BEGIN
     WHEN OTHERS THEN sec_failed('2 (tablespace forecast)', SQLERRM);
   END;
   p('</section>');
+  tmark('s2');
 
   ----------------------------------------------------------------------
   -- Section 3: tablespace growth anomalies
@@ -2870,18 +3238,12 @@ BEGIN
   IF v_win_hi IS NOT NULL THEN
     v_win_lo := v_win_hi - anomaly_days;
     v_xmin := v_win_lo - c_epoch; v_xmax := v_win_hi - c_epoch;
-    FOR ln IN (
-      SELECT con_dbid, tablespace_name, db_pdb, COUNT(DISTINCT day_dt) AS n_all,
-             COUNT(DISTINCT CASE WHEN anomaly_flag = 'HIGH' THEN day_dt END) AS n_hi,
-             COUNT(DISTINCT CASE WHEN anomaly_flag = 'LOW'  THEN day_dt END) AS n_lo,
-             MAX(ABS(delta_mb)) AS max_delta, MAX(ABS(z)) AS max_z
-      FROM   capr_tbspc_anomalies
-      WHERE  days_ago < anomaly_days
-        AND  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con)
-      GROUP  BY con_dbid, tablespace_name, db_pdb
-      ORDER  BY n_all DESC, max_z DESC, tablespace_name
-      FETCH FIRST 16 ROWS ONLY
-    ) LOOP
+    need_anom(v_ta_err);
+    -- the 16 strips of t_ta's strip_rank: most flagged days first
+    FOR k IN 1 .. LEAST(16, ix_tstr.COUNT) LOOP
+      DECLARE
+        ln c_ta%ROWTYPE := t_ta(ix_tstr(k));
+      BEGIN
       v_strip_n := v_strip_n + 1;
       IF v_strip_n = 1 THEN p('<div class="strips">'); END IF;
       p('<div class="strip"><div class="sl"><b>' || esc(ln.tablespace_name) || '</b>'
@@ -2893,13 +3255,12 @@ BEGIN
       strip_open(v_xmin, v_xmax);
       -- one dot per day: the baseline with the largest |z| sizes it, the
       -- others are named in the tooltip
-      FOR a IN (SELECT day_dt, day_str, delta_mb, med_mb, z, anomaly_flag, baseline_mode, n_modes
-                FROM  (SELECT t.*,
-                              ROW_NUMBER() OVER (PARTITION BY day_dt ORDER BY ABS(z) DESC NULLS LAST, mode_rank) AS rn,
-                              COUNT(*) OVER (PARTITION BY day_dt) AS n_modes
-                       FROM   capr_tbspc_anomalies t
-                       WHERE  con_dbid = ln.con_dbid AND tablespace_name = ln.tablespace_name AND days_ago < anomaly_days)
-                WHERE rn = 1) LOOP
+      FOR k2 IN 1 .. ix_tdot.COUNT LOOP
+        CONTINUE WHEN NOT (t_ta(ix_tdot(k2)).con_dbid = ln.con_dbid
+                           AND t_ta(ix_tdot(k2)).tablespace_name = ln.tablespace_name);
+        DECLARE
+          a c_ta%ROWTYPE := t_ta(ix_tdot(k2));
+        BEGIN
         v_tip := a.day_str || ': ' || CASE WHEN a.delta_mb >= 0 THEN 'grew ' ELSE 'shrank ' END
                  || fmt_size_gb(ABS(a.delta_mb) / 1024) || ' (usual ' || fmt_rate_mb(NVL(a.med_mb, 0)) || ' '
                  || mode_phrase(a.baseline_mode, a.day_dt) || '), robust z ' || TO_CHAR(a.z, 'FM99990.0')
@@ -2907,8 +3268,10 @@ BEGIN
         p('<circle class="' || CASE WHEN a.anomaly_flag = 'HIGH' THEN 'sd-hi' ELSE 'sd-lo' END
           || '" cx="' || fmt_px(lin(a.day_dt - c_epoch, v_xmin, v_xmax, 4, 896)) || '" cy="15" r="'
           || fmt_px(3.5 + LEAST(4, ABS(NVL(a.z, 0)) / 6)) || '"><title>' || esc(v_tip) || '</title></circle>');
+        END;
       END LOOP;
       p('</svg></div>');
+      END;
     END LOOP;
     IF v_strip_n > 0 THEN
       p('<div class="strip-axis"><div></div><div><span>' || dfmt(v_win_lo + 1) || '</span><span>'
@@ -2918,14 +3281,11 @@ BEGIN
   END IF;
 
   any_rows := FALSE;
-  FOR r IN (
-    SELECT db_pdb, tablespace_name, day_str AS day_dt, baseline_mode, gap, delta_mb, rate_mb, med_mb, thr_mb, z,
-           pct_vs_med, pct_vs_avg, anomaly_flag
-    FROM   capr_tbspc_anomalies
-    WHERE  days_ago < anomaly_days
-      AND  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con)
-    ORDER  BY con_dbid, tablespace_name, days_ago, mode_rank
-  ) LOOP
+  FOR i IN 1 .. t_ta.COUNT LOOP
+    CONTINUE WHEN NOT (t_ta(i).in_win = 1 AND t_ta(i).in_scope = 1);
+    DECLARE
+      r c_ta%ROWTYPE := t_ta(i);
+    BEGIN
     IF NOT any_rows THEN
       p('<details class="fold"><summary>The numbers behind every dot</summary><div class="fold-body">');
       p('<div class="tscroll">');
@@ -2947,7 +3307,7 @@ BEGIN
         || '</th><th>Flag' || info_icon('the direction of the flagged change for this day (CAPR column: ANOMALY_FLAG)') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
-    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.tablespace_name) || '</td><td style="white-space:nowrap">' || r.day_dt || '</td>'
+    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.tablespace_name) || '</td><td style="white-space:nowrap">' || r.day_str || '</td>'
       || '<td style="white-space:nowrap">' || mode_label(r.baseline_mode) || '</td>'
       || '<td class="num">' || nz(r.gap, 'FM990') || '</td>'
       || '<td class="num">' || nz(r.delta_mb, 'FM9999990.0') || '</td>'
@@ -2959,6 +3319,7 @@ BEGIN
       || '<td class="num">' || nz(r.pct_vs_med, 'FMS999999999990') || '</td>'
       || '<td class="num">' || nz(r.pct_vs_avg, 'FMS999999999990') || '</td>'
       || '<td class="' || CASE WHEN r.anomaly_flag = 'HIGH' THEN 'sev-crit' ELSE 'sev-ok' END || '">' || esc(r.anomaly_flag) || '</td></tr>');
+    END;
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
@@ -2970,6 +3331,7 @@ BEGIN
     WHEN OTHERS THEN sec_failed('3 (unusual tablespace days)', SQLERRM);
   END;
   p('</section>');
+  tmark('s3');
 
   ----------------------------------------------------------------------
   -- Section 4: CPU trend
@@ -2983,7 +3345,7 @@ BEGIN
 
   ----------------------------------------------------------------------
   -- Chart grid: one busy% card (history + saturation threshold + REGR
-  -- projection to +90 + anomaly dots) and one DB CPU % of cores card
+  -- projection to +90 + anomaly dots) and one DB CPU % of logical CPUs card
   -- (history + REGR projection to +90 + anomaly dots + level-shift shading)
   -- per con_dbid.
   -- Note (fleet/warehouse edge case): like the existing section 4/5 tables,
@@ -3020,13 +3382,12 @@ BEGIN
         v_quality := NULL; v_slope := NULL; v_dtf := NULL; v_n := NULL;
         v_big := NULL; v_big_lbl := NULL; v_big_cls := NULL; v_accent := NULL;
         v_proj_y := NULL; v_cross_x := NULL; v_has_proj := FALSE;
-        FOR t IN (SELECT t.slope_per_day, t.quality, t.days_to_sat, t.sat_worst, t.sat_best, t.r2, t.cur_val,
-                         t.last_day, t.anchor_value, f.proj_90,
-                         f.proj_30_lo, f.proj_30_hi, f.proj_90_lo, f.proj_90_hi
-                  FROM capr_cpu_trend t
-                  LEFT JOIN capf_cpu_trend f ON f.dbid = t.dbid AND f.con_dbid = t.con_dbid AND f.metric = t.metric
-                  WHERE t.con_dbid = cd.con_dbid AND t.metric = 'BUSY_P95'
-                  ORDER BY t.dbid FETCH FIRST 1 ROW ONLY) LOOP
+        need_fit;
+        FOR k_t_ct IN 1 .. t_ct.COUNT LOOP
+          IF t_ct(k_t_ct).con_dbid = cd.con_dbid AND t_ct(k_t_ct).metric = 'BUSY_P95' THEN
+          DECLARE
+            t c_ct%ROWTYPE := t_ct(k_t_ct);
+          BEGIN
           v_quality := t.quality; v_slope := t.slope_per_day; v_dtf := t.days_to_sat; v_n := t.r2;
           IF t.quality = 'OK' AND t.days_to_sat IS NOT NULL THEN
             v_big := short_dur(t.days_to_sat);
@@ -3051,6 +3412,9 @@ BEGIN
               bx(2) := px1(2);                    blo(2) := t.proj_90_lo; bhi(2) := t.proj_90_hi;
             END IF;
           END IF;
+          END;
+          EXIT;
+          END IF;
         END LOOP;
         card_open('Host CPU busy-hour p95 <span class="dim" style="font-weight:400">' || esc(db_label(NULL, cd.con_dbid)) || '</span> '
                   || CASE WHEN v_quality IS NOT NULL THEN quality_pill(v_quality) END,
@@ -3068,10 +3432,13 @@ BEGIN
         IF v_proj_y IS NOT NULL AND v_proj_y > v_ymax THEN v_ymax := v_proj_y; END IF;
         FOR i IN 1 .. v_nband LOOP IF bhi(i) > v_ymax THEN v_ymax := bhi(i); END IF; END LOOP;
         v_ymax := v_ymax * 1.06;
-        FOR a IN (SELECT ts, value, anomaly_modes, how_hours_flagged FROM capr_series_points
-                  WHERE con_dbid = cd.con_dbid AND kind = 'CPU' AND series = 'BUSY_PCT' AND anomaly = 1) LOOP
-          v_nanom := v_nanom + 1; ax(v_nanom) := a.ts - c_epoch; ay(v_nanom) := a.value;
-          atip(v_nanom) := ring_tip(a.ts, TO_CHAR(a.value, 'FM990.0') || '% busy (daily average)', a.anomaly_modes, a.how_hours_flagged);
+        need_sp;
+        FOR i IN 1 .. t_sp.COUNT LOOP
+          IF t_sp(i).con_dbid = cd.con_dbid AND t_sp(i).kind = 'CPU' AND t_sp(i).series = 'BUSY_PCT' AND t_sp(i).anomaly = 1 THEN
+            v_nanom := v_nanom + 1; ax(v_nanom) := t_sp(i).ts - c_epoch; ay(v_nanom) := t_sp(i).value;
+            atip(v_nanom) := ring_tip(t_sp(i).ts, TO_CHAR(t_sp(i).value, 'FM990.0') || '% busy (daily average)',
+                                      t_sp(i).anomaly_modes, t_sp(i).how_hours_flagged);
+          END IF;
         END LOOP;
         chart_svg('Host CPU busy-hour p95 for ' || esc(db_label(NULL, cd.con_dbid)) || ' with projection and saturation line',
                   v_xmin, v_xmax, v_ymin, v_ymax, '%', v_last_day_n,
@@ -3081,7 +3448,7 @@ BEGIN
         p('</div>');
       END IF;
 
-      -- ---- DB CPU as % of host cores: comparable to the busy% chart, and the
+      -- ---- DB CPU as % of logical CPUs: comparable to the busy% chart, and the
       --      metric the level-shift test scores, so a sustained step is shaded here ----
       xs.DELETE; ys.DELETE; xs2.DELETE; ys2.DELETE; v_cnt := 0; v_cnt2 := 0; v_nband := 0; v_nanom := 0; v_has_proj := FALSE;
       FOR h IN (SELECT day_dt, db_cpu_pct FROM capd_dbtime_daily
@@ -3093,12 +3460,12 @@ BEGIN
         v_big := NULL; v_big_lbl := NULL; v_big_cls := NULL; v_accent := NULL;
         v_shift_from := NULL; v_shift_to := NULL; v_shift_lbl := NULL;
         v_proj_y := NULL;
-        FOR t IN (SELECT t.slope_per_day, t.quality, t.days_to_sat, t.r2, t.last_day, t.anchor_value, f.proj_90
-                  FROM capr_cpu_trend t
-                  LEFT JOIN capf_cpu_trend f ON f.dbid = t.dbid AND f.con_dbid = t.con_dbid AND f.metric = t.metric
-                  WHERE t.con_dbid = cd.con_dbid AND t.metric = 'DB_CPU_PCT'
-                    AND (s_dbid IS NULL OR t.dbid = s_dbid)
-                  ORDER BY t.dbid FETCH FIRST 1 ROW ONLY) LOOP
+        need_fit;
+        FOR k_t_ct IN 1 .. t_ct.COUNT LOOP
+          IF t_ct(k_t_ct).con_dbid = cd.con_dbid AND t_ct(k_t_ct).metric = 'DB_CPU_PCT' AND (s_dbid IS NULL OR t_ct(k_t_ct).dbid = s_dbid) THEN
+          DECLARE
+            t c_ct%ROWTYPE := t_ct(k_t_ct);
+          BEGIN
           v_quality := t.quality; v_slope := t.slope_per_day; v_dtf := t.days_to_sat; v_n := t.r2;
           -- the view's anchored line (no band on this card)
           IF t.quality = 'OK' AND t.proj_90 IS NOT NULL THEN
@@ -3106,10 +3473,16 @@ BEGIN
             px1(2) := t.last_day + 90 - c_epoch; py1(2) := t.proj_90;
             v_proj_y := t.proj_90; v_has_proj := TRUE;
           END IF;
+          END;
+          EXIT;
+          END IF;
         END LOOP;
-        FOR s IN (SELECT last_day, recent_days, shift_pct, shift_flag, sev FROM capr_cpu_shifts
-                  WHERE con_dbid = cd.con_dbid AND metric = 'DB_CPU_PCT' AND shift_flag IS NOT NULL
-                  ORDER BY rank_shift FETCH FIRST 1 ROW ONLY) LOOP
+        need_anom(v_cs_err);
+        FOR k_t_cs IN 1 .. t_cs.COUNT LOOP
+          IF t_cs(k_t_cs).con_dbid = cd.con_dbid AND t_cs(k_t_cs).metric = 'DB_CPU_PCT' AND t_cs(k_t_cs).shift_flag IS NOT NULL THEN
+          DECLARE
+            s c_cs%ROWTYPE := t_cs(k_t_cs);
+          BEGIN
           v_shift_from := (s.last_day - s.recent_days + 1) - c_epoch;
           v_shift_to   := s.last_day - c_epoch;
           v_shift_lbl  := CASE WHEN s.shift_pct >= 0 THEN '+' END || TO_CHAR(s.shift_pct, 'FM9990.0') || ' pts since '
@@ -3118,16 +3491,19 @@ BEGIN
           v_big_lbl := 'pts, sustained ' || LOWER(s.shift_flag);
           v_big_cls := CASE WHEN s.sev = 'WARN' THEN 'warn' ELSE 'muted' END;
           v_accent  := CASE WHEN s.sev = 'WARN' THEN 'warn' END;
+          END;
+          EXIT;
+          END IF;
         END LOOP;
         IF v_big IS NULL AND v_quality = 'OK' AND v_dtf IS NOT NULL AND v_dtf <= 365 THEN
-          v_big := short_dur(v_dtf); v_big_lbl := 'to ' || TO_CHAR(cpu_sat, 'FM990') || '% of cores';
+          v_big := short_dur(v_dtf); v_big_lbl := 'to ' || TO_CHAR(cpu_sat, 'FM990') || '% of logical CPUs';
           v_big_cls := CASE WHEN v_dtf <= dtf_crit THEN 'crit' WHEN v_dtf <= dtf_warn THEN 'warn' ELSE 'ok' END;
           v_accent  := CASE WHEN v_dtf <= dtf_crit THEN 'crit' WHEN v_dtf <= dtf_warn THEN 'warn' END;
         END IF;
-        card_open('DB CPU, % of host cores <span class="dim" style="font-weight:400">' || esc(db_label(NULL, cd.con_dbid)) || '</span> '
+        card_open('DB CPU, % of logical CPUs <span class="dim" style="font-weight:400">' || esc(db_label(NULL, cd.con_dbid)) || '</span> '
                   || CASE WHEN v_shift_lbl IS NOT NULL THEN '<span class="pill pill-warn">SHIFT</span> ' END
                   || CASE WHEN v_quality IS NOT NULL THEN quality_pill(v_quality) END,
-                  'this container''s DB CPU seconds as a share of the host''s core capacity, daily'
+                  'this container''s DB CPU seconds as a share of the host''s logical CPUs, daily'
                   || CASE WHEN v_n IS NOT NULL THEN ' &middot; R2 ' || TO_CHAR(v_n, 'FM0.00') END
                   || CASE WHEN v_shift_lbl IS NOT NULL AND v_quality = 'LOW_CONFIDENCE' THEN ' (the step breaks the straight-line fit)' END,
                   v_big, v_big_lbl, v_big_cls, v_accent, NULL);
@@ -3140,12 +3516,15 @@ BEGIN
         IF v_ymax >= cpu_sat * 0.35 THEN v_ymax := GREATEST(v_ymax, cpu_sat); END IF;
         IF v_ymax < 1 THEN v_ymax := 1; END IF;
         v_ymax := v_ymax * 1.08;
-        FOR a IN (SELECT ts, value, anomaly_modes, how_hours_flagged FROM capr_series_points
-                  WHERE con_dbid = cd.con_dbid AND kind = 'CPU' AND series = 'DB_CPU_PCT' AND anomaly = 1) LOOP
-          v_nanom := v_nanom + 1; ax(v_nanom) := a.ts - c_epoch; ay(v_nanom) := a.value;
-          atip(v_nanom) := ring_tip(a.ts, TO_CHAR(a.value, 'FM990.0') || '% of host cores', a.anomaly_modes, a.how_hours_flagged);
+        need_sp;
+        FOR i IN 1 .. t_sp.COUNT LOOP
+          IF t_sp(i).con_dbid = cd.con_dbid AND t_sp(i).kind = 'CPU' AND t_sp(i).series = 'DB_CPU_PCT' AND t_sp(i).anomaly = 1 THEN
+            v_nanom := v_nanom + 1; ax(v_nanom) := t_sp(i).ts - c_epoch; ay(v_nanom) := t_sp(i).value;
+            atip(v_nanom) := ring_tip(t_sp(i).ts, TO_CHAR(t_sp(i).value, 'FM990.0') || '% of logical CPUs',
+                                      t_sp(i).anomaly_modes, t_sp(i).how_hours_flagged);
+          END IF;
         END LOOP;
-        chart_svg('DB CPU as a percent of host cores for ' || esc(db_label(NULL, cd.con_dbid))
+        chart_svg('DB CPU as a percent of logical CPUs for ' || esc(db_label(NULL, cd.con_dbid))
                   || CASE WHEN v_shift_lbl IS NOT NULL THEN ', with the sustained level shift shaded' END,
                   v_xmin, v_xmax, v_ymin, v_ymax, '%', v_last_day_n,
                   NULL, NULL,
@@ -3233,6 +3612,7 @@ BEGIN
     WHEN OTHERS THEN sec_failed('4 (CPU trend)', SQLERRM);
   END;
   p('</section>');
+  tmark('s4');
 
   ----------------------------------------------------------------------
   -- Section 5: CPU anomalies
@@ -3252,17 +3632,11 @@ BEGIN
   IF v_win_hi IS NOT NULL THEN
     v_win_lo := v_win_hi - anomaly_days;
     v_xmin := v_win_lo - c_epoch; v_xmax := v_win_hi - c_epoch;
-    FOR ln IN (
-      SELECT con_dbid, db_pdb, metric, COUNT(DISTINCT grain || TO_CHAR(ts, 'YYYYMMDDHH24')) AS n_all,
-             COUNT(DISTINCT CASE WHEN anomaly_flag = 'HIGH' THEN grain || TO_CHAR(ts, 'YYYYMMDDHH24') END) AS n_hi,
-             COUNT(DISTINCT CASE WHEN anomaly_flag = 'LOW'  THEN grain || TO_CHAR(ts, 'YYYYMMDDHH24') END) AS n_lo,
-             MAX(value_pct) AS max_busy
-      FROM   capr_cpu_anomalies
-      WHERE  days_ago < anomaly_days
-        AND  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con)
-      GROUP  BY con_dbid, db_pdb, metric
-      ORDER  BY n_all DESC, con_dbid, metric
-    ) LOOP
+    need_anom(v_ca_err);
+    FOR k IN 1 .. ix_cstr.COUNT LOOP
+      DECLARE
+        ln c_ca%ROWTYPE := t_ca(ix_cstr(k));
+      BEGIN
       v_strip_n := v_strip_n + 1;
       IF v_strip_n = 1 THEN p('<div class="strips">'); END IF;
       p('<div class="strip"><div class="sl"><b>' || CASE ln.metric WHEN 'BUSY_PCT' THEN 'Host CPU' ELSE 'DB CPU' END || '</b>'
@@ -3274,23 +3648,23 @@ BEGIN
       strip_open(v_xmin, v_xmax);
       -- one dot per day or hour: the day baseline with the largest |z| sizes
       -- a day dot, the other is named in the tooltip
-      FOR a IN (SELECT ts, ts_str, value_pct, median_pct, z, anomaly_flag, baseline_mode, n_modes
-                FROM  (SELECT t.*,
-                              ROW_NUMBER() OVER (PARTITION BY grain, ts ORDER BY ABS(z) DESC NULLS LAST, mode_rank) AS rn,
-                              COUNT(*) OVER (PARTITION BY grain, ts) AS n_modes
-                       FROM   capr_cpu_anomalies t
-                       WHERE  con_dbid = ln.con_dbid AND metric = ln.metric AND days_ago < anomaly_days)
-                WHERE rn = 1) LOOP
+      FOR k2 IN 1 .. ix_cdot.COUNT LOOP
+        CONTINUE WHEN NOT (t_ca(ix_cdot(k2)).con_dbid = ln.con_dbid AND t_ca(ix_cdot(k2)).metric = ln.metric);
+        DECLARE
+          a c_ca%ROWTYPE := t_ca(ix_cdot(k2));
+        BEGIN
         v_tip := a.ts_str || ': ' || TO_CHAR(a.value_pct, 'FM990')
-                 || CASE ln.metric WHEN 'BUSY_PCT' THEN '% busy' ELSE '% of host cores' END || ' vs the usual '
+                 || CASE ln.metric WHEN 'BUSY_PCT' THEN '% busy' ELSE '% of logical CPUs' END || ' vs the usual '
                  || TO_CHAR(a.median_pct, 'FM990') || '% ' || mode_phrase(a.baseline_mode, a.ts)
                  || ', robust z ' || TO_CHAR(a.z, 'FM99990.0')
                  || CASE WHEN a.n_modes > 1 THEN '; both day baselines flagged it' END;
         p('<circle class="' || CASE WHEN a.anomaly_flag = 'HIGH' THEN 'sd-hi' ELSE 'sd-lo' END
           || '" cx="' || fmt_px(lin(a.ts - c_epoch, v_xmin, v_xmax, 4, 896)) || '" cy="15" r="'
           || fmt_px(3.5 + LEAST(4, ABS(NVL(a.z, 0)) / 3)) || '"><title>' || esc(v_tip) || '</title></circle>');
+        END;
       END LOOP;
       p('</svg></div>');
+      END;
     END LOOP;
     IF v_strip_n > 0 THEN
       p('<div class="strip-axis"><div></div><div><span>' || dfmt(v_win_lo + 1) || '</span><span>'
@@ -3300,18 +3674,16 @@ BEGIN
   END IF;
 
   any_rows := FALSE;
-  FOR r IN (
-    SELECT db_pdb, metric, baseline_mode, ts_str, value_pct, median_pct, threshold_pct, z, pct_vs_med, anomaly_flag
-    FROM   capr_cpu_anomalies
-    WHERE  days_ago < anomaly_days
-      AND  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con)
-    ORDER  BY days_ago, con_dbid, metric, mode_rank, ts
-  ) LOOP
+  FOR i IN 1 .. t_ca.COUNT LOOP
+    CONTINUE WHEN NOT (t_ca(i).in_win = 1 AND t_ca(i).in_scope = 1);
+    DECLARE
+      r c_ca%ROWTYPE := t_ca(i);
+    BEGIN
     IF NOT any_rows THEN
       p('<details class="fold"><summary>The numbers behind every dot</summary><div class="fold-body">');
       p('<div class="tscroll">');
       p('<table class="tbl"><thead><tr>'
-        || '<th>DB/PDB</th><th>Metric' || info_icon('BUSY_PCT = host busy percent, DB_CPU_PCT = the container''s DB CPU as a percent of host cores (CAPR column: METRIC)')
+        || '<th>DB/PDB</th><th>Metric' || info_icon('BUSY_PCT = host busy percent, DB_CPU_PCT = the container''s DB CPU as a percent of the host''s logical CPUs (CAPR column: METRIC)')
         || '</th><th>Baseline' || info_icon('what it was compared against: the last ' || TO_CHAR(mad_window, 'FM9990')
            || ' days or the same weekday (per day), or the same hour of the week (per hour) (CAPR column: BASELINE_MODE)')
         || '</th><th>When' || info_icon('the day, or for an hour row the day, weekday and END hour (CAPR column: TS_STR)')
@@ -3333,6 +3705,7 @@ BEGIN
          || nz(r.z, 'FM99990.0') || '</td>'
       || '<td class="num">' || nz(r.pct_vs_med, 'FMS999999999990') || '</td>'
       || '<td class="' || CASE WHEN r.anomaly_flag = 'HIGH' THEN 'sev-crit' ELSE 'sev-ok' END || '">' || esc(r.anomaly_flag) || '</td></tr>');
+    END;
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
@@ -3394,6 +3767,7 @@ BEGIN
     WHEN OTHERS THEN sec_failed('5 (unusual CPU days)', SQLERRM);
   END;
   p('</section>');
+  tmark('s5');
 
   ----------------------------------------------------------------------
   -- Section 6: ESM vs REGR compare (dispatch identical to report.sql /
@@ -3433,7 +3807,7 @@ BEGIN
       -- section 2's scoped rank, so the same tablespaces appear
       LEFT   JOIN (SELECT dbid, con_dbid, tablespace_name,
                           ROW_NUMBER() OVER (ORDER BY rank_report) AS s_rank
-                   FROM   capr_tbspc_forecast
+                   FROM   capr_tbspc_rank
                    WHERE  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con)) sr
         ON   c.series_kind = 'TBSPC'
        AND   sr.dbid = c.dbid AND sr.con_dbid = c.con_dbid AND sr.tablespace_name = c.series_key
@@ -3487,6 +3861,7 @@ BEGIN
     WHEN OTHERS THEN sec_failed('6 (ESM vs REGR)', SQLERRM);
   END;
   p('</section>');
+  tmark('s6');
 
   ----------------------------------------------------------------------
   -- Section 7: fixed-ceiling series (M11) -- processes / sessions / redo /
@@ -3585,13 +3960,12 @@ BEGIN
       || 'Each day is compared against the last ' || TO_CHAR(mad_window, 'FM9990') || ' days and against the same weekday over the last '
       || TO_CHAR(dow_wk, 'FM9990') || ' weeks; one row per baseline that flagged it.</p>');
   any_rows := FALSE;
-  FOR r IN (
-    SELECT db_pdb, series, unit, day_str, baseline_mode, value, expected, threshold, z, n_hist, pct_vs_med, anomaly_flag
-    FROM   capr_series_anomalies
-    WHERE  days_ago < anomaly_days
-      AND  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con)
-    ORDER  BY days_ago, con_dbid, series, mode_rank
-  ) LOOP
+  need_anom(v_xa_err);
+  FOR i IN 1 .. t_xa.COUNT LOOP
+    CONTINUE WHEN NOT (t_xa(i).in_win = 1 AND t_xa(i).in_scope = 1);
+    DECLARE
+      r c_xa%ROWTYPE := t_xa(i);
+    BEGIN
     IF NOT any_rows THEN
       p('<div class="tscroll">');
       p('<table class="tbl tight"><thead><tr>'
@@ -3618,6 +3992,7 @@ BEGIN
       || '<td class="num">' || nz(r.n_hist, 'FM9990') || '</td>'
       || '<td class="num">' || nz(r.pct_vs_med, 'FMS999999999990') || '</td>'
       || '<td class="' || CASE WHEN r.anomaly_flag = 'HIGH' THEN 'sev-crit' ELSE 'sev-ok' END || '">' || esc(r.anomaly_flag) || '</td></tr>');
+    END;
   END LOOP;
   IF any_rows THEN
     p('</tbody></table>');
@@ -3629,6 +4004,7 @@ BEGIN
     WHEN OTHERS THEN sec_failed('7 (fixed-ceiling series)', SQLERRM);
   END;
   p('</section>');
+  tmark('s7');
 
   ----------------------------------------------------------------------
   -- Footer + close document
@@ -3645,6 +4021,10 @@ BEGIN
     || 'var b=document.getElementById("themeBtn");if(b){b.onclick=function(){var c=r.getAttribute("data-theme");'
     || 'var d=c?c==="dark":window.matchMedia("(prefers-color-scheme: dark)").matches;var n=d?"light":"dark";'
     || 'r.setAttribute("data-theme",n);try{localStorage.setItem(k,n);}catch(e){}};}})();</script>');
+  IF v_timing THEN
+    p('<!-- timing, wall seconds per section' || v_tlog || CHR(10)
+      || RPAD('total', 10) || TO_CHAR((DBMS_UTILITY.GET_TIME - v_t0) / 100, 'FM999990.00') || ' -->');
+  END IF;
   p('</body></html>');
 END;
 /

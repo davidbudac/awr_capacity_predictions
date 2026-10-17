@@ -34,6 +34,7 @@ DECLARE
         'CAPR_BACKTEST',
         'CAPR_ESM_COMPARE',
         'CAPR_TBSPC_FORECAST',
+        'CAPR_TBSPC_RANK',
         'CAPR_FIT',
         'CAPR_SEGMENT_GROWTH',
         'CAPR_HOURLY_POINTS',

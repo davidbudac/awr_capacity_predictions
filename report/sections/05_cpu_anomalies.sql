@@ -8,7 +8,7 @@
 --
 PROMPT
 PROMPT == 5. CPU ANOMALIES vs trailing / same-weekday / hour-of-week baselines (last &anomaly_days days) ==
-PROMPT    METRIC BUSY_PCT = host busy%, DB_CPU_PCT = a container's DB CPU as % of host cores.
+PROMPT    METRIC BUSY_PCT = host busy%, DB_CPU_PCT = a container's DB CPU as % of logical CPUs.
 PROMPT    MODE TRL = the trailing &mad_w days, DOW = the same weekday over the last &dow_w weeks
 PROMPT    (both per day), HOW = the same weekday and hour over those weeks (per hour, WHEN
 PROMPT    shows the END hour). FLAG when |value% - median%| exceeds THRESHOLD (k*MAD, floored).

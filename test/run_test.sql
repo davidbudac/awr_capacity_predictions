@@ -15,6 +15,19 @@ SET SERVEROUTPUT ON SIZE UNLIMITED
 SET FEEDBACK OFF VERIFY OFF LINES 200 PAGES 0
 WHENEVER SQLERROR EXIT FAILURE
 
+-- CAP_FIXTURE_ALERTS_SNAP: CAPR_ALERTS copied once per stretch of reads with
+-- no knob, data or block boundary between them (snap_alerts), so those reads
+-- scan a table instead of evaluating the whole view chain each time. A
+-- test-owned table like every CAP_FIXTURE_ one; test/fixture_remove.sql
+-- drops it.
+BEGIN
+    EXECUTE IMMEDIATE 'DROP TABLE cap_fixture_alerts_snap PURGE';
+EXCEPTION
+    WHEN OTHERS THEN IF SQLCODE != -942 THEN RAISE; END IF;
+END;
+/
+CREATE TABLE cap_fixture_alerts_snap AS SELECT * FROM capr_alerts WHERE 1 = 0;
+
 DECLARE
     g_pass  PLS_INTEGER := 0;
     g_fail  PLS_INTEGER := 0;
@@ -101,6 +114,14 @@ DECLARE
            AND anomaly_flag = DECODE(p_flag, 'ANY', anomaly_flag, p_flag);
         RETURN x;
     END;
+    -- Refill the snapshot. No commit: it rides in the caller's transaction,
+    -- like the uncommitted knob flips around it.
+    PROCEDURE snap_alerts IS
+    BEGIN
+        DELETE FROM cap_fixture_alerts_snap;
+        INSERT INTO cap_fixture_alerts_snap SELECT * FROM capr_alerts;
+    END;
+
     PROCEDURE knob(p_name VARCHAR2, p_val NUMBER) IS
     BEGIN UPDATE cap_config SET cfg_value = p_val WHERE cfg_name = p_name; END;
 BEGIN
@@ -155,12 +176,13 @@ BEGIN
       FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_NEARFULL';
     chk_close('NEARFULL pct_used', v_num, meta_n('NEARFULL_PCT'), 0.001);
     chk_str  ('NEARFULL quality', v_str, 'FLAT');
-    SELECT COUNT(*) INTO v_n FROM capr_alerts
+    snap_alerts;
+    SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
       WHERE kind = 'TBSPC_NEARFULL' AND series_key = 'FIX_NEARFULL' AND severity = 'CRIT';
     chk_int('NEARFULL CRIT alert raised', v_n, 1);
     -- FIX_OVERFULL (limit under its usage, 150%) is the only other series at
     -- or over nearfull_warn_pct, so the "nobody else" check names both.
-    SELECT COUNT(*) INTO v_n FROM capr_alerts
+    SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
       WHERE kind = 'TBSPC_NEARFULL' AND series_key NOT IN ('FIX_NEARFULL', 'FIX_OVERFULL');
     chk_int('NEARFULL alerts only for FIX_NEARFULL / FIX_OVERFULL', v_n, 0);
 
@@ -170,14 +192,14 @@ BEGIN
     chk_int  ('FILLING days_to_full', v_n, meta_n('FILLING_DTF'));
     chk_close('FILLING pct_used', v_num, meta_n('FILLING_PCT'), 0.001);
     chk_str  ('FILLING quality', v_str, 'OK');
-    SELECT COUNT(*) INTO v_n FROM capr_alerts
+    SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
       WHERE kind = 'TBSPC_FULL' AND series_key = 'FIX_FILLING' AND severity = 'CRIT';
     chk_int('FILLING TBSPC_FULL CRIT alert raised', v_n, 1);
     -- FIX_OVERRIDE also lands inside the dtf_warn window, but only BECAUSE of
     -- its M9.5 override (2 GiB ceiling -> 74 days); on its raw 50 GiB maxsize
     -- it would be 4990 days away. So the "no other series alerts" check names
     -- both rather than counting to 1.
-    SELECT COUNT(*) INTO v_n FROM capr_alerts
+    SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
       WHERE kind = 'TBSPC_FULL' AND series_key NOT IN ('FIX_FILLING','FIX_OVERRIDE');
     chk_int('no TBSPC_FULL alerts beyond FILLING/OVERRIDE', v_n, 0);
 
@@ -265,21 +287,21 @@ BEGIN
     SELECT db_pdb INTO v_str FROM capr_container
       WHERE dbid = v_dbid AND con_dbid = v_dbid + 1;
     chk_str('PDB label = DB/PDB', v_str, 'FIXCDB/FIXPDB1');
-    SELECT COUNT(*) INTO v_n FROM capr_alerts
+    SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
       WHERE kind = 'TBSPC_NEARFULL' AND db_pdb <> 'FIXCDB';
     chk_int('alerts resolve db_pdb', v_n, 0);
 
     DBMS_OUTPUT.PUT_LINE('=== CAPR_ALERTS anomaly kinds (M8.1) ===');
     -- SPIKE_DAY is 10 days before LAST_DAY, INJECTED_TUE at most 6 days
     -- before -- both inside the default 14-day anomaly_report_days window.
-    SELECT COUNT(*) INTO v_n FROM capr_alerts
+    SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
       WHERE kind = 'TBSPC_ANOM' AND series_key = 'FIX_SPIKE'
         AND severity = 'WARN' AND day_dt = d_spike;
     chk_int('SPIKE raises TBSPC_ANOM WARN', v_n, 1);
-    SELECT COUNT(*) INTO v_n FROM capr_alerts
+    SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
       WHERE kind = 'CPU_ANOM' AND severity = 'WARN' AND day_dt = d_inj;
     chk_int('injected Tuesday raises CPU_ANOM WARN', v_n, 1);
-    SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SAT';
+    SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap WHERE kind = 'CPU_SAT';
     chk_int('no CPU_SAT alert (flat CPU trend)', v_n, 0);
 
     DBMS_OUTPUT.PUT_LINE('=== M8.2 CAPR_* report views ===');
@@ -377,7 +399,7 @@ BEGIN
     chk_close('DB CPU probe db_cpu_pct',      v_num2, meta_n('DBCPU_PROBE_PCT'),        0.000001);
     chk_close('DB CPU probe db_cpu_peak_pct', v_num3, meta_n('DBCPU_PROBE_PEAK_PCT'),   0.000001);
     chk_close('DB CPU probe host_share_pct',  v_r2,   meta_n('DBCPU_PROBE_HOST_SHARE'), 0.000001);
-    SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'DBCPU_SAT';
+    SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap WHERE kind = 'DBCPU_SAT';
     chk_int('no DBCPU_SAT alert (flat DB CPU)', v_n, 0);
 
     DBMS_OUTPUT.PUT_LINE('=== CPU same-DOW anomaly ===');
@@ -411,7 +433,7 @@ BEGIN
     SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
       WHERE tablespace_name = 'FIX_EXCLUDED';
     chk_int('EXCLUDED absent from CAPF_TBSPC_FORECAST', v_n, 0);
-    SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE series_key = 'FIX_EXCLUDED';
+    SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap WHERE series_key = 'FIX_EXCLUDED';
     chk_int('EXCLUDED raises no CAPR_ALERTS', v_n, 0);
 
     DBMS_OUTPUT.PUT_LINE('=== M7.4 report bound / M7.7 accel floor ===');
@@ -454,6 +476,30 @@ BEGIN
     SELECT COUNT(*) INTO v_n FROM capr_esm_compare
       WHERE series_kind = 'CPU' AND (is_reportable <> 'Y' OR rank_report <> 0);
     chk_int('CAPR_ESM_COMPARE never bounds CPU rows', v_n, 0);
+    -- CAPR_TBSPC_RANK: one row per CAPF_TBSPC_FORECAST row, and the bound and
+    -- ranks both report views carry are its own.
+    SELECT (SELECT COUNT(*) FROM capr_tbspc_rank) - (SELECT COUNT(*) FROM capf_tbspc_forecast)
+      INTO v_n FROM dual;
+    chk_int('CAPR_TBSPC_RANK rows - CAPF_TBSPC_FORECAST rows', v_n, 0);
+    SELECT COUNT(*) INTO v_num FROM capf_tbspc_forecast;
+    SELECT COUNT(*) INTO v_n
+      FROM capr_tbspc_rank r
+      JOIN capr_tbspc_forecast f
+        ON f.dbid = r.dbid AND f.con_dbid = r.con_dbid AND f.tablespace_name = r.tablespace_name
+     WHERE f.is_reportable = r.is_reportable AND f.rank_report = r.rank_report AND f.rank_chart = r.rank_chart;
+    chk_int('CAPR_TBSPC_FORECAST rows whose bound and ranks are CAPR_TBSPC_RANK''s', v_n, v_num);
+    -- CAPA_ANOM.kind_last_day: the newest DAY observation of each kind, the
+    -- fixture's LAST_DAY for TBSPC, CPU and SERIES alike.
+    DECLARE
+        k_lo DATE; k_hi DATE;
+    BEGIN
+        SELECT COUNT(*), COUNT(DISTINCT kind), MIN(kind_last_day), MAX(kind_last_day)
+          INTO v_n, v_num2, k_lo, k_hi
+          FROM (SELECT DISTINCT kind, kind_last_day FROM capa_anom WHERE baseline_mode = 'TRAILING');
+        chk_true('CAPA_ANOM kind_last_day = LAST_DAY for TBSPC, CPU, SERIES (got ' || v_n || ' rows, '
+                 || TO_CHAR(k_lo, 'YYYY-MM-DD') || '..' || TO_CHAR(k_hi, 'YYYY-MM-DD') || ')',
+                 v_n = 3 AND v_num2 = 3 AND k_lo = meta_last_day AND k_hi = meta_last_day);
+    END;
 
     DBMS_OUTPUT.PUT_LINE('=== M9.2 Theil-Sen robust slope (knob slope_method) ===');
     SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'slope_method';
@@ -562,7 +608,8 @@ BEGIN
     -- confined to its own tablespace (the FIX_SPIKE LOW check above holds).
     chk_str('PURGE day flags a LOW anomaly (TRAILING)', anom_flag('TBSPC', 'FIX_PURGE', 'TRAILING', d_purge, v_dbid), 'LOW');
     chk_int('PURGE has exactly one anomaly (TRAILING)', anom_n('TBSPC', 'FIX_PURGE', 'TRAILING', 'ANY', v_dbid), 1);
-    SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE series_key = 'FIX_PURGE';
+    snap_alerts;
+    SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap WHERE series_key = 'FIX_PURGE';
     chk_int('PURGE raises no CAPR_ALERTS (cliff predates the alert window)', v_n, 0);
 
     DBMS_OUTPUT.PUT_LINE('=== clamp + limit_below_used (FIX_OVERFULL) ===');
@@ -582,10 +629,10 @@ BEGIN
       WHERE tablespace_name = 'FIX_OVERFULL'
         AND days_to_full IS NULL AND days_to_full_lo IS NULL AND days_to_full_hi IS NULL;
     chk_int('OVERFULL days_to_full / _lo / _hi NULL (FLAT)', v_n, 1);
-    SELECT COUNT(*) INTO v_n FROM capr_alerts
+    SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
       WHERE kind = 'TBSPC_NEARFULL' AND series_key = 'FIX_OVERFULL' AND severity = 'CRIT';
     chk_int('OVERFULL raises TBSPC_NEARFULL CRIT', v_n, 1);
-    SELECT COUNT(*) INTO v_n FROM capr_alerts
+    SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
       WHERE kind = 'TBSPC_FULL' AND series_key = 'FIX_OVERFULL';
     chk_int('OVERFULL raises no TBSPC_FULL (flat)', v_n, 0);
     SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
@@ -1104,13 +1151,14 @@ BEGIN
                   v_num, 100 * ((n_slope - 76800 * 8192) - n_slope) / n_slope, 0.000001);
 
         -- CAPR_ALERTS messages carry the percentages.
-        SELECT message INTO v_msg FROM capr_alerts
+        snap_alerts;
+        SELECT message INTO v_msg FROM cap_fixture_alerts_snap
           WHERE kind = 'TBSPC_ANOM' AND series_key = 'FIX_SPIKE' AND day_dt = d_spike;
         chk_true('SPIKE TBSPC_ANOM message has "+' || n_pct || '% vs ' || n_train
                  || '-day avg rate" (got: ' || v_msg || ')',
                  INSTR(v_msg, '+' || TO_CHAR(n_pct, 'FM999999990') || '% vs '
                               || TO_CHAR(n_train, 'FM9990') || '-day avg rate') > 0);
-        SELECT message INTO v_msg FROM capr_alerts
+        SELECT message INTO v_msg FROM cap_fixture_alerts_snap
           WHERE kind = 'CPU_ANOM' AND series_key = 'BUSY_PCT' AND day_dt = d_inj;
         chk_true('CPU_ANOM message has "+75% vs median" (got: ' || v_msg || ')',
                  INSTR(v_msg, '(+75% vs median)') > 0);
@@ -1226,26 +1274,27 @@ BEGIN
                  v_str IN ('OK','LOW_CONFIDENCE'));
 
         DBMS_OUTPUT.PUT_LINE('=== M11 alerts + CAPR_SERIES ===');
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        snap_alerts;
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE kind = 'SERIES_LIMIT' AND series_key = 'SESSIONS'
             AND severity = 'CRIT' AND db_pdb = 'FIXCDB';
         chk_int('SESSIONS raises SERIES_LIMIT CRIT (db_pdb FIXCDB)', v_n, 1);
-        SELECT value INTO v_num FROM capr_alerts
+        SELECT value INTO v_num FROM cap_fixture_alerts_snap
           WHERE kind = 'SERIES_LIMIT' AND series_key = 'SESSIONS';
         chk_int('SERIES_LIMIT value = days_to_limit', v_num, meta_n('SESS_DTL'));
         -- ASM_DG:+DATA (20 days to 90%) is the one other SERIES_LIMIT and
         -- TEMP_PEAK:FIX_TEMP (97.5% now) the one SERIES_NEARLIMIT. Both are
         -- asserted in the seam-extension block below.
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE kind = 'SERIES_LIMIT' AND series_key IN ('PROCESSES','REDO_GB_DAY','DB_SIZE_GB');
         chk_int('no SERIES_LIMIT for PROCESSES / REDO_GB_DAY / DB_SIZE_GB', v_n, 0);
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE kind = 'SERIES_LIMIT' AND series_key NOT IN ('SESSIONS','ASM_DG:+DATA');
         chk_int('SERIES_LIMIT only for SESSIONS and ASM_DG:+DATA', v_n, 0);
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE kind = 'SERIES_NEARLIMIT' AND series_key = 'SESSIONS';
         chk_int('no SERIES_NEARLIMIT for SESSIONS (88%, under 90)', v_n, 0);
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE kind = 'SERIES_NEARLIMIT' AND series_key <> 'TEMP_PEAK:FIX_TEMP';
         chk_int('SERIES_NEARLIMIT only for TEMP_PEAK:FIX_TEMP', v_n, 0);
         SELECT COUNT(*) INTO v_n   FROM capr_series;
@@ -1432,8 +1481,9 @@ BEGIN
         chk_str  ('ASM_DG:+DATA quality', v_str, 'OK');
         chk_close('ASM_DG:+DATA pct_of_limit', v_num2, meta_n('ASM_DATA_PCT'), 0.000001);
         chk_close('ASM_DG:+DATA proj_30 = 800 + 5 * 30', v_num3, meta_n('ASM_DATA_P30'), 0.000001);
+        snap_alerts;
         SELECT COUNT(*), MAX(value), MAX(severity) INTO v_n, v_num, v_str
-          FROM capr_alerts WHERE kind = 'SERIES_LIMIT' AND series_key = 'ASM_DG:+DATA';
+          FROM cap_fixture_alerts_snap WHERE kind = 'SERIES_LIMIT' AND series_key = 'ASM_DG:+DATA';
         chk_int('ASM_DG:+DATA raises one SERIES_LIMIT', v_n, 1);
         chk_int('ASM_DG:+DATA SERIES_LIMIT value = days_to_limit', v_num, meta_n('ASM_DATA_DTL'));
         chk_str('ASM_DG:+DATA SERIES_LIMIT severity (20 <= dtf_crit)', v_str, 'CRIT');
@@ -1473,11 +1523,11 @@ BEGIN
         chk_str  ('TEMP_PEAK quality', v_q, v_str);
         chk_true ('TEMP_PEAK days_to_limit IS NULL (slope < 0)', v_n IS NULL AND meta_n('TEMP_SLOPE') < 0);
         SELECT COUNT(*), MAX(value), MAX(severity) INTO v_n, v_num, v_str
-          FROM capr_alerts WHERE kind = 'SERIES_NEARLIMIT' AND series_key = 'TEMP_PEAK:FIX_TEMP';
+          FROM cap_fixture_alerts_snap WHERE kind = 'SERIES_NEARLIMIT' AND series_key = 'TEMP_PEAK:FIX_TEMP';
         chk_int  ('TEMP_PEAK raises one SERIES_NEARLIMIT', v_n, 1);
         chk_close('TEMP_PEAK SERIES_NEARLIMIT value = pct_of_limit', v_num, meta_n('TEMP_PCT'), 0.000001);
         chk_str  ('TEMP_PEAK SERIES_NEARLIMIT severity (97.5 >= nearfull_crit_pct)', v_str, 'CRIT');
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE kind = 'SERIES_LIMIT' AND series_key LIKE 'TEMP!_PEAK:%' ESCAPE '!';
         chk_int('TEMP_PEAK raises no SERIES_LIMIT (not growing)', v_n, 0);
         SELECT cur_val, cur_limit, pct_of_limit, quality INTO v_num, v_num2, v_num3, v_str
@@ -1486,7 +1536,7 @@ BEGIN
         chk_close('UNDO_PEAK cur_limit (autoextend maxsize)',   v_num2, meta_n('UNDO_LIMIT'), 0.000001);
         chk_close('UNDO_PEAK pct_of_limit',                     v_num3, meta_n('UNDO_PCT'),   0.000001);
         chk_str  ('UNDO_PEAK quality (constant -> FLAT)', v_str, 'FLAT');
-        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE series_key = 'UNDO_PEAK:FIX_UNDO';
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap WHERE series_key = 'UNDO_PEAK:FIX_UNDO';
         chk_int('UNDO_PEAK raises no alert', v_n, 0);
         -- CAPD_TBSPC_DAILY keeps its contents exclusion: neither tablespace
         -- reaches the tablespace layers, DB_SIZE_GB included.
@@ -1510,7 +1560,7 @@ BEGIN
             AND (series LIKE 'ASM!_DG:%' ESCAPE '!' OR series LIKE 'TEMP!_PEAK:%' ESCAPE '!'
                  OR series LIKE 'UNDO!_PEAK:%' ESCAPE '!');
         chk_int('ASM / TEMP / UNDO series have no CAPA_OBS rows (not in the registry)', v_n, 0);
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE kind = 'SERIES_ANOM'
             AND (series_key LIKE 'ASM!_DG:%' ESCAPE '!' OR series_key LIKE 'TEMP!_PEAK:%' ESCAPE '!'
                  OR series_key LIKE 'UNDO!_PEAK:%' ESCAPE '!');
@@ -1691,10 +1741,11 @@ BEGIN
         chk_int('root container raises no level shift', v_n, 0);
 
         -- Alert + report view.
-        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SHIFT';
+        snap_alerts;
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap WHERE kind = 'CPU_SHIFT';
         chk_int('exactly one CPU_SHIFT alert', v_n, 1);
         SELECT severity, db_pdb, series_key INTO v_str, v_lbl, v_key
-          FROM capr_alerts WHERE kind = 'CPU_SHIFT';
+          FROM cap_fixture_alerts_snap WHERE kind = 'CPU_SHIFT';
         chk_str('CPU_SHIFT alert severity (UP -> WARN)', v_str, 'WARN');
         chk_str('CPU_SHIFT alert db_pdb', v_lbl, 'FIXCDB/FIXPDB1');
         chk_str('CPU_SHIFT alert series_key', v_key, 'DB_CPU_PCT');
@@ -2307,21 +2358,22 @@ BEGIN
         chk_close('CAPR_HOURLY_POINTS injected Tuesday 06:00 how_z', v_num, 10, 0.000001);
 
         DBMS_OUTPUT.PUT_LINE('=== M15 alerts with the shipped alert_modes ===');
-        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_ANOM';
+        snap_alerts;
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap WHERE kind = 'CPU_ANOM';
         chk_int('CPU_ANOM alerts', v_n, 1);
-        SELECT baseline_mode INTO v_mode FROM capr_alerts WHERE kind = 'CPU_ANOM';
+        SELECT baseline_mode INTO v_mode FROM cap_fixture_alerts_snap WHERE kind = 'CPU_ANOM';
         chk_str('CPU_ANOM baseline_mode', v_mode, 'SAME_DOW');
         -- The 7 FIXPDB1 step days are consecutive, so they fold into ONE
         -- episode, and all 7 lie inside CAPA_CPU_SHIFT's recent window
         -- (shift_days = 7 ending LAST_DAY), so the episode is INFO with the
         -- level-shift suffix. The CPU_SHIFT row stays the one WARN.
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE kind = 'DBCPU_ANOM' AND severity = 'WARN';
         chk_int('DBCPU_ANOM WARN alerts (the step days are INFO under the shift)', v_n, 0);
-        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'DBCPU_ANOM';
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap WHERE kind = 'DBCPU_ANOM';
         chk_int('DBCPU_ANOM alerts in total (the 7 step days, one episode)', v_n, 1);
         SELECT severity, n_days, first_day, day_dt, message INTO v_str, v_num, d_tstart, v_dt0, v_msg
-          FROM capr_alerts
+          FROM cap_fixture_alerts_snap
           WHERE kind = 'DBCPU_ANOM' AND baseline_mode = 'SAME_DOW'
             AND db_pdb = 'FIXCDB/FIXPDB1' AND series_key = 'DB_CPU_PCT';
         chk_str ('DBCPU_ANOM episode severity INFO (level shift active)', v_str, 'INFO');
@@ -2332,39 +2384,40 @@ BEGIN
                  || v_msg || ')',
                  v_msg LIKE '7 consecutive days, latest ' || TO_CHAR(d_last, 'YYYY-MM-DD') || ', peak robust z %'
                  AND v_msg LIKE '% (level shift active)');
-        SELECT COUNT(*), MAX(kind) INTO v_n, v_str FROM capr_alerts
+        SELECT COUNT(*), MAX(kind) INTO v_n, v_str FROM cap_fixture_alerts_snap
           WHERE con_dbid = n_pdb AND series_key = 'DB_CPU_PCT' AND severity = 'WARN';
         chk_true('FIXPDB1 DB_CPU_PCT: CPU_SHIFT is the one WARN (got ' || v_n || ' ' || v_str || ')',
                  v_n = 1 AND v_str = 'CPU_SHIFT');
-        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'TBSPC_ANOM';
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap WHERE kind = 'TBSPC_ANOM';
         chk_int('TBSPC_ANOM alerts (the spike + the FIX_GAP burst episode; the purge predates the window)', v_n, 2);
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE kind = 'SERIES_ANOM' AND series_key = 'DB_SIZE_GB' AND day_dt = d_spike
             AND severity = 'WARN' AND baseline_mode = 'TRAILING';
         chk_int('SERIES_ANOM WARN for DB_SIZE_GB on the spike day', v_n, 1);
-        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'SERIES_ANOM';
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap WHERE kind = 'SERIES_ANOM';
         chk_int('SERIES_ANOM alerts in total', v_n, 1);
-        SELECT value, threshold INTO v_num, v_num2 FROM capr_alerts
+        SELECT value, threshold INTO v_num, v_num2 FROM cap_fixture_alerts_snap
           WHERE kind = 'TBSPC_ANOM' AND series_key = 'FIX_SPIKE';
         chk_close('TBSPC_ANOM value = the scored rate (bytes/day)', v_num, meta_n('SPIKE_RATE') + 2147483648, 0.000001);
         chk_close('TBSPC_ANOM threshold = the bound crossed (median + floor)', v_num2,
                   meta_n('SPIKE_RATE') + 104857600, 0.000001);
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE (kind IN ('TBSPC_ANOM', 'CPU_ANOM', 'DBCPU_ANOM', 'SERIES_ANOM') AND baseline_mode IS NULL)
              OR (kind NOT IN ('TBSPC_ANOM', 'CPU_ANOM', 'DBCPU_ANOM', 'SERIES_ANOM') AND baseline_mode IS NOT NULL);
         chk_int('baseline_mode set on anomaly kinds only', v_n, 0);
-        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SHIFT';
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap WHERE kind = 'CPU_SHIFT';
         chk_int('CPU_SHIFT alerts unchanged', v_n, 1);
 
         DBMS_OUTPUT.PUT_LINE('=== M15 knob flips ===');
         SELECT cfg_value INTO v_old FROM cap_config WHERE cfg_name = 'alert_modes_cpu';
         knob('alert_modes_cpu', 6);
         BEGIN
-            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_ANOM';
+            snap_alerts;
+            SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap WHERE kind = 'CPU_ANOM';
             chk_int('alert_modes_cpu=6: CPU_ANOM (SAME_DOW + HOW Tue + HOW Wed, one HOW episode when adjacent)',
                     v_n, CASE WHEN v_adj THEN 2 ELSE 3 END);
             SELECT severity, value, threshold, message INTO v_str, v_num, v_num2, v_msg
-              FROM capr_alerts
+              FROM cap_fixture_alerts_snap
               WHERE kind = 'CPU_ANOM' AND baseline_mode = 'HOUR_OF_WEEK' AND day_dt = d_inv;
             chk_str  ('alert_modes_cpu=6: HOW inverted Wednesday severity', v_str, 'WARN');
             chk_close('alert_modes_cpu=6: HOW inverted Wednesday carries 06:00 (value 40)', v_num, 40, 0.000001);
@@ -2390,12 +2443,13 @@ BEGIN
                          || v_num || ' / ' || v_num2 || '), its own one-day episode',
                          ABS(v_num - 70) < 1e-9 AND ABS(v_num2 - 35) < 1e-9 AND v_n = 1);
             END IF;
+            snap_alerts;
             SELECT COUNT(*), COUNT(CASE WHEN severity = 'INFO' AND n_days = 7 THEN 1 END)
-              INTO v_n, v_num FROM capr_alerts WHERE kind = 'DBCPU_ANOM';
+              INTO v_n, v_num FROM cap_fixture_alerts_snap WHERE kind = 'DBCPU_ANOM';
             chk_true('alert_modes_cpu=6: DBCPU_ANOM = 2 episodes (SAME_DOW, HOW), each 7 days, INFO (got '
                      || v_n || ' / ' || v_num || ')', v_n = 2 AND v_num = 2);
             SELECT COUNT(*) INTO v_n FROM (
-                SELECT alert_key FROM capr_alerts GROUP BY alert_key HAVING COUNT(*) > 1);
+                SELECT alert_key FROM cap_fixture_alerts_snap GROUP BY alert_key HAVING COUNT(*) > 1);
             chk_int('alert_modes_cpu=6: alert_key still unique', v_n, 0);
         EXCEPTION
             WHEN OTHERS THEN knob('alert_modes_cpu', v_old); COMMIT; RAISE;
@@ -2473,6 +2527,27 @@ BEGIN
             WHEN OTHERS THEN knob('cpu_min_mad_pct_hour', v_old); COMMIT; RAISE;
         END;
         knob('cpu_min_mad_pct_hour', v_old);
+        COMMIT;
+
+        -- anomaly_hour_grain = 0: CAPA_OBS drops its HOUR rows, so nothing is
+        -- scored per hour; the DAY verdicts and the hourly points stay.
+        SELECT cfg_value INTO v_old FROM cap_config WHERE cfg_name = 'anomaly_hour_grain';
+        SELECT COUNT(*) INTO v_num FROM capa_anom WHERE grain = 'DAY' AND anomaly_flag IS NOT NULL;
+        SELECT COUNT(*) INTO v_num3 FROM capd_cpu_hourly;
+        knob('anomaly_hour_grain', 0);
+        BEGIN
+            SELECT COUNT(*) INTO v_n FROM capa_obs WHERE grain = 'HOUR';
+            chk_int('anomaly_hour_grain=0: CAPA_OBS HOUR rows', v_n, 0);
+            SELECT COUNT(*) INTO v_n FROM capa_anom WHERE grain = 'DAY' AND anomaly_flag IS NOT NULL;
+            chk_int('anomaly_hour_grain=0: DAY flags unchanged', v_n, v_num);
+            SELECT COUNT(*), COUNT(how_n_hist) + NVL(SUM(anomaly), 0) INTO v_n, v_num2 FROM capr_hourly_points;
+            chk_true('anomaly_hour_grain=0: CAPR_HOURLY_POINTS keeps one row per CAPD_CPU_HOURLY row ('
+                     || v_num3 || '), none scored (got ' || v_n || ' / ' || v_num2 || ')',
+                     v_n = v_num3 AND v_num2 = 0);
+        EXCEPTION
+            WHEN OTHERS THEN knob('anomaly_hour_grain', v_old); COMMIT; RAISE;
+        END;
+        knob('anomaly_hour_grain', v_old);
         COMMIT;
 
         SELECT COUNT(*) INTO v_n FROM cap_config WHERE cfg_name IN ('tbspc_min_hist', 'cpu_min_dow_hist');
@@ -2556,10 +2631,11 @@ BEGIN
         chk_int('CAPR_SEVERITY sev = raw_sev unless gated, message only when alerting', v_n, 0);
         -- Every non-OK CAPR_SEVERITY row is exactly one forecast-kind
         -- CAPR_ALERTS row with the same numbers, and the other way round.
+        snap_alerts;
         SELECT COUNT(*) INTO v_n
           FROM (SELECT * FROM capr_severity WHERE sev <> 'OK') s
           FULL OUTER JOIN
-               (SELECT * FROM capr_alerts
+               (SELECT * FROM cap_fixture_alerts_snap
                 WHERE  kind IN ('TBSPC_FULL', 'TBSPC_NEARFULL', 'CPU_SAT', 'DBCPU_SAT', 'CPU_HOT',
                                 'DBCPU_HOT', 'SERIES_LIMIT', 'SERIES_NEARLIMIT')) a
             ON a.kind = s.kind AND a.dbid = s.dbid AND a.con_dbid = s.con_dbid
@@ -2616,7 +2692,7 @@ BEGIN
         chk_int('every section severity is upper-case CRIT / WARN / OK', v_n, 0);
 
         DBMS_OUTPUT.PUT_LINE('=== alerts: state_key, direction, alarm_threshold, is_current ===');
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE state_key <> kind || '|' || dbid || '|' || con_dbid || '|' || series_key || '|'
                              || NVL(baseline_mode, '-')
              OR is_current <> 'Y' OR alarm_threshold IS NULL OR direction IS NULL;
@@ -2625,14 +2701,14 @@ BEGIN
         -- the last day, n_days 7, ONE state.
         SELECT COUNT(*), COUNT(DISTINCT alert_key), COUNT(DISTINCT state_key), MAX(n_days), MAX(alert_key)
           INTO v_n, v_a, v_b, v_c, v_akey
-          FROM capr_alerts WHERE kind = 'DBCPU_ANOM';
+          FROM cap_fixture_alerts_snap WHERE kind = 'DBCPU_ANOM';
         chk_true('DBCPU_ANOM: 1 row, 1 alert_key, n_days 7, 1 state_key (got ' || v_n || '/' || v_a
                  || '/' || v_c || '/' || v_b || ')', v_n = 1 AND v_a = 1 AND v_c = 7 AND v_b = 1);
         chk_str ('DBCPU_ANOM episode alert_key = the last day''s', v_akey,
                  v_dbid || '|' || n_pdb1 || '|DBCPU_ANOM|DB_CPU_PCT|' || TO_CHAR(d_last, 'YYYY-MM-DD') || '|SAME_DOW');
         -- The direction law, every row: LE value <= alarm, GE value >= alarm,
         -- ABS |value| > alarm.
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE NOT ((direction = 'LE'  AND value <= alarm_threshold)
                   OR (direction = 'GE'  AND value >= alarm_threshold)
                   OR (direction = 'ABS' AND ABS(value) > alarm_threshold));
@@ -2653,7 +2729,8 @@ BEGIN
             chk_true('direction ' || k.kind || ' = ' || k.dir || ' (' || v_n || ' CAPR_SEVERITY rows, '
                      || v_num || ' off)', v_n > 0 AND v_num = 0);
         END LOOP;
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        snap_alerts;
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE direction <> CASE
                     WHEN kind IN ('TBSPC_FULL', 'CPU_SAT', 'DBCPU_SAT', 'SERIES_LIMIT')  THEN 'LE'
                     WHEN kind IN ('TBSPC_NEARFULL', 'CPU_HOT', 'DBCPU_HOT', 'SERIES_NEARLIMIT',
@@ -2667,7 +2744,7 @@ BEGIN
         -- dtf_warn as alarm_threshold.
         SELECT severity, value, threshold, alarm_threshold, direction
           INTO v_sev, v_a, v_b, v_c, v_dir
-          FROM capr_alerts WHERE kind = 'TBSPC_FULL' AND series_key = 'FIX_FILLING';
+          FROM cap_fixture_alerts_snap WHERE kind = 'TBSPC_FULL' AND series_key = 'FIX_FILLING';
         chk_true('FIX_FILLING TBSPC_FULL CRIT, value ' || n_fdtf || ', threshold ' || n_fc
                  || ', alarm_threshold ' || n_fw || ', LE (got ' || v_sev || ' ' || v_a || ' ' || v_b
                  || ' ' || v_c || ' ' || v_dir || ')',
@@ -2676,7 +2753,7 @@ BEGIN
         -- FIX_FILLING's last usage row: its fit ends a day earlier (day_dt
         -- LAST_DAY - 1, one more 10 MiB day of headroom: 21 days), same key.
         SELECT state_key, alert_key, day_dt INTO v_key, v_akey, v_dt
-          FROM capr_alerts WHERE kind = 'TBSPC_FULL' AND series_key = 'FIX_FILLING';
+          FROM cap_fixture_alerts_snap WHERE kind = 'TBSPC_FULL' AND series_key = 'FIX_FILLING';
         SAVEPOINT as_day;
         BEGIN
             DELETE FROM cap_fixture_tbspc_usage
@@ -2735,9 +2812,10 @@ BEGIN
         SAVEPOINT as_cyc;
         BEGIN
             knob('dtf_warn', 7000);
+            snap_alerts;
             SELECT severity, value, threshold, alarm_threshold, message
               INTO v_sev, v_a, v_b, v_c, v_msg
-              FROM capr_alerts WHERE kind = 'TBSPC_FULL' AND series_key = 'FIX_CYCLIC_UP';
+              FROM cap_fixture_alerts_snap WHERE kind = 'TBSPC_FULL' AND series_key = 'FIX_CYCLIC_UP';
             chk_true('dtf_warn=7000: FIX_CYCLIC_UP TBSPC_FULL WARN at ' || n_c1dtf || ' days, alarm 7000 (got '
                      || v_sev || ' ' || v_a || ' ' || v_b || ' ' || v_c || ')',
                      v_sev = 'WARN' AND v_a = n_c1dtf AND v_b = 7000 AND v_c = 7000);
@@ -2747,7 +2825,7 @@ BEGIN
                      INSTR(v_msg, 'every ' || meta_n('CYC1_DAYS') || ' days') > 0
                      AND INSTR(v_msg, 'peaks grow ' || v_str || ' GiB per cycle') > 0
                      AND INSTR(v_msg, 'reaches the limit in ' || n_c1dtf || ' days') > 0);
-            SELECT COUNT(*) INTO v_n FROM capr_alerts
+            SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
               WHERE kind = 'TBSPC_FULL' AND series_key IN ('FIX_CYCLIC', 'FIX_DROPPED');
             chk_int('dtf_warn=7000: no TBSPC_FULL for FIX_CYCLIC / FIX_DROPPED', v_n, 0);
             SELECT raw_sev, sev, gated_by INTO v_raw, v_sev, v_gate FROM capr_severity
@@ -2978,10 +3056,11 @@ BEGIN
         ROLLBACK TO SAVEPOINT as_retired;
 
         DBMS_OUTPUT.PUT_LINE('=== alerts: anomaly episodes (consecutive flagged days, one row) ===');
+        snap_alerts;
         SELECT COUNT(*), MAX(severity), MAX(n_days), MAX(first_day), MAX(day_dt), MAX(max_z),
                MAX(value), MAX(threshold), MAX(alert_key), MAX(message)
           INTO v_n, v_sev, v_a, v_dt, v_dt2, v_b, v_c, v_num, v_akey, v_msg
-          FROM capr_alerts WHERE kind = 'TBSPC_ANOM' AND series_key = 'FIX_GAP';
+          FROM cap_fixture_alerts_snap WHERE kind = 'TBSPC_ANOM' AND series_key = 'FIX_GAP';
         chk_int ('FIX_GAP burst: one TBSPC_ANOM row for the 3 days', v_n, 1);
         chk_true('FIX_GAP burst: WARN, n_days = BURST_DAYS, first_day = BURST_FIRST, day_dt = BURST_LAST (got '
                  || v_sev || ' ' || v_a || ' ' || TO_CHAR(v_dt, 'YYYY-MM-DD') || ' ' || TO_CHAR(v_dt2, 'YYYY-MM-DD') || ')',
@@ -2999,13 +3078,13 @@ BEGIN
                             || TO_CHAR(meta_d('BURST_LAST'), 'YYYY-MM-DD') || ' %');
         SELECT COUNT(*), MAX(n_days), MAX(first_day), MAX(day_dt), MAX(max_z), MAX(message)
           INTO v_n, v_a, v_dt, v_dt2, v_b, v_msg
-          FROM capr_alerts WHERE kind = 'TBSPC_ANOM' AND series_key = 'FIX_SPIKE';
+          FROM cap_fixture_alerts_snap WHERE kind = 'TBSPC_ANOM' AND series_key = 'FIX_SPIKE';
         chk_true('FIX_SPIKE single day: one row, n_days 1, first_day = day_dt = SPIKE_DAY (got ' || v_n || ' ' || v_a || ')',
                  v_n = 1 AND v_a = 1 AND v_dt = d_spike AND v_dt2 = d_spike);
         chk_close('FIX_SPIKE max_z = 2 GiB / (100 MiB / mad_k)', v_b, meta_n('SPIKE_Z'), 0.000001);
         chk_true('FIX_SPIKE message keeps the one-day form (got: ' || v_msg || ')',
                  v_msg LIKE 'Tablespace FIX_SPIKE grew 2.00 GiB on %' AND v_msg NOT LIKE '%consecutive days%');
-        SELECT COUNT(*) INTO v_n FROM capr_alerts
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap
           WHERE (kind IN ('TBSPC_ANOM', 'CPU_ANOM', 'DBCPU_ANOM', 'SERIES_ANOM')
                  AND (n_days IS NULL OR first_day IS NULL OR day_dt - first_day + 1 <> n_days))
              OR (kind NOT IN ('TBSPC_ANOM', 'CPU_ANOM', 'DBCPU_ANOM', 'SERIES_ANOM')
@@ -3016,7 +3095,7 @@ BEGIN
         SELECT COUNT(*), MAX(severity), MAX(con_dbid), MAX(series_key), MAX(value), MAX(threshold),
                MAX(alarm_threshold), MAX(db_pdb), MAX(message)
           INTO v_n, v_sev, v_num, v_str, v_a, v_b, v_c, v_str2, v_msg
-          FROM capr_alerts WHERE kind = 'DBCPU_HOT';
+          FROM cap_fixture_alerts_snap WHERE kind = 'DBCPU_HOT';
         chk_int ('DBCPU_HOT rows (FIXPDB2 DB_CPU_P95 only)', v_n, 1);
         chk_true('DBCPU_HOT FIXPDB2 DB_CPU_P95 WARN at PDB2_P95_RECENT_MED vs 80 (got ' || v_sev || ' '
                  || v_num || ' ' || v_str || ' ' || v_a || ' ' || v_b || ' ' || v_c || ' ' || v_str2 || ')',
@@ -3024,9 +3103,9 @@ BEGIN
                  AND ABS(v_a - n_p2med) < 1e-9 AND v_b = v_sat AND v_c = v_sat AND v_str2 = 'FIXCDB/FIXPDB2');
         chk_true('DBCPU_HOT message (got: ' || v_msg || ')',
                  v_msg = 'DB CPU busy-hour p95 has been at ' || TO_CHAR(n_p2med, 'FM990.0')
-                         || '% of host core capacity (median of the last 7 complete days) vs the saturation line '
+                         || '% of logical CPUs (median of the last 7 complete days) vs the saturation line '
                          || v_sat || '%');
-        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_HOT';
+        SELECT COUNT(*) INTO v_n FROM cap_fixture_alerts_snap WHERE kind = 'CPU_HOT';
         chk_int('CPU_HOT absent (root BUSY_P95 recent median 58 < 80)', v_n, 0);
         SELECT sev INTO v_sev FROM capr_cpu_trend WHERE con_dbid = n_pdb2 AND metric = 'DB_CPU_P95';
         chk_str('section 4 sev for FIXPDB2 DB_CPU_P95', v_sev, 'WARN');
@@ -3207,12 +3286,32 @@ BEGIN
 
     -- suite_version: stamped by every install, BAD when older than this release.
     SELECT suite_version INTO v_num FROM cap_cfg;
-    chk_int('suite_version = 16', v_num, 16);
-    UPDATE cap_config SET cfg_value = 12 WHERE cfg_name = 'suite_version';
+    chk_int('suite_version = 21', v_num, 21);
+    UPDATE cap_config SET cfg_value = 20 WHERE cfg_name = 'suite_version';
     SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'suite_version';
-    chk_str('CAP_CFG_CHECK suite_version=12 < 13', v_str, 'BAD');
+    chk_str('CAP_CFG_CHECK suite_version=20 < 21', v_str, 'BAD');
     UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'suite_version';
     COMMIT;
+
+    -- Tier 2 and engine knobs' range rules: BAD below / outside the range,
+    -- OK after the reset.
+    UPDATE cap_config SET cfg_value = -1 WHERE cfg_name = 'esm_auto_tie_pct';
+    UPDATE cap_config SET cfg_value = -1 WHERE cfg_name = 'esm_max_age_days';
+    UPDATE cap_config SET cfg_value = 2  WHERE cfg_name = 'anomaly_hour_grain';
+    SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'esm_auto_tie_pct';
+    chk_str('CAP_CFG_CHECK esm_auto_tie_pct = -1', v_str, 'BAD');
+    SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'esm_max_age_days';
+    chk_str('CAP_CFG_CHECK esm_max_age_days = -1', v_str, 'BAD');
+    SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'anomaly_hour_grain';
+    chk_str('CAP_CFG_CHECK anomaly_hour_grain = 2', v_str, 'BAD');
+    UPDATE cap_config SET cfg_value = cfg_default
+     WHERE cfg_name IN ('esm_auto_tie_pct', 'esm_max_age_days', 'anomaly_hour_grain');
+    COMMIT;
+    SELECT COUNT(*) INTO v_n FROM cap_cfg_check
+      WHERE knob IN ('esm_auto_tie_pct', 'esm_max_age_days', 'anomaly_hour_grain') AND status = 'OK';
+    chk_int('esm_auto_tie_pct / esm_max_age_days / anomaly_hour_grain OK after reset', v_n, 3);
+    SELECT anomaly_hour_grain INTO v_num FROM cap_cfg;
+    chk_int('anomaly_hour_grain shipped', v_num, 1);
 
     -- A deleted key is the silent failure mode: the pivot yields NULL, the
     -- SPIKE threshold goes NULL and the flag disappears without an error.
@@ -3363,6 +3462,18 @@ BEGIN
                 + DECODE(h.quality, f.quality, 0, 1) + DECODE(h.sev, f.sev, 0, 1)
                 + DECODE(h.last_day, f.last_day, 0, 1) + DECODE(h.add_by_day, f.add_by_day, 0, 1)) > 0;
         chk_int ('R2 snapshot = CAPR_FIT now (value, days_to_full, quality, sev, last_day, add_by_day mismatches)', v_n, 0);
+        -- Every run keeps CAPR_COVERAGE on its CAP_RUN row (the backdated one
+        -- too): the fixture is one current dbid. R1 and R2 ran on the restored
+        -- data, so their summary is the view's now.
+        SELECT COUNT(CASE WHEN cov_n_dbid = 1 AND cov_n_current = 1 THEN 1 END),
+               COUNT(CASE WHEN run_id IN (run_1, run_2)
+                           AND cov_summary = (SELECT summary FROM capr_coverage) THEN 1 END)
+          INTO v_a, v_b FROM cap_run;
+        chk_true('CAP_RUN coverage: cov_n_dbid 1 and cov_n_current 1 on all 3 runs, cov_summary = CAPR_COVERAGE.summary on R1, R2 (got '
+                 || v_a || ' / ' || v_b || ')', v_a = 3 AND v_b = 2);
+        SELECT COUNT(*) INTO v_n FROM capr_runs r JOIN cap_run c ON c.run_id = r.run_id
+         WHERE r.cov_summary = c.cov_summary AND r.cov_n_dbid = c.cov_n_dbid AND r.cov_n_current = c.cov_n_current;
+        chk_int ('CAPR_RUNS exposes the coverage columns of every run', v_n, 3);
 
         -- The fixture's alerts: TBSPC_FULL 2 (FILLING, OVERRIDE), TBSPC_NEARFULL
         -- 2 (NEARFULL, OVERFULL), SERIES_LIMIT 2 (SESSIONS, ASM_DG:+DATA),

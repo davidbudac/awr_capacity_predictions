@@ -25,6 +25,8 @@
 -- drivers bound sections 2 and 6a with the identical
 --   WHERE is_reportable = 'Y' AND rank_report <= &top_n
 -- while the views themselves still expose every row to other consumers.
+--   CAPR_TBSPC_RANK     -- that reportability and the two ranks, decided once
+--                          over CAPF_TBSPC_FORECAST; both views above read it.
 --   CAPR_BACKTEST       -- section 6c: the M9.4 holdout scorecard pivoted to
 --                          one row per series, incl. the BETTER verdict and
 --                          (M10.4) the ESM model-type pick + its rationale.
@@ -51,16 +53,25 @@ SET DEFINE OFF
 -- (days_to_full NULLS LAST, then name) so that driver can cap at top_n with
 -- a plain WHERE.
 -- --------------------------------------------------------------------
-CREATE OR REPLACE VIEW capr_tbspc_forecast AS
+-- --------------------------------------------------------------------
+-- CAPR_TBSPC_RANK -- M7.4 reportability and the section ranks, one row per
+-- CAPF_TBSPC_FORECAST row. Decided once here so section 2
+-- (CAPR_TBSPC_FORECAST) and section 6a (CAPR_ESM_COMPARE) bound the same set
+-- of tablespaces, and so 6a needs no second walk of CAPF_COMPARE through
+-- CAPR_TBSPC_FORECAST. A row is worth printing when it is GROWING, or
+-- already NEAR-FULL, or simply BIG (>= report_min_gb GiB) -- which leaves out
+-- exactly the small, flat, half-empty tablespaces that turn a 500-tablespace
+-- database into 500 lines of noise. cur_used IS NULL reports as 'Y': the
+-- bound must never hide a row we cannot judge.
+--   rank_report  reportable rows first, then growing ones, then the biggest
+--                -- so WHERE is_reportable='Y' AND rank_report <= top_n
+--                keeps the top_n rows that matter and a non-reportable row
+--                can never consume a slot ahead of a reportable one.
+--   rank_chart   the HTML chart grid's order: days_to_full NULLS LAST, name.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capr_tbspc_rank AS
 WITH f AS (
-        -- M7.4 reportability, decided once here so section 2 (this view) and
-        -- section 6a (CAPR_ESM_COMPARE, which joins this one) bound the same
-        -- set of tablespaces. A row is worth printing when it is GROWING, or
-        -- already NEAR-FULL, or simply BIG (>= report_min_gb GiB) -- which
-        -- leaves out exactly the small, flat, half-empty tablespaces that turn
-        -- a 500-tablespace database into 500 lines of noise. cur_used IS NULL
-        -- reports as 'Y': the bound must never hide a row we cannot judge.
-        SELECT t.*,
+        SELECT t.dbid, t.con_dbid, t.tablespace_name, t.cur_used, t.slope_bpd, t.days_to_full,
                CASE WHEN t.cur_used IS NULL                           THEN 'Y'
                     WHEN NVL(t.slope_bpd, 0) > 0                      THEN 'Y'
                     WHEN t.cur_used >= cfg.report_min_gb * 1073741824 THEN 'Y'
@@ -68,6 +79,25 @@ WITH f AS (
                     ELSE 'N'
                END                                                    AS is_reportable
         FROM   capf_tbspc_forecast t CROSS JOIN cap_cfg cfg
+     )
+SELECT f.dbid,
+       f.con_dbid,
+       f.tablespace_name,
+       f.is_reportable,
+       ROW_NUMBER() OVER (ORDER BY CASE WHEN f.is_reportable = 'Y' THEN 0 ELSE 1 END,
+                                   CASE WHEN NVL(f.slope_bpd, 0) > 0 THEN 0 ELSE 1 END,
+                                   f.cur_used DESC NULLS LAST,
+                                   f.con_dbid, f.tablespace_name)  AS rank_report,
+       ROW_NUMBER() OVER (ORDER BY f.days_to_full NULLS LAST,
+                                   f.tablespace_name)  AS rank_chart
+FROM   f;
+
+CREATE OR REPLACE VIEW capr_tbspc_forecast AS
+WITH f AS (
+        SELECT t.*, r.is_reportable, r.rank_report, r.rank_chart
+        FROM   capf_tbspc_forecast t
+        JOIN   capr_tbspc_rank r
+          ON   r.dbid = t.dbid AND r.con_dbid = t.con_dbid AND r.tablespace_name = t.tablespace_name
      )
 SELECT f.dbid,
        f.con_dbid,
@@ -94,16 +124,8 @@ SELECT f.dbid,
        e.lower_bound    / 1073741824       AS esm30_lo,
        e.upper_bound    / 1073741824       AS esm30_hi,
        f.is_reportable,
-       -- rank_report: reportable rows first, then growing ones, then the
-       -- biggest -- so  WHERE is_reportable='Y' AND rank_report <= top_n
-       -- keeps the top_n rows that matter and a non-reportable row can never
-       -- consume a slot ahead of a reportable one.
-       ROW_NUMBER() OVER (ORDER BY CASE WHEN f.is_reportable = 'Y' THEN 0 ELSE 1 END,
-                                   CASE WHEN NVL(f.slope_bpd, 0) > 0 THEN 0 ELSE 1 END,
-                                   f.cur_used DESC NULLS LAST,
-                                   f.con_dbid, f.tablespace_name)  AS rank_report,
-       ROW_NUMBER() OVER (ORDER BY f.days_to_full NULLS LAST,
-                                   f.tablespace_name)  AS rank_chart,
+       f.rank_report,
+       f.rank_chart,
        e.esm_horizon_days,
        e.model_age_days                    AS esm_age_days
 FROM   f
@@ -149,8 +171,8 @@ SELECT f.dbid,
             WHEN 'EXSM_ADDWINTERS' THEN 'ADDW'
             WHEN 'EXSM_HOLT'       THEN 'HOLT'
        END                                                     AS esm_model,
-       -- M7.4: section 6a applies the SAME bound as section 2, INHERITED from
-       -- CAPR_TBSPC_FORECAST rather than recomputed, so the two sections can
+       -- M7.4: section 6a applies the SAME bound as section 2, read from
+       -- CAPR_TBSPC_RANK as CAPR_TBSPC_FORECAST does, so the two sections can
        -- never disagree about which tablespaces are worth printing. CPU rows
        -- (6b) are always reportable with rank_report 0, so the identical
        -- WHERE is_reportable='Y' AND rank_report <= top_n never drops them.
@@ -166,7 +188,7 @@ SELECT f.dbid,
 FROM   capf_compare f
 LEFT   JOIN capr_container cn
   ON   cn.dbid = f.dbid AND cn.con_dbid = f.con_dbid
-LEFT   JOIN capr_tbspc_forecast tf
+LEFT   JOIN capr_tbspc_rank tf
   ON   f.series_kind = 'TBSPC'
  AND   tf.dbid = f.dbid AND tf.con_dbid = f.con_dbid
  AND   tf.tablespace_name = f.series_key

@@ -103,10 +103,13 @@ SELECT JSON_OBJECT(
          ABSENT ON NULL RETURNING CLOB)
 FROM   capr_series_points t;
 
--- forecast: CAPR_FORECAST_POINTS (REGR anchors + the ESM +30 point)
+-- forecast: CAPR_FORECAST_POINTS (REGR anchors + the ESM point). The ESM
+-- point's horizon_days shrinks as its model ages, so its id hashes the 30-day
+-- comparison bucket instead: an aging model replaces its document.
 SELECT JSON_OBJECT(
          'id' VALUE LOWER(RAWTOHEX(STANDARD_HASH('fc|' || t.dbid || '|' || t.con_dbid
-                    || '|' || t.kind || '|' || t.series || '|' || t.method || '|' || t.horizon_days, 'MD5'))),
+                    || '|' || t.kind || '|' || t.series || '|' || t.method || '|'
+                    || CASE WHEN t.method = 'ESM' THEN 30 ELSE t.horizon_days END, 'MD5'))),
          '@timestamp' VALUE TO_CHAR(t.ts, 'YYYY-MM-DD') || 'T00:00:00Z',
          'cap' VALUE JSON_OBJECT(
              'record' VALUE 'forecast', 'kind' VALUE t.kind, 'series' VALUE t.series,

@@ -55,12 +55,17 @@ SET SERVEROUTPUT ON SIZE UNLIMITED
 WHENEVER SQLERROR EXIT FAILURE
 
 -- ---- drop any prior fixtures ----
+-- The demo has no parameter, ASM or segment history: dropping those tables
+-- (left behind by test/fixture_install.sql) makes the fixture seam stub
+-- them, so no FIX_ rows leak into the demo.
 DECLARE
     TYPE nl IS TABLE OF VARCHAR2(30);
     v nl := nl('CAP_FIXTURE_SNAPSHOT','CAP_FIXTURE_TBSPC_USAGE','CAP_FIXTURE_TABLESPACE',
               'CAP_FIXTURE_DATAFILE','CAP_FIXTURE_OSSTAT','CAP_FIXTURE_TIME_MODEL',
               'CAP_FIXTURE_CONTAINER','CAP_FIXTURE_META',
-              'CAP_FIXTURE_RESOURCE_LIMIT','CAP_FIXTURE_SYSSTAT');
+              'CAP_FIXTURE_RESOURCE_LIMIT','CAP_FIXTURE_SYSSTAT',
+              'CAP_FIXTURE_PARAMETER','CAP_FIXTURE_ASM_DISKGROUP','CAP_FIXTURE_SEG_STAT',
+              'CAP_FIXTURE_ALERTS_SNAP');
 BEGIN
     FOR i IN 1 .. v.COUNT LOOP
         BEGIN EXECUTE IMMEDIATE 'DROP TABLE ' || v(i) || ' PURGE';

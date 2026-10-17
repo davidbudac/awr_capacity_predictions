@@ -10,9 +10,11 @@
 --
 -- MAD_sigma = MEDIAN(|x - median|) * 1.4826 (the 1.4826 makes MAD a consistent
 -- estimator of the standard deviation for normal data). Rolling MAD cannot be
--- written with nested window MEDIANs, so the engine uses a self-join computed
--- in two passes (median first, then MAD about that median), always EXCLUDING
--- the scored point so a spike cannot inflate its own baseline.
+-- written with nested window MEDIANs, so the engine joins each point to its
+-- baseline rows (a self-join of the observations), takes the median as an
+-- analytic MEDIAN over those rows and the MAD as a grouped MEDIAN about it,
+-- always EXCLUDING the scored point so a spike cannot inflate its own
+-- baseline.
 --
 --   CAPA_OBS        -- (M15) every scorable observation in one shape:
 --                      tablespace growth rates, host BUSY_PCT and container
@@ -52,6 +54,8 @@ SET DEFINE OFF
 --   raw_value      the un-normalised number (TBSPC / DB_SIZE_GB the delta
 --                  over span_days; else = value).
 --   gap_flag       'Y' rows are never scored and never baseline.
+--                  anomaly_hour_grain = 0 drops the HOUR rows (no hourly
+--                  scoring at all).
 --   is_complete    'N' on a CPU / DB time / REDO_GB_DAY day whose valid
 --                  intervals cover less than complete_day_pct of it (first
 --                  day, restart day, today): never scored, never baseline.
@@ -114,7 +118,9 @@ WITH ufloor AS (
                CASE h.metric WHEN 'BUSY_PCT' THEN 'CPU_BUSY' ELSE 'DBCPU_BUSY' END,
                CASE h.metric WHEN 'BUSY_PCT' THEN 'CPU_ANOM' ELSE 'DBCPU_ANOM' END
         FROM   capd_cpu_hourly h
+        CROSS  JOIN cap_cfg cfg
         WHERE  h.value IS NOT NULL
+          AND  cfg.anomaly_hour_grain <> 0
         UNION ALL
         SELECT s.dbid, s.con_dbid, 'SERIES', s.series, 'DAY', s.day_dt,
                CASE r.basis WHEN 'RATE' THEN s.d_value / s.day_gap ELSE s.value END,
@@ -154,9 +160,9 @@ JOIN  (SELECT 'TBSPC' AS kind, cfg.alert_modes_tbspc AS alert_modes FROM cap_cfg
 --                 with no weekday arithmetic (NLS-proof), and it follows the
 --                 local clock across a DST change, as workload does.
 -- Baselines EXCLUDE the point itself and every gap_flag = 'Y' or
--- is_complete = 'N' row, and neither kind of row is ever flagged. Two
--- passes (median, then MAD about it): a rolling MAD cannot be a nested
--- window MEDIAN on 19c.
+-- is_complete = 'N' row, and neither kind of row is ever flagged. The
+-- median comes first, then the MAD about it: a rolling MAD cannot be a
+-- nested window MEDIAN on 19c.
 --   expected   baseline median;  mad_sigma = MEDIAN(|h - expected|) * 1.4826
 --   eff_sigma  GREATEST(mad_sigma, thr_floor / mad_k); sigma_floored says
 --              which side won
@@ -170,16 +176,27 @@ JOIN  (SELECT 'TBSPC' AS kind, cfg.alert_modes_tbspc AS alert_modes FROM cap_cfg
 --              gap-weighted mean growth rate), DAY rows only, mode-independent
 --   alerting_mode  'Y' when the family's alert_modes bitmask has this mode
 --   is_headline    1 on the mode CAPA_ANOM_DAY reports for the observation
+--   kind_last_day  the newest DAY ts of the kind over every container (NULL
+--              when the kind has no DAY rows): the anchor of the alert
+--              window, so CAPR_ANOMALIES needs no second CAPA_OBS read
 -- CAPA_OBS is read once (obs, referenced four times, so Oracle materializes
 -- it): joined directly, the optimizer pushes the history join into the
--- CAPA_OBS view and recomputes its daily sources per scored point.
+-- CAPA_OBS view and recomputes its daily sources per scored point. The
+-- history rows are read once too: med takes the median as an analytic over
+-- each point's rows, madc the MAD about it, instead of joining the medians
+-- back to the history. Both sorts carry only (pid, value): pid numbers the
+-- scored point (obs_id * 8 + mode_bit, obs_id from the CAPA_OBS key), so a
+-- small work area sorts a fraction of the bytes the full key would cost.
 -- Readers either filter baseline_mode or GROUP BY the observation key:
 -- joined on the observation key alone this view fans out two rows per day
 -- (test/lint_anom_joins.sh enforces it outside ddl/40, ddl/45 and the tests).
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capa_anom AS
 WITH obs AS (
-        SELECT * FROM capa_obs
+        SELECT o.*,
+               ROW_NUMBER() OVER (ORDER BY o.dbid, o.con_dbid, o.kind, o.series, o.grain, o.ts) AS obs_id,
+               MAX(CASE WHEN o.grain = 'DAY' THEN o.ts END) OVER (PARTITION BY o.kind) AS kind_last_day
+        FROM   capa_obs o
      ),
      modes AS (
         SELECT 'TRAILING' AS baseline_mode, 1 AS mode_bit, 'DAY' AS grain FROM dual
@@ -190,12 +207,12 @@ WITH obs AS (
         SELECT LEVEL AS lv FROM dual CONNECT BY LEVEL <= (SELECT dow_weeks FROM cap_cfg)
      ),
      cur AS (
-        SELECT o.*, m.baseline_mode, m.mode_bit
+        SELECT o.*, m.baseline_mode, m.mode_bit, o.obs_id * 8 + m.mode_bit AS pid
         FROM   obs o
         JOIN   modes m ON m.grain = o.grain
      ),
      hist AS (
-        SELECT c.dbid, c.con_dbid, c.kind, c.series, c.baseline_mode, c.ts, h.value AS hval
+        SELECT c.pid, h.value AS hval
         FROM   cur c
         JOIN   obs h
           ON   h.dbid = c.dbid AND h.con_dbid = c.con_dbid
@@ -204,7 +221,7 @@ WITH obs AS (
          AND   h.ts BETWEEN c.ts - (SELECT mad_window_days FROM cap_cfg) AND c.ts - 1
         WHERE  c.baseline_mode = 'TRAILING'
         UNION ALL
-        SELECT c.dbid, c.con_dbid, c.kind, c.series, c.baseline_mode, c.ts, h.value
+        SELECT c.pid, h.value
         FROM   cur c
         CROSS  JOIN lags g
         JOIN   obs h
@@ -215,19 +232,14 @@ WITH obs AS (
         WHERE  c.baseline_mode IN ('SAME_DOW', 'HOUR_OF_WEEK')
      ),
      med AS (
-        SELECT dbid, con_dbid, kind, series, baseline_mode, ts,
-               MEDIAN(hval) AS med, COUNT(hval) AS n_hist
-        FROM   hist
-        GROUP  BY dbid, con_dbid, kind, series, baseline_mode, ts
+        SELECT h.pid, h.hval, MEDIAN(h.hval) OVER (PARTITION BY h.pid) AS med
+        FROM   hist h
      ),
      madc AS (
-        SELECT m.dbid, m.con_dbid, m.kind, m.series, m.baseline_mode, m.ts, m.med, m.n_hist,
-               MEDIAN(ABS(h.hval - m.med)) * 1.4826 AS mad_sigma
-        FROM   med m
-        JOIN   hist h
-          ON   h.dbid = m.dbid AND h.con_dbid = m.con_dbid AND h.kind = m.kind
-         AND   h.series = m.series AND h.baseline_mode = m.baseline_mode AND h.ts = m.ts
-        GROUP  BY m.dbid, m.con_dbid, m.kind, m.series, m.baseline_mode, m.ts, m.med, m.n_hist
+        SELECT pid, MAX(med) AS med, COUNT(hval) AS n_hist,
+               MEDIAN(ABS(hval - med)) * 1.4826 AS mad_sigma
+        FROM   med
+        GROUP  BY pid
      ),
      avgw AS (
         SELECT o.dbid, o.con_dbid, o.kind, o.series, o.ts,
@@ -255,8 +267,7 @@ WITH obs AS (
         FROM   cur c
         CROSS  JOIN cap_cfg cfg
         LEFT   JOIN madc a
-          ON   a.dbid = c.dbid AND a.con_dbid = c.con_dbid AND a.kind = c.kind
-         AND   a.series = c.series AND a.baseline_mode = c.baseline_mode AND a.ts = c.ts
+          ON   a.pid = c.pid
         LEFT   JOIN avgw w
           ON   c.grain = 'DAY'
          AND   w.dbid = c.dbid AND w.con_dbid = c.con_dbid AND w.kind = c.kind
@@ -283,7 +294,8 @@ SELECT s.dbid, s.con_dbid, s.kind, s.series, s.baseline_mode, s.mode_bit, s.grai
        END                                                                AS anomaly_flag,
        s.anomaly_kind, s.alert_kind, s.alert_modes,
        CASE WHEN BITAND(s.alert_modes, s.mode_bit) > 0 THEN 'Y' ELSE 'N' END AS alerting_mode,
-       CASE WHEN s.mode_bit = s.headline_bit THEN 1 ELSE 0 END             AS is_headline
+       CASE WHEN s.mode_bit = s.headline_bit THEN 1 ELSE 0 END             AS is_headline,
+       s.kind_last_day
 FROM   scored s;
 
 -- --------------------------------------------------------------------

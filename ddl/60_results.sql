@@ -8,7 +8,8 @@
 -- tested definition of every number: this layer only snapshots them.
 --
 --   CAP_RUN          one row per CAP_RESULTS.refresh call (RUNNING, then OK or
---                    FAILED with error_text)
+--                    FAILED with error_text), with CAPR_COVERAGE as it was
+--                    at the run (cov_n_dbid, cov_n_current, cov_summary)
 --   CAP_FIT_HIST     CAPR_FIT as it was at each run, keyed (run_id, kind,
 --                    dbid, con_dbid, series)
 --   CAP_ALERT_STATE  one row per CAPR_ALERTS state_key: OPEN / RESOLVED,
@@ -24,7 +25,8 @@
 --   CAPR_ALERT_EVENTS      events newest first, with the run's as_of_day
 --   CAPR_RUNS              runs + is_last + the stale_run flag
 --   CAPR_COVERAGE          per dbid: snapshot age, history, series by
---                          quality, the retired flag (live, no table)
+--                          quality, the retired flag (live; every refresh
+--                          run keeps its roll-up on CAP_RUN)
 --   CAPR_FIT_HISTORY       CAP_FIT_HIST of the OK runs
 --   CAPR_WEEKLY_DIGEST     latest run vs the latest run digest_days older
 --   CAPR_FORECAST_ACCURACY issued forecasts vs today's actual values
@@ -71,6 +73,9 @@ BEGIN
     add_col('cap_run', 'n_event    NUMBER');
     add_col('cap_run', 'error_text VARCHAR2(4000)');
     add_col('cap_run', 'run_by     VARCHAR2(128)');
+    add_col('cap_run', 'cov_n_dbid    NUMBER');
+    add_col('cap_run', 'cov_n_current NUMBER');
+    add_col('cap_run', 'cov_summary   VARCHAR2(4000)');
 
     -- ---- CAP_FIT_HIST: run_id, as_of_day + every CAPR_FIT column ----
     create_tab('CREATE TABLE cap_fit_hist (
@@ -167,6 +172,9 @@ COMMENT ON TABLE cap_alert_state IS 'Results layer: one row per CAPR_ALERTS stat
 COMMENT ON TABLE cap_alert_event IS 'Results layer: alert state changes (NEW, ESCALATED, DEESCALATED, RESOLVED, REOPENED) per refresh run.';
 COMMENT ON COLUMN cap_run.as_of_day         IS 'The day the run is as of. Before today = a backdated run: fits only, no alert state.';
 COMMENT ON COLUMN cap_run.backdated         IS 'Y when as_of_day is before the day the run executed.';
+COMMENT ON COLUMN cap_run.cov_n_dbid        IS 'CAPR_COVERAGE rows (dbids) at the run.';
+COMMENT ON COLUMN cap_run.cov_n_current     IS 'CAPR_COVERAGE rows with retired = N at the run.';
+COMMENT ON COLUMN cap_run.cov_summary       IS 'CAPR_COVERAGE summaries at the run, by dbid, joined with '' | ''. The SNAPSHOT reports print it.';
 COMMENT ON COLUMN cap_alert_state.missed_runs IS 'Consecutive live runs the key was missing from CAPR_ALERTS; resolve_grace_runs of them resolve it.';
 COMMENT ON COLUMN cap_alert_state.ack_until IS 'Acknowledged until this time (CAP_RESULTS.ack). 9999-12-31 = until it resolves. CAPR_ALERTS_LATEST hides it until then.';
 
@@ -267,6 +275,9 @@ ORDER  BY e.event_id DESC;
 --                      OK live run exists: a stalled job, visible
 --   summary            one line, e.g. 'refresh run 20261017013000123 at
 --                      2026-10-17 01:30 (13 alerts, 36 fits)'
+--   cov_n_dbid, cov_n_current, cov_summary
+--                      CAPR_COVERAGE at the run (CAP_RUN columns; NULL on a
+--                      run that is not OK or predates them)
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_runs AS
 WITH lr AS (
@@ -309,7 +320,10 @@ SELECT r.run_id,
                  WHEN r.status = 'RUNNING'
                  THEN ' still RUNNING'
                  ELSE ' FAILED: ' || SUBSTR(REGEXP_SUBSTR(r.error_text, '[^' || CHR(10) || ']+'), 1, 200)
-            END                                                           AS summary
+            END                                                           AS summary,
+       r.cov_n_dbid,
+       r.cov_n_current,
+       r.cov_summary
 FROM   cap_run r
 CROSS  JOIN lr
 LEFT   JOIN lok ON 1 = 1
@@ -569,8 +583,8 @@ WHERE  a.last_day > h.last_day
 CREATE OR REPLACE PACKAGE cap_results AUTHID DEFINER AS
     -- Snapshot the live views. Inserts a CAP_RUN row (RUNNING, committed at
     -- once so a hung run is visible), copies CAPR_FIT into CAP_FIT_HIST,
-    -- merges CAPR_ALERTS into CAP_ALERT_STATE with events, marks the run OK
-    -- and COMMITs. On any error the run's work is rolled back, the run is
+    -- merges CAPR_ALERTS into CAP_ALERT_STATE with events, keeps the
+    -- CAPR_COVERAGE roll-up on the run row, marks the run OK and COMMITs. On any error the run's work is rolled back, the run is
     -- marked FAILED with the error stack, and the error is re-raised (so a
     -- scheduler run ends FAILED too). It commits: call it with no pending
     -- work of your own.
@@ -780,6 +794,9 @@ CREATE OR REPLACE PACKAGE BODY cap_results AS
         l_alert PLS_INTEGER;
         l_anom  PLS_INTEGER;
         l_event PLS_INTEGER;
+        l_cov_n NUMBER;
+        l_cov_c NUMBER;
+        l_cov   VARCHAR2(4000);
         l_err   VARCHAR2(4000);
     BEGIN
         l_back := CASE WHEN l_asof < TRUNC(l_now) THEN 'Y' ELSE 'N' END;
@@ -816,9 +833,16 @@ CREATE OR REPLACE PACKAGE BODY cap_results AS
                 merge_alerts(l_run, l_now, l_alert, l_anom, l_event);
             END IF;
 
+            -- The same aggregation the HTML report's coverage line makes.
+            SELECT COUNT(*), COUNT(CASE WHEN retired = 'N' THEN 1 END),
+                   LISTAGG(summary, ' | ' ON OVERFLOW TRUNCATE) WITHIN GROUP (ORDER BY dbid)
+            INTO   l_cov_n, l_cov_c, l_cov
+            FROM   capr_coverage;
+
             UPDATE cap_run
                SET ended_at = SYSTIMESTAMP, status = 'OK', n_fit = l_fit,
-                   n_alert = l_alert, n_anom = l_anom, n_event = l_event
+                   n_alert = l_alert, n_anom = l_anom, n_event = l_event,
+                   cov_n_dbid = l_cov_n, cov_n_current = l_cov_c, cov_summary = l_cov
              WHERE run_id = l_run;
             COMMIT;
         EXCEPTION

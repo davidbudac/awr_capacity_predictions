@@ -1,0 +1,2 @@
+-- timing_off.sql -- stands in for timing_start.sql / timing_stop.sql when
+-- the run does not DEFINE timing = Y: does nothing.

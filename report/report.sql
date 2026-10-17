@@ -22,9 +22,11 @@
 --   [source]           LIVE (default): evaluate the CAPR views now.
 --                      SNAPSHOT: the alert list reads CAPR_ALERTS_LATEST, the
 --                      section 1 and 7 tables read CAPR_FIT_HISTORY of the
---                      newest OK refresh run, and the coverage line is that
---                      run's summary (fast: no live CAPR_ALERTS evaluation).
+--                      newest OK refresh run, and the coverage line is the
+--                      CAPR_COVERAGE roll-up that run kept on CAP_RUN (fast:
+--                      no live CAPR_ALERTS or CAPR_COVERAGE evaluation).
 --                      The other sections stay live.
+--   DEFINE timing = Y  before the run: wall time per section in the spool.
 --
 -- Requires the suite installed (any seam mode). Tier 2 rows appear only if
 -- cap_forecast_ml.train_all has been run.
@@ -67,6 +69,20 @@ COLUMN 6 NEW_VALUE 6 NOPRINT
 SELECT NULL AS "1", NULL AS "2", NULL AS "3",
        NULL AS "4", NULL AS "5", NULL AS "6" FROM dual WHERE 1 = 0;
 
+-- DEFINE timing = Y before the run wraps the header and every section in a
+-- SQL*Plus TIMING START / STOP pair: wall time per section, in the spool.
+-- Otherwise both includes are report/sections/timing_off.sql (a no-op).
+-- Same zero-row trick for an undefined name.
+COLUMN cap_tm NEW_VALUE timing NOPRINT
+SELECT NULL AS cap_tm FROM dual WHERE 1 = 0;
+COLUMN cap_tm_start NEW_VALUE cap_tm_start NOPRINT
+COLUMN cap_tm_stop  NEW_VALUE cap_tm_stop  NOPRINT
+SELECT CASE WHEN UPPER(TRIM('&timing')) = 'Y' THEN 'report/sections/timing_start.sql'
+            ELSE 'report/sections/timing_off.sql' END AS cap_tm_start,
+       CASE WHEN UPPER(TRIM('&timing')) = 'Y' THEN 'report/sections/timing_stop.sql'
+            ELSE 'report/sections/timing_off.sql' END AS cap_tm_stop
+FROM   dual;
+
 -- Effective knobs = positional argument, else the defaults.sql value. An
 -- omitted argument is the empty string, and '' IS NULL in Oracle, so NVL
 -- picks the default; '-' does the same, so a caller can skip an argument to
@@ -92,6 +108,8 @@ SELECT NVL(REGEXP_SUBSTR(TRIM('&4'), '^[0-9]+$'), 'NULL')                  AS ef
        CASE WHEN UPPER(TRIM('&6')) = 'SNAPSHOT' THEN 'SNAPSHOT' ELSE 'LIVE' END AS eff_src
 FROM   dual;
 SET TERMOUT ON
+DEFINE cap_tm_lbl = header
+@@&cap_tm_start
 
 -- --------------------------------------------------------------------
 -- Resolve identity, config knobs, ESM availability, report path (once).
@@ -144,13 +162,13 @@ SELECT TO_CHAR(c.dtf_warn,                                                    'F
        TO_CHAR(c.nearfull_crit_pct,                                           'FM9999990') AS nf_crit,
        -- Tier 2 health: FORECAST models only (backtest twins never reach a
        -- forecast). CAPF_ESM_HEALTH_SUMMARY has one row per container.
-       TO_CHAR((SELECT NVL(SUM(n_ok), 0)     FROM capf_esm_health_summary),    'FM9999990') AS esm_ok,
-       TO_CHAR((SELECT NVL(SUM(n_failed), 0) FROM capf_esm_health_summary),    'FM9999990') AS esm_failed,
-       TO_CHAR((SELECT NVL(SUM(n_stale), 0)  FROM capf_esm_health_summary),    'FM9999990') AS esm_stale,
+       TO_CHAR(h.n_ok,                                                        'FM9999990') AS esm_ok,
+       TO_CHAR(h.n_failed,                                                    'FM9999990') AS esm_failed,
+       TO_CHAR(h.n_stale,                                                     'FM9999990') AS esm_stale,
        -- report_min_gb may be fractional, so keep the decimals and strip the
        -- trailing point FM leaves behind on a whole number (1. -> 1).
        RTRIM(TO_CHAR(c.report_min_gb, 'FM9999990.999'), '.')                                    AS min_gb,
-       TO_CHAR((SELECT COUNT(*)  FROM capr_tbspc_forecast
+       TO_CHAR((SELECT COUNT(*)  FROM capr_tbspc_rank
                 WHERE  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
                   AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon)),               'FM9999990') AS ts_total,
        -- M7.4: how many of them sections 2 / 6a will actually print, i.e. the
@@ -160,13 +178,16 @@ SELECT TO_CHAR(c.dtf_warn,                                                    'F
        TO_CHAR((SELECT COUNT(*)
                 FROM  (SELECT is_reportable,
                               ROW_NUMBER() OVER (ORDER BY rank_report) AS s_rank
-                       FROM   capr_tbspc_forecast
+                       FROM   capr_tbspc_rank
                        WHERE  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
                          AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon))
                 WHERE is_reportable = 'Y' AND s_rank <= &top_n),                    'FM9999990') AS ts_shown,
        TO_CHAR(c.mad_window_days,                                             'FM9999990') AS mad_w,
        TO_CHAR(c.dow_weeks,                                                   'FM9999990') AS dow_w
-FROM   cap_cfg c;
+FROM   cap_cfg c
+CROSS  JOIN (SELECT NVL(SUM(n_ok), 0) AS n_ok, NVL(SUM(n_failed), 0) AS n_failed,
+                    NVL(SUM(n_stale), 0) AS n_stale
+             FROM   capf_esm_health_summary) h;
 
 -- Defaults first, so a failing lookup below (suite not installed) cannot
 -- leave a variable undefined and make SQL*Plus prompt for it.
@@ -218,6 +239,7 @@ FROM   dual;
 -- reports/ is gitignored, so a fresh clone does not have it.
 HOST mkdir -p reports
 SPOOL &cap_path
+@@&cap_tm_stop
 
 PROMPT ================================================================================
 PROMPT  AWR CAPACITY PREDICTIONS -- capacity + anomaly report
@@ -236,14 +258,38 @@ PROMPT        QUALITY. INSUFFICIENT_HISTORY means fewer than the configured mini
 PROMPT        training days; raise DBMS_WORKLOAD_REPOSITORY retention for real trends.
 PROMPT ================================================================================
 
+DEFINE cap_tm_lbl = s0
+@@&cap_tm_start
 @@report/sections/00_at_a_glance.sql
+@@&cap_tm_stop
+DEFINE cap_tm_lbl = s1
+@@&cap_tm_start
 @@&sec1_file
+@@&cap_tm_stop
+DEFINE cap_tm_lbl = s2
+@@&cap_tm_start
 @@report/sections/02_tbspc_forecast.sql
+@@&cap_tm_stop
+DEFINE cap_tm_lbl = s3
+@@&cap_tm_start
 @@report/sections/03_tbspc_anomalies.sql
+@@&cap_tm_stop
+DEFINE cap_tm_lbl = s4
+@@&cap_tm_start
 @@report/sections/04_cpu_trend.sql
+@@&cap_tm_stop
+DEFINE cap_tm_lbl = s5
+@@&cap_tm_start
 @@report/sections/05_cpu_anomalies.sql
+@@&cap_tm_stop
+DEFINE cap_tm_lbl = s6
+@@&cap_tm_start
 @@&esm_file
+@@&cap_tm_stop
+DEFINE cap_tm_lbl = s7
+@@&cap_tm_start
 @@&sec7_file
+@@&cap_tm_stop
 
 PROMPT
 PROMPT ================================================================================

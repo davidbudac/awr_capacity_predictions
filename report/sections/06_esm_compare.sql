@@ -50,10 +50,11 @@ SELECT db_pdb,
        esm_at,
        esm_age_days AS esm_age
 FROM   capr_esm_compare c
--- the scoped rank of section 2, so 6a lists the same tablespaces
+-- the scoped rank of section 2 (CAPR_TBSPC_RANK, the rank_report of
+-- CAPR_TBSPC_FORECAST), so 6a lists the same tablespaces
 JOIN  (SELECT dbid, con_dbid, tablespace_name,
               ROW_NUMBER() OVER (ORDER BY rank_report) AS s_rank
-       FROM   capr_tbspc_forecast
+       FROM   capr_tbspc_rank
        WHERE  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
          AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon)) r
   ON   r.dbid = c.dbid AND r.con_dbid = c.con_dbid AND r.tablespace_name = c.series_key
