@@ -18,7 +18,13 @@ What it answers:
   `DBA_HIST_SYS_TIME_MODEL`), with days-to-saturation (+ range).
 - **Anomalies** — deterministic median + MAD flags that are reproducible by
   hand: every flag exposes value, baseline median, MAD-sigma, the k·sigma
-  threshold, and a robust z-score.
+  threshold, the baseline size and a robust z-score. Each observation is scored
+  against three baselines side by side: TRAILING (the last 28 days: "unusual
+  lately?"), SAME_DOW (the same weekday over the last 8 weeks: "unusual for a
+  Tuesday?") and, for CPU, HOUR_OF_WEEK (the same weekday and hour: "unusual
+  for Tuesday 06:00?"). Scored series: tablespace growth rates, host busy%,
+  DB CPU per container, and the fixed-ceiling series (`PROCESSES`,
+  `SESSIONS`, `REDO_GB_DAY` levels and `DB_SIZE_GB` growth).
 - **Fixed-ceiling series** — peak `processes` / `sessions` against the init
   parameters, redo GiB/day (FRA / archive sizing), and total DB size against
   the summed tablespace ceilings, each with the same days-to-limit machinery.
@@ -44,8 +50,10 @@ CAPD_*  daily       one clean row per (series, day): blocks->bytes, counter
 CAPF_*  forecast    Tier 1 REGR fits + 95% bands; CAPF_SERIES_FORECAST (M11),
   |                 CAPF_BACKTEST (holdout scores), CAPF_ESM_FORECAST /
   |                 CAPF_COMPARE for Tier 2
-CAPA_*  anomaly     rolling median + MAD (tablespace: trailing window;
-  |                 CPU: same-weekday seasonal baseline) + CAPA_CPU_SHIFT,
+CAPA_*  anomaly     one median + MAD engine (CAPA_ANOM): every observation x
+  |                 every baseline mode of its grain (TRAILING + SAME_DOW per
+  |                 day; HOUR_OF_WEEK per CPU hour, from CAPD_CPU_HOURLY);
+  |                 CAPA_ANOM_DAY = one row per observation; CAPA_CPU_SHIFT,
   |                 window-vs-window sustained level shifts
 CAPR_*  integration CAPR_CONTAINER (display labels) + CAPR_ALERTS (one row per
   |                 current issue -- pollable by OEM / Zabbix / Nagios)
@@ -136,14 +144,16 @@ Each prints to screen and spools `reports/cap_drill_<name>_<ts>.txt`:
    days-to-full / days-to-saturation with its WORST/BEST range;
 2. the **daily series** over the `train_days` window — actual, fitted
    (`icept + slope * day_n`), residual, day-over-day delta, AWR gap, and that
-   day's median / MAD-sigma / threshold / robust-z from the `CAPA_*` view;
+   day's median / MAD-sigma / threshold / robust-z under TRAILING and under
+   SAME_DOW;
 3. a **residual footer** — `SUM(residual)` (0 by construction),
    `resid_se = sqrt(SSE/(n-2))` and `slope_ci` recomputed from scratch next to
    the value the view publishes, so the M9.1 prediction bands can be re-derived
    with a calculator;
-4. **anomaly arithmetic** — one spelled-out line per flagged day
-   (`value - median = dev`, `threshold = GREATEST(k*sigma, floor)`) with the
-   `CAP_CONFIG` knob values shown.
+4. **anomaly arithmetic** — one spelled-out line per flagged (day, mode)
+   (`value - median = dev`, `threshold = GREATEST(k*sigma, floor)`) with
+   the `CAP_CONFIG` knob values shown. `drill_cpu.sql` scores `BUSY_PCT` and
+   `DB_CPU_PCT` and adds a block of flagged HOUR_OF_WEEK hours.
 
 Both arguments of each script are optional and never prompt; `drill_tbspc.sql`
 with no tablespace prints usage and stops. Read-only, like everything else.
@@ -196,18 +206,17 @@ jobs* below) — it creates `CAP_ML_RETRAIN` disabled.
 
 ## Configuration
 
-All knobs live in `CAP_CONFIG` (read by the views via a one-row `cfg` CTE), so
-tuning never means editing SQL:
+All knobs live in `CAP_CONFIG` (the views read them only through the one-row
+view `CAP_CFG`), so tuning never means editing SQL:
 
 ```sql
 UPDATE cap_config SET cfg_value = 0.70 WHERE cfg_name = 'r2_gate';
 ```
 
 Key knobs: `train_days` (90), `recent_days` (28), `min_train_days` (14),
-`r2_gate` (0.60), `mad_k` (3), `mad_window_days` (28), `cpu_sat_pct` (80),
-`abs_floor_bytes` (100 MiB), `dow_weeks` (8), `cpu_gap_hours` (12: a snapshot
-interval longer than this is an AWR gap -- its day is flagged, kept out of the
-CPU baselines, and left out of `busy_p95`/`busy_max`), `shift_days` (7),
+`r2_gate` (0.60), `cpu_sat_pct` (80), `cpu_gap_hours` (12: a snapshot
+interval longer than this is an AWR gap -- its day is flagged, kept out of
+every anomaly baseline, and left out of `busy_p95`/`busy_max`), `shift_days` (7),
 `shift_baseline_days` (28) and `shift_min_pct` (15) for level-shift detection,
 `dtf_warn`/`dtf_crit` (90/30),
 `nearfull_warn_pct`/`nearfull_crit_pct` (90/97), `anomaly_report_days` (14,
@@ -232,6 +241,28 @@ trend rather than the daily average) and `series_sat_pct` (90: the percent of a
 fixed-ceiling series' limit — `processes`, `sessions`, total DB size — treated
 as saturated, since hitting `processes` exactly is an outage).
 Run `SELECT * FROM cap_config ORDER BY cfg_name;` for the full annotated list.
+
+The anomaly knobs:
+
+- `mad_k` (3): a point flags when `|value - median| > mad_k x sigma`.
+- `mad_window_days` (28): the TRAILING window. `dow_weeks` (8): how many
+  weeks the SAME_DOW and HOUR_OF_WEEK baselines look back.
+- `trailing_min_hist` (7) and `weekly_min_hist` (3): the fewest baseline
+  observations before TRAILING, or a weekly mode, may flag. They replace
+  `tbspc_min_hist` and `cpu_min_dow_hist`; a re-install carries your value
+  over to the new name.
+- Threshold floors, one per unit, so a flat baseline (MAD = 0) still flags a
+  real jump and sub-floor wiggles never do: `abs_floor_bytes` (100 MiB/day,
+  tablespaces), `cpu_min_mad_pct` (3: a sigma floor in points, so a CPU day
+  needs 3 x 3 = 9 points), `cpu_min_mad_pct_hour` (5, so 15 points for a CPU
+  hour), `series_floor_count` (10 sessions or processes) and
+  `series_floor_gib` (0.5 GiB/day, redo and DB size growth).
+- `hour_gap_ratio` (1.5): at hour grain an interval of 0 h or less, or longer
+  than `LEAST(cpu_gap_hours, 1.5 x the instance's median interval)`, is a gap.
+- `alert_modes_tbspc` (1), `alert_modes_cpu` (2) and `alert_modes_series` (1):
+  bitmasks of the modes that raise a `CAPR_ALERTS` row. Add the bits:
+  1 = TRAILING, 2 = SAME_DOW, 4 = HOUR_OF_WEEK (CPU only), 0 = no anomaly
+  alerts. `alert_modes_cpu = 6` pages on both weekly modes.
 
 ### Limit overrides / exclusions
 
@@ -267,11 +298,16 @@ survive `@install.sql` and are removed only by `@uninstall.sql`.
 
 `CAPR_ALERTS` is the machine-readable surface: one row per current issue —
 `severity` (CRIT/WARN/INFO), `kind` (`TBSPC_FULL`, `TBSPC_NEARFULL`,
-`TBSPC_ANOM`, `CPU_SAT`, `DBCPU_SAT`, `CPU_ANOM`, `CPU_SHIFT`,
-`SERIES_LIMIT`, `SERIES_NEARLIMIT`), the `(dbid, con_dbid)` keys plus a
-resolved `db_pdb` label, the metric `value` vs its `threshold`, and a
-ready-to-page `message`. Poll it from an OEM metric extension, Zabbix, Nagios,
-or a scheduler job:
+`TBSPC_ANOM`, `CPU_SAT`, `DBCPU_SAT`, `CPU_ANOM`, `DBCPU_ANOM`, `CPU_SHIFT`,
+`SERIES_LIMIT`, `SERIES_NEARLIMIT`, `SERIES_ANOM`), the `(dbid, con_dbid)`
+keys plus a resolved `db_pdb` label, the metric `value` vs its `threshold`,
+a ready-to-page `message`, the `baseline_mode` that raised an anomaly kind
+(NULL for the others) and a unique `alert_key`. Each anomaly kind raises one
+row per (series, day, mode) for the modes its `alert_modes_*` bitmask
+enables; by default tablespaces and the M11 series alert on TRAILING and CPU
+on SAME_DOW, and every other mode stays visible in `CAPR_ANOMALIES` with
+`alerting = 'N'`. Poll it from an OEM metric extension, Zabbix, Nagios, or a
+scheduler job:
 
 ```sql
 SELECT severity, kind, db_pdb, message FROM capr_alerts ORDER BY sev_rank;
@@ -305,7 +341,7 @@ page.
 ## Optional: Grafana straight from Oracle (ORDS)
 
 The second visual path needs no Elastic stack and copies nothing: ORDS
-(Oracle REST Data Services) publishes six read-only views as JSON and
+(Oracle REST Data Services) publishes seven read-only views as JSON and
 Grafana's Infinity data source reads them live. The same three boards as the
 Kibana path (tablespaces, CPU and workload series, fleet anomalies), with
 anomalies as red markers, points and shaded spans.
@@ -386,8 +422,8 @@ Deterministic fixture harness — no randomness, all closed-form:
 @test/fixture_install.sql
 DEFINE seam_mode = 'fixture'
 @install.sql
-@test/run_test.sql        -- 199 assertions; exits non-zero on any failure
-@test/run_test_ml.sql     -- 14 Tier 2 ESM + backtest assertions (needs CREATE MINING MODEL)
+@test/run_test.sql        -- 659 assertions; exits non-zero on any failure
+@test/run_test_ml.sql     -- 86 Tier 2 ESM + backtest assertions (needs CREATE MINING MODEL)
 ```
 
 No `V$` access is needed (identity comes from `SYS_CONTEXT`), and fixture mode
@@ -415,13 +451,18 @@ capped at 2 GiB by `CAP_TBSPC_OVERRIDE` → 4990 days-to-full becomes 74,
 at day 90 → M9.3 restarts the window at the cliff, `train_n = 31`, slope back
 to exactly 10 MiB/day).
 
-Two containers: the root (`FIXCDB`/`CDB$ROOT`) carries OSSTAT + time-model with
+Three containers: the root (`FIXCDB`/`CDB$ROOT`) carries OSSTAT + time-model with
 a mid-series restart (dropped by the startup-time guard), an injected
-+30-point Tuesday (flags in the same-weekday view) and a pure AWR gap on a
++30-point Tuesday (HIGH under every mode), an inverted Wednesday (40% / 40%:
+a normal daily average, so only HOUR_OF_WEEK flags it, 06:00 HIGH and 18:00
+LOW) and a pure AWR gap on a
 Sunday (the next interval spans 36 h → the following day reads 30% against a
 40% baseline and must stay unflagged purely because `gap_flag = 'Y'`);
 `FIXCDB`/`FIXPDB1` carries **time-model only** — a 7-day DB CPU sawtooth that
-steps +18 points for the last week, which only `CAPA_CPU_SHIFT` can see.
+steps +18 points for the last week: `CAPA_CPU_SHIFT` reports the step, and
+SAME_DOW flags each of the 7 step days (`DBCPU_ANOM`); `FIXCDB`/`FIXPDB2`
+(time-model only) carries a weekday / weekend DB CPU pattern for the CPU
+deseasoning and slope-significance tests.
 
 Fixed-ceiling series (M11), from the `CAP_FIXTURE_RESOURCE_LIMIT` /
 `CAP_FIXTURE_SYSSTAT` tables: `SESSIONS` 200→440 of 500 (→ `days_to_limit = 5`,
@@ -463,16 +504,20 @@ suite depends on it.
   ≤ 30 at *any* series length — verified: 30 valid, 31 invalid at 121/300/600
   rows). So Tier 2 forecasts only ever reach **+30 days**; `+90/180/365` are
   REGR-only in `CAPF_COMPARE`. The package caps the step automatically.
-- **Anomalies key off the per-day growth RATE, not the raw delta.** Across an
+- **Growth anomalies key off the per-day RATE, not the raw delta.** Across an
   AWR gap (missing snapshots) `CAPD_TBSPC_DELTA` exposes `day_gap` and divides
-  the delta by it, so a multi-day gap is not mistaken for a one-day spike. The
-  CPU series handles the same problem differently (M10.5): the day is kept, but
+  the delta by it, so a multi-day gap is not mistaken for a one-day spike;
+  `DB_SIZE_GB` is scored on the same kind of rate. The CPU series handles the
+  same problem differently (M10.5): the day is kept, but
   `max_interval_hours` / `gap_flag` / `day_gap` mark it, `busy_p95` /
   `busy_max` / `busy_peak_pct` (and the `db_cpu_*` twins) ignore intervals
-  longer than `cpu_gap_hours`, and `CAPA_CPU_ANOM` / `CAPA_CPU_SHIFT` neither
-  score a gap day nor let it into a baseline. The daily *average* over a gap is
-  still a valid multi-day average attributed to the ending day — `gap_flag` is
-  the column that says so.
+  longer than `cpu_gap_hours`, and neither `CAPA_ANOM` (in any mode) nor
+  `CAPA_CPU_SHIFT` scores a gap day or lets it into a baseline. The hour grain
+  applies a tighter rule (`hour_gap_ratio`), and `REDO_GB_DAY` reuses
+  `cpu_gap_hours`. A `DB_SIZE_GB` day whose tablespace set changed (one was
+  added or dropped) is a gap day too: its move measures membership, not
+  growth. The daily *average* over a gap is still a valid multi-day average
+  attributed to the ending day; `gap_flag` is the column that says so.
 - **Re-install preserves your tuning, overrides and models.** `CAP_CONFIG`
   knobs, `CAP_TBSPC_OVERRIDE` rows and the `CAP_ML_MODEL` registry (and its OML
   models) survive `@install.sql` (`00_drop` no longer drops the three persisted

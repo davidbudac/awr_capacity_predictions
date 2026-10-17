@@ -116,6 +116,7 @@
             <tr><td><b>Tier 1 (REGR)</b></td><td class="def">The always-on forecast: plain-SQL <b>linear regression</b> — a straight trend line you can reconstruct by hand. Transparent, nothing trained.</td></tr>
             <tr><td><b>Tier 2 (OML / ESM)</b></td><td class="def">An <b>optional</b> second opinion using Oracle's built-in machine learning (Oracle Machine Learning). ESM = exponential smoothing, better at weekly seasonality. Off unless you turn it on.</td></tr>
             <tr><td><b>MAD</b></td><td class="def">Median Absolute Deviation — a <b>robust "how far from normal is this?"</b> measure. Like standard deviation, but one huge spike doesn't wreck the baseline. Used to flag anomalies.</td></tr>
+            <tr><td><b>Baseline mode</b> <span class="inline">baseline_mode</span></td><td class="def">Which past values count as "normal" for a point. <span class="k">TRAILING</span> = the last 28 days. <span class="k">SAME_DOW</span> = the same weekday in each of the last 8 weeks. <span class="k">HOUR_OF_WEEK</span> = the same weekday and clock hour (CPU only). Every point is scored against each mode of its grain, and you choose which modes page you. Not the same thing as <span class="inline">seam_mode</span>.</td></tr>
             <tr><td><b>Prediction band</b></td><td class="def">The <b>uncertainty around a projection</b>. Instead of "412 GiB in 180 days" you get a range the value should land inside 95% of the time — and <code>days_to_full</code> becomes "120 days, worst case 80".</td></tr>
             <tr><td><b>Theil–Sen</b></td><td class="def">A <b>robust alternative to least squares</b>: take the slope between every pair of days and use the median of them. One bulk-load day can move a least-squares line a long way; it can't move a median.</td></tr>
             <tr><td><b>Change point</b> / <b>level shift</b></td><td class="def">A <b>step</b> in the series rather than a trend: a purge that drops a tablespace by 600 GiB, or a workload move that leaves CPU permanently 18 points higher. Fitting one straight line across a step gives a fiction, so steps are detected and handled separately.</td></tr>
@@ -209,11 +210,13 @@
             <h5>Daily series — one clean row per day</h5>
             <p>Collapses per-instance, cumulative-counter snapshots into daily rows: blocks→bytes,
               counter deltas with restart guards, gap-aware growth rates, peak-hour percentiles, and
-              the generic fixed-ceiling series.</p>
+              the generic fixed-ceiling series. CPU also gets one row per valid snapshot interval
+              and one per clock hour, for the hour-of-week baseline.</p>
             <div class="layer__objs">
               <span class="obj">CAPD_TBSPC_DAILY</span><span class="obj">CAPD_TBSPC_DELTA</span>
+              <span class="obj">CAPD_CPU_INTERVAL</span><span class="obj">CAPD_DBTIME_INTERVAL</span>
               <span class="obj">CAPD_CPU_DAILY</span><span class="obj">CAPD_DBTIME_DAILY</span>
-              <span class="obj">CAPD_SERIES_DAILY</span>
+              <span class="obj">CAPD_CPU_HOURLY</span><span class="obj">CAPD_SERIES_DAILY</span>
             </div>
           </div>
         </div>
@@ -236,11 +239,11 @@
             <span class="layer__tag">CAPA_</span>
             <div class="layer__body">
               <h5>Anomalies &amp; shifts</h5>
-              <p>Rolling median + MAD. Tablespace: trailing window. CPU: same-weekday seasonal
-                baseline, plus a window-vs-window level-shift test.</p>
+              <p>One median + MAD engine, three baseline modes side by side: trailing window, same
+                weekday, and (CPU) same hour of the week. Plus a window-vs-window level-shift test.</p>
               <div class="layer__objs">
-                <span class="obj">CAPA_TBSPC_ANOM</span><span class="obj">CAPA_CPU_ANOM</span>
-                <span class="obj">CAPA_CPU_SHIFT</span>
+                <span class="obj">CAPA_OBS</span><span class="obj">CAPA_ANOM</span>
+                <span class="obj">CAPA_ANOM_DAY</span><span class="obj">CAPA_CPU_SHIFT</span>
               </div>
             </div>
           </div>
@@ -328,7 +331,11 @@
         (<span class="inline">startup_time</span> changed) or showing a negative delta is dropped.
         Deltas expose <span class="inline">day_gap</span> so a multi-day AWR gap becomes a
         <em>rate</em>, not a false spike. <span class="inline">CAPD_SERIES_DAILY</span> generalises the
-        pattern: any series with a ceiling lands in one view keyed by a <code>series</code> name.</p>
+        pattern: any series with a ceiling lands in one view keyed by a <code>series</code> name.
+        <span class="inline">CAPD_CPU_INTERVAL</span> and <span class="inline">CAPD_DBTIME_INTERVAL</span>
+        hold one row per valid interval, so the daily views and
+        <span class="inline">CAPD_CPU_HOURLY</span> (host busy% and per-container DB CPU per clock hour,
+        each bucket labelled by the hour its intervals <b>end</b> in) count exactly the same intervals.</p>
 
       <h3><span class="k">CAPF_</span> &nbsp;— Tier 1 forecasts</h3>
       <p>Ordinary least squares over <span class="inline">day_n = day_dt − DATE '2020-01-01'</span>
@@ -352,16 +359,17 @@
 
       <h3><span class="k">CAPA_</span> &nbsp;— anomalies</h3>
       <p>Robust median + MAD, where
-        <span class="inline">MAD_σ = MEDIAN(|x − median|)·1.4826</span>. Each anomaly view is a
-        trailing-window self-join in two passes (median, then MAD about it), always
-        <em>excluding the current day</em> so a spike can't inflate its own baseline. Tablespace
-        anomalies work on the growth <em>rate</em> with a
-        <span class="inline">GREATEST(k·MAD, abs_floor_bytes)</span> threshold, so a jump from an
-        exactly-flat baseline still flags but sub-100&nbsp;MiB/day wiggles never do. CPU anomalies
-        baseline against the prior <em>same weekdays</em>, handling weekly seasonality deterministically.
-        Every flag carries value, median, MAD·k threshold, and robust z for hand-verification.
-        A third view, <span class="inline">CAPA_CPU_SHIFT</span>, answers a question a per-day flag
-        cannot — see <a href="#cpu">CPU: peak, share and shifts</a>.</p>
+        <span class="inline">MAD_σ = MEDIAN(|x − median|)·1.4826</span>.
+        <span class="inline">CAPA_OBS</span> lists every observation worth scoring: tablespace growth
+        <em>rates</em>, host busy%, DB CPU per container (per day and per hour), and the fixed-ceiling
+        series. <span class="inline">CAPA_ANOM</span> scores each one against every baseline mode of
+        its grain, in two passes (median, then MAD about it), always <em>excluding the point itself</em>
+        so a spike can't inflate its own baseline. <span class="inline">CAPA_ANOM_DAY</span> rolls the
+        day modes up to one row per observation. Every flag carries value, median, threshold, robust z
+        and the baseline size for hand-verification. How the modes differ, and how you pick which ones
+        page you, is in <a href="#anomalies">Anomalies: three baselines</a>. A separate view,
+        <span class="inline">CAPA_CPU_SHIFT</span>, answers a question a per-point flag cannot. See
+        <a href="#cpu">CPU: peak, share and shifts</a>.</p>
 
       <h3><span class="k">CAPR_</span> &nbsp;— integration</h3>
       <p>The layer the outside world reads: display labels, pollable alerts, and one view per report
@@ -516,8 +524,9 @@
       </div>
 
       <h3>Level shifts — the step a trend line can't see</h3>
-      <p>A container that has run 18 points hotter since a workload moved onto it is not an anomaly on
-        any single day, and the trend fit is too noisy to say so.
+      <p>A container that has run 18 points hotter since a workload moved onto it flags for its first
+        few days at most: then the step becomes its own baseline and the per-point modes go quiet. The
+        trend fit is too noisy to say so either.
         <span class="inline">CAPA_CPU_SHIFT</span> therefore compares <em>windows</em>: for each
         (container, metric) — <span class="inline">BUSY_PCT</span>,
         <span class="inline">BUSY_P95</span> and <span class="inline">DB_CPU_PCT</span> — it takes the
@@ -546,9 +555,10 @@
         <code>'Y'</code> when any interval of the day is longer than
         <span class="inline">cpu_gap_hours</span>. The day stays in the series (it is still data, and
         the forecast wants it), but the percentile and peak-window figures are computed only from
-        intervals within the limit, and both <span class="inline">CAPA_CPU_ANOM</span> and
+        intervals within the limit, and both <span class="inline">CAPA_ANOM</span> (in every mode) and
         <span class="inline">CAPA_CPU_SHIFT</span> refuse to score a gap day or let it into a
-        baseline.</p>
+        baseline. The hour grain applies its own rule, described in
+        <a href="#anomalies">Anomalies: three baselines</a>.</p>
       <div class="callout warn">
         <span class="ico">!</span>
         <p><strong>Why the default is a loose 12 hours.</strong> The flag <em>suppresses</em>
@@ -593,6 +603,80 @@
         Within one startup epoch the daily maximum is simply the end-of-day high-water mark — exactly
         the number a DBA compares against <code>processes</code>. But a restart <em>resets</em> it,
         which shows up as a step down and degrades R² rather than lying.</p>
+      </div>
+
+      <!-- ===================== ANOMALIES ===================== -->
+      <div class="section-head" id="anomalies">
+        <span class="eyebrow">Anomalies in depth</span>
+        <h2>Anomalies: three baselines</h2>
+        <p>"Unusual" depends on what you compare against. Each point is scored against every
+          baseline of its grain, side by side, and a bitmask decides which of them pages you.</p>
+      </div>
+      <p>A bulk load is unusual against the last four weeks of tablespace growth. A busy Monday is not
+        unusual for a Monday, even when it is twice the Sunday before it. A day whose average is normal
+        but whose hours are inverted (busy at night, idle at noon) is unusual only hour by hour. One
+        engine answers all three questions, because a <b>baseline mode</b> only chooses which past
+        values form the reference set. The median, MAD, threshold floor and flag rule are the same for
+        every mode and every series.</p>
+      <div class="tablewrap">
+        <table>
+          <caption>The three baseline modes</caption>
+          <thead><tr><th scope="col">Mode</th><th scope="col">Grain</th><th class="num" scope="col">Bit</th><th scope="col">Reference set for a point</th><th scope="col">Asks</th></tr></thead>
+          <tbody>
+            <tr><td><span class="k">TRAILING</span></td><td class="def">day</td><td class="num">1</td><td class="def">every day of the last <span class="inline">mad_window_days</span> (28); flags need <span class="inline">trailing_min_hist</span> (7) of them</td><td class="def">unusual compared with how it has been going lately?</td></tr>
+            <tr><td><span class="k">SAME_DOW</span></td><td class="def">day</td><td class="num">2</td><td class="def">the same weekday in each of the last <span class="inline">dow_weeks</span> (8); flags need <span class="inline">weekly_min_hist</span> (3)</td><td class="def">unusual for this weekday?</td></tr>
+            <tr><td><span class="k">HOUR_OF_WEEK</span></td><td class="def">hour (CPU)</td><td class="num">4</td><td class="def">the same weekday and clock hour in each of the last <span class="inline">dow_weeks</span>; flags need <span class="inline">weekly_min_hist</span></td><td class="def">unusual for Tuesday 06:00?</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <caption>What is scored, and under which modes</caption>
+          <thead><tr><th scope="col">Series</th><th scope="col">Scored value</th><th scope="col">Modes</th><th scope="col">Alert kind</th></tr></thead>
+          <tbody>
+            <tr><td><span class="k">Tablespaces</span></td><td class="def">growth rate (delta ÷ days since the last sample)</td><td class="def">TRAILING, SAME_DOW</td><td class="def"><code>TBSPC_ANOM</code></td></tr>
+            <tr><td><span class="k">BUSY_PCT</span></td><td class="def">host busy%, per day and per hour</td><td class="def">all three</td><td class="def"><code>CPU_ANOM</code></td></tr>
+            <tr><td><span class="k">DB_CPU_PCT</span></td><td class="def">DB CPU as a percent of the host's CPUs, per container, per day and per hour</td><td class="def">all three</td><td class="def"><code>DBCPU_ANOM</code></td></tr>
+            <tr><td><span class="k">PROCESSES</span> / <span class="k">SESSIONS</span> / <span class="k">REDO_GB_DAY</span></td><td class="def">the daily level</td><td class="def">TRAILING, SAME_DOW</td><td class="def"><code>SERIES_ANOM</code></td></tr>
+            <tr><td><span class="k">DB_SIZE_GB</span></td><td class="def">daily growth in GiB</td><td class="def">TRAILING, SAME_DOW</td><td class="def"><code>SERIES_ANOM</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>One flag rule</h3>
+      <p>A point flags <code>HIGH</code> (or <code>LOW</code>) when it sits more than
+        <span class="inline">mad_k · eff_sigma</span> above (or below) the baseline median, where
+        <span class="inline">eff_sigma = GREATEST(MAD_σ, floor / mad_k)</span>. The floor is per unit
+        and grain: <span class="inline">abs_floor_bytes</span> (100&nbsp;MiB/day) for tablespaces,
+        9 points for a CPU day (<span class="inline">mad_k · cpu_min_mad_pct</span>), 15 for a CPU hour
+        (<span class="inline">cpu_min_mad_pct_hour</span>, because hourly values are noisier),
+        <span class="inline">series_floor_count</span> and <span class="inline">series_floor_gib</span>
+        for the fixed-ceiling series. So a perfectly flat baseline still flags a real jump, sub-floor
+        wiggles never flag, and <span class="inline">|robust_z| &gt; mad_k</span> means flagged,
+        always. For tablespaces and host busy% this is exactly the pre-M15 rule.</p>
+      <h3>Gaps never vote</h3>
+      <p>A gap row is never scored and never used as a baseline, in any mode. At day grain that is
+        the <span class="inline">cpu_gap_hours</span> rule and every incomplete day (first day, today,
+        restart day). At hour grain an interval of zero hours or less (a DST change or clock step), or
+        one longer than <span class="inline">LEAST(cpu_gap_hours, hour_gap_ratio × the usual
+        interval)</span>, makes its hour a gap. <code>DB_SIZE_GB</code> also treats a day whose
+        tablespace set changed as a gap: when a tablespace appears or drops out, the total moves by its
+        whole size, which is membership, not growth.</p>
+      <h3>You choose what pages</h3>
+      <p>Every mode is always computed and shown in the report and in
+        <span class="inline">CAPR_ANOMALIES</span>. Three bitmask knobs decide which modes raise a
+        <span class="inline">CAPR_ALERTS</span> row: add 1 for TRAILING, 2 for SAME_DOW, 4 for
+        HOUR_OF_WEEK. The defaults keep the paging you had before:
+        <span class="inline">alert_modes_tbspc = 1</span> (tablespaces on TRAILING),
+        <span class="inline">alert_modes_cpu = 2</span> (CPU and DB CPU on SAME_DOW) and
+        <span class="inline">alert_modes_series = 1</span>. Set
+        <span class="inline">alert_modes_cpu = 6</span> to page on both weekly modes; an hour-of-week
+        day then raises one row carrying its worst hour and the number of hours flagged.</p>
+      <div class="callout">
+        <span class="ico">i</span>
+        <p><strong>Times are the database's wall clock.</strong> AWR records local time, the hour
+        buckets use it, and the same weekday one week back is <code>ts − 7</code> on the clock you
+        read in AWR, across a DST change too. Every export labels these times with a
+        <code>Z</code> and the dashboards run in UTC, so a chart shows exactly that clock.</p>
       </div>
 
       <!-- ===================== OVERRIDES ===================== -->
@@ -640,10 +724,14 @@
         <code>db_pdb</code> label from <span class="inline">CAPR_CONTAINER</span>, the metric value
         against its threshold, and a ready-to-page message. The kinds are
         <code>TBSPC_FULL</code>, <code>TBSPC_NEARFULL</code>, <code>TBSPC_ANOM</code>,
-        <code>CPU_SAT</code>, <code>DBCPU_SAT</code>, <code>CPU_ANOM</code>, <code>CPU_SHIFT</code>,
-        <code>SERIES_LIMIT</code> and <code>SERIES_NEARLIMIT</code>. Anomaly kinds window on the
-        <span class="inline">anomaly_report_days</span> knob (14) — a different window from the
-        report's own presentation knob.</p>
+        <code>CPU_SAT</code>, <code>DBCPU_SAT</code>, <code>CPU_ANOM</code>, <code>DBCPU_ANOM</code>,
+        <code>CPU_SHIFT</code>, <code>SERIES_LIMIT</code>, <code>SERIES_NEARLIMIT</code> and
+        <code>SERIES_ANOM</code>. Anomaly kinds window on the
+        <span class="inline">anomaly_report_days</span> knob (14), a different window from the
+        report's own presentation knob, and carry the <span class="inline">baseline_mode</span> that
+        raised them. Their rows come from <span class="inline">CAPR_ANOMALIES</span>, the one view that
+        decides an anomaly's severity, message and whether it pages, so the report, the pollers and the
+        dashboards always agree.</p>
       <div class="term in">
         <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
           <span class="term__title">SQL*Plus</span><span class="term__tag in">poll it</span></div>
@@ -654,8 +742,8 @@
         <span class="inline">CAPR_TBSPC_FORECAST</span>,
         <span class="inline">CAPR_TBSPC_ANOMALIES</span>, <span class="inline">CAPR_CPU_TREND</span>,
         <span class="inline">CAPR_CPU_ANOMALIES</span>, <span class="inline">CAPR_CPU_SHIFTS</span>,
-        <span class="inline">CAPR_ESM_COMPARE</span>, <span class="inline">CAPR_BACKTEST</span> and
-        <span class="inline">CAPR_SERIES</span>. Every unit conversion, severity marker, ranking and
+        <span class="inline">CAPR_ESM_COMPARE</span>, <span class="inline">CAPR_BACKTEST</span>,
+        <span class="inline">CAPR_SERIES</span> and <span class="inline">CAPR_SERIES_ANOMALIES</span>. Every unit conversion, severity marker, ranking and
         display label is computed <em>once</em>, in the view. The text and HTML drivers only format
         what those views hand them (the HTML driver computes chart geometry and nothing more), so the
         two reports cannot show different numbers — and neither can disagree with what pages you.

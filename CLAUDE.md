@@ -13,15 +13,24 @@ for making changes safely.
 - **All analytics go through the `CAPV_*` seam.** Never reference `DBA_HIST_*`
   outside `ddl/10_seam_local.sql`. That is what keeps local / warehouse /
   fixture modes byte-identical downstream.
-- **Config, not constants.** Thresholds live in `CAP_CONFIG`, read via a one-row
-  `cfg` CTE. Add a knob there (idempotent MERGE in `ddl/05_config.sql`) rather
-  than hard-coding.
+- **Config, not constants.** Thresholds live in `CAP_CONFIG`, read only through
+  the one-row view `CAP_CFG` (`CROSS JOIN cap_cfg cfg`, one column per knob).
+  A new knob is three edits in `ddl/05_config.sql`: a seed MERGE row, a
+  `CAP_CFG` column and a `CAP_CFG_CHECK` UNPIVOT entry (+ its range rule).
+  Never hard-code.
 - **`CAP_TBSPC_OVERRIDE` is the third persisted table** (with `CAP_CONFIG` and
   `CAP_ML_MODEL`): operator-set tablespace ceilings + exclusions, created
   idempotently at the bottom of `ddl/05_config.sql`, applied once in
   `CAPD_TBSPC_DAILY`, NOT dropped by `ddl/00_drop.sql`, dropped only by
   `uninstall.sql`. `dbid`/`con_dbid` `0` are wildcards; the most specific
   matching row wins.
+- **The baseline mode is part of every anomaly key.** `CAPA_ANOM` holds one row
+  per observation AND `baseline_mode` (2 per day, TRAILING + SAME_DOW; 1 per
+  CPU hour, HOUR_OF_WEEK). Read it only with `baseline_mode = ...` or GROUP BY
+  the observation key; an observation-grain consumer joins `CAPA_ANOM_DAY`
+  (one row per observation). `test/lint_anom_joins.sh` enforces it (any
+  `capa_anom` read outside ddl/40, ddl/45, test/, bench/ and the drill
+  scripts fails; drill reads need a `baseline_mode =` predicate).
 - **19c syntax floor.** Inline `OVER (PARTITION BY ... ORDER BY ...)` on every
   window call — the standalone `WINDOW` clause is 21c+. No 21c/23c features.
 
@@ -29,11 +38,21 @@ for making changes safely.
 
 `install.sql` includes, in order: `ddl/00_drop` → `05_config` → the seam
 (`10`/`11`/`12` by `seam_mode`) → `20_daily` → `25_series_daily`
-(CAPD_SERIES_DAILY, M11) → `30_forecast` → `35_series_forecast`
+(CAPD_SERIES_DAILY, M11; M15 gap columns) → `30_forecast` → `35_series_forecast`
 (CAPF_SERIES_FORECAST) → `40_anomaly` →
 `45_report_views` (CAPR_CONTAINER + CAPR_ALERTS + CAPR_SERIES) → `50_ml` (which
 pulls `ml/cap_forecast_ml.pks/.pkb` and builds the ESM views + CAPF_BACKTEST)
 → `55_report_views_ml` (the Tier-2-dependent CAPR_* section views).
+M15 objects: ddl/20 `CAPD_CPU_INTERVAL` / `CAPD_DBTIME_INTERVAL` (one row per
+valid snapshot interval; the daily views GROUP BY them) and `CAPD_CPU_HOURLY`
+(BUSY_PCT + DB_CPU_PCT per END-hour bucket, the HOUR_OF_WEEK source); ddl/25
+`day_gap` / `max_interval_hours` / `gap_flag` on `CAPD_SERIES_DAILY`; ddl/40
+`CAPA_OBS` (what is scored, unit, floor) → `CAPA_ANOM` (the engine) →
+`CAPA_ANOM_DAY` (+ the untouched `CAPA_CPU_SHIFT`); ddl/45 `CAPR_ANOMALIES`
+(before `CAPR_ALERTS`), `CAPR_SERIES_ANOMALIES`, `CAPR_HOURLY_POINTS`.
+`CAPA_TBSPC_ANOM` / `CAPA_CPU_ANOM` are gone (still in `00_drop` so an upgrade
+removes them). `test/dbmint_harness.sh <SCHEMA> [--ml]` runs
+`test/lint_anom_joins.sh`, syncs and runs the whole fixture harness on dbmint.
 Opt-in extras outside install.sql: `quickstart.sql` / `quickstart.sh`
 (doctor → install local → report/report.sql, in one run; the docs' "Getting
 started" path), `doctor.sql` (preflight), `install_jobs.sql`
@@ -132,12 +151,20 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
   exactly the snapshots ending 09:00..18:00. The fixture has TWO snapshots per
   day (ids `2000+2i` ending 06:00, `2001+2i` ending 18:00); tablespace usage
   hangs only off the 18:00 one, and the restart day has no 06:00 snapshot.
-- The CPU fixture has **two containers**: the root (`42424242`, OSSTAT +
+- The CPU fixture has **three containers** (the third, `FIXPDB2` `42424244`,
+  time-model only, is the deseasoning / slope-significance one): the root (`42424242`, OSSTAT +
   time-model) and `FIXPDB1` (`42424243`, **time-model only** — OSSTAT records
   under the CDB con_dbid in real AWR, and giving the PDB its own rows would
   double `host_busy_sec` and break `host_share_pct`). The M10.3 level shift
   therefore rides on `DB_CPU_PCT`. Any assertion counting CPU rows must scope
   on `con_dbid`, not just `dbid`.
+- **The fixture's injected Tuesday (`INJECTED_TUE`) is always a FIXPDB1
+  `DB_CPU_PCT` step day** (latest Tuesday in 90..120; the step covers the last
+  7 days), and M15 scores that series. A bare `day_dt = d_inj` CPU anomaly
+  lookup returns several rows and TOO_MANY_ROWS aborts `run_test.sql`: name
+  series, `baseline_mode` and `con_dbid` (the `anom_flag` / `anom_n` helpers
+  do). `INVERTED_WED` (40/40) is invisible to the day modes and flags only
+  under HOUR_OF_WEEK (06:00 HIGH, 18:00 LOW).
 - `cpu_gap_hours` defaults to **12**, not something tighter, because the
   fixture's snapshots are 12 h apart (06:00 / 18:00) and, more importantly,
   because `gap_flag` SUPPRESSES anomaly scoring — an over-sensitive default
@@ -153,6 +180,28 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
   M9.3 reset day is **inside** the new window (`train_start = reset_day`; its
   used_bytes is already post-purge). Both are asserted by the fixture; change
   the view and the assertions together.
+- **M15 hour grain.** `hour_ts = TRUNC(end_time - 5/1440, 'HH24') + 1/24`: the
+  bucket is labelled by the interval's END hour, with 5 min of AWR flush
+  grace (09:59:58 and 10:00:03 both land in 10:00). `day_dt` stays
+  `TRUNC(end_time)`, so a bucket labelled 00:00 can belong to the previous
+  day. An interval is a gap at HOUR grain when `ivl_hours <= 0` (DST
+  fall-back, clock step) or `> LEAST(cpu_gap_hours, hour_gap_ratio x median
+  interval of that instance)`, never more lenient than the day rule.
+- **Wall clock labelled Z, everywhere.** AWR times are DB-local DATEs; every
+  export stamps them with a `Z` as a label, not an instant (dashboards run in
+  UTC: Kibana `dateFormat:tz`, Grafana). HOUR_OF_WEEK's `ts - 7k` follows the
+  local clock across DST, as workload does. Warehouse mode has no per-source
+  timezone.
+- **`CAPR_ALERTS` anomaly rows come FROM `CAPR_ANOMALIES`, not the reverse.**
+  `CAPR_ANOMALIES` owns severity, message and `alerting` (mode enabled by the
+  `alert_modes_{tbspc,cpu,series}` bitmask, 1=TRAILING 2=SAME_DOW
+  4=HOUR_OF_WEEK, AND inside `anomaly_report_days`); `CAPR_ALERTS` has one
+  branch over its `alerting = 'Y'` rows (TBSPC_ANOM, CPU_ANOM, DBCPU_ANOM,
+  SERIES_ANOM), an HOUR_OF_WEEK day rolled up to its worst hour.
+- **Knob renames (M15):** `tbspc_min_hist` → `trailing_min_hist`,
+  `cpu_min_dow_hist` → `weekly_min_hist`. A carry-over MERGE before the seed
+  MERGE copies an operator's value to the new key, then the old keys are
+  DELETEd. The minimums now belong to the mode, not the series family.
 - `SYS.ODCINUMBERLIST` is a shipped `VARRAY(32767) OF NUMBER` and works in
   `TABLE(v)` from PL/SQL — handy for building an expectation list without a
   fixture-owned type. But a collection METHOD (`v.COUNT`) inside a SQL
@@ -174,6 +223,12 @@ there for local mode).
   `@install.sql` → `@test/run_test.sql` (+ `@test/run_test_ml.sql`). Both exit
   non-zero on failure. Sync the repo to the DB host first because of the
   relative `@@` includes.
+- **dbmint lever:** `test/dbmint_harness.sh <SCHEMA> [--ml] [--no-fixture]
+  [--sql FILE]` lints, rsyncs to `~/awr_cap_<schema>/` and runs the steps as
+  SYSDBA + `CURRENT_SCHEMA` in PDB1; log `/tmp/dbmint_harness_<SCHEMA>.log`.
+  `CAPX1`..`CAPX3` in PDB1 are throwaway schemas for parallel runs (one schema
+  per concurrent run; ask before dropping them). Shared schemas collide
+  (ORA-04063 / ORA-00942 mid-reinstall).
 
 ## Warehouse mode (Milestone W / M6 — done)
 

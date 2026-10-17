@@ -322,6 +322,72 @@ new report section 7 (text + HTML), new fixture tables
       database; a results layer per the M18 todo for fleets); multi-select
       filters; an acknowledgement table once alerts have identity.
 
+## M15 — Anomaly baseline modes (done)
+
+Every anomaly series is scored against each baseline MODE of its grain, as rows
+of one engine: TRAILING (the last `mad_window_days`) and SAME_DOW (the same
+weekday, `dow_weeks` back) per day, HOUR_OF_WEEK (the same weekday and hour)
+per CPU hour. A mode is a reference-set selector, nothing more; the floor,
+z-score and flag rule are shared.
+
+- [x] **M15.1 Engine + registry.** `CAPA_OBS` (ddl/40) is the registry of what
+      is scored and how: kind, series, grain, unit, scored value vs raw value,
+      gap and `is_complete` flags, the per-(unit, grain) threshold floor and
+      the family's alert bitmask. `CAPA_ANOM` scores every observation against
+      every mode of its grain (key `dbid, con_dbid, kind, series,
+      baseline_mode, ts`; `2 x DAY obs + HOUR obs` rows); `CAPA_ANOM_DAY` rolls
+      the day modes up to one row per observation. `CAPA_TBSPC_ANOM` and
+      `CAPA_CPU_ANOM` are deleted. Knobs: `trailing_min_hist` /
+      `weekly_min_hist` replace `tbspc_min_hist` / `cpu_min_dow_hist` (value
+      carried over), new `cpu_min_mad_pct_hour`, `hour_gap_ratio`,
+      `series_floor_count`, `series_floor_gib` and the bitmasks
+      `alert_modes_tbspc` / `_cpu` / `_series` (1 = TRAILING, 2 = SAME_DOW,
+      4 = HOUR_OF_WEEK), all in `CAP_CFG` and `CAP_CFG_CHECK`.
+- [x] **M15.2 Hourly source.** `CAPD_CPU_INTERVAL` / `CAPD_DBTIME_INTERVAL`
+      (one row per valid snapshot interval; the daily CPU views are GROUP BYs
+      over them, byte-identical) and `CAPD_CPU_HOURLY` (host `BUSY_PCT` and
+      per-container `DB_CPU_PCT` per END-hour bucket, 5 min flush grace;
+      `gap_flag` from `hour_gap_ratio`).
+- [x] **M15.3 More series scored.** Per-container `DB_CPU_PCT`
+      (`DBCPU_BUSY` / `DBCPU_ANOM`) and the M11 series: `PROCESSES`,
+      `SESSIONS`, `REDO_GB_DAY` on their level, `DB_SIZE_GB` on its daily
+      growth (`SERIES_LEVEL` / `SERIES_GROWTH` / `SERIES_ANOM`).
+      `CAPD_SERIES_DAILY` gains `day_gap`, `max_interval_hours`, `gap_flag`
+      (REDO over `cpu_gap_hours`; DB_SIZE_GB when the tablespace set changed).
+- [x] **M15.4 Consumer migration.** `CAPR_ANOMALIES` owns severity, message
+      and `alerting` and gains `baseline_mode`, `grain`, `n_hist`,
+      `alert_kind`, `raw_value`, `doc_key`; `CAPR_ALERTS` takes its anomaly
+      rows from it in one branch (+ `baseline_mode`, `alert_key`; an
+      HOUR_OF_WEEK day carries its worst hour). `CAPR_TBSPC_ANOMALIES` /
+      `CAPR_CPU_ANOMALIES` carry the mode (`busy_pct` renamed `value_pct`);
+      new `CAPR_SERIES_ANOMALIES` (section 7b) and `CAPR_HOURLY_POINTS`;
+      `CAPR_SERIES_POINTS` stays 1:1 through `CAPA_ANOM_DAY` (headline mode)
+      and gains `anomaly_modes`, `how_hours_flagged`, `doc_key`. The text and
+      HTML reports and both drill scripts show the mode.
+- [x] **M15.5 ELK / ORDS / Grafana.** Strict-mapping fields for
+      `baseline_mode`, `grain`, `n_hist`, `raw_value`, `anomaly_modes`,
+      `alerting`, `hours_flagged`; anomaly and alert doc ids keyed on the
+      mode; an hourly ORDS endpoint over `CAPR_HOURLY_POINTS`; a mode filter
+      on the fleet anomaly boards. Timestamps are the DB wall clock labelled
+      `Z`; the dashboards run in UTC.
+- [x] **M15.6 Tests.** The fixture gains `INVERTED_WED` (40% / 40%: invisible
+      to the day modes, HOUR_OF_WEEK 06:00 HIGH and 18:00 LOW). Every
+      `run_test.sql` anomaly lookup names the full key (`anom_flag` /
+      `anom_n`); new mode closed forms, key-uniqueness checks and knob flips
+      (659 assertions, ML 86). `test/lint_anom_joins.sh` rejects any
+      `CAPA_ANOM` read outside ddl/40, ddl/45, test/, bench/ and the drill
+      scripts; `test/dbmint_harness.sh` runs it first. Parity gate before the
+      legacy views were deleted: `CAPA_TBSPC_ANOM` vs TRAILING (1068 rows) and
+      `CAPA_CPU_ANOM` vs SAME_DOW `BUSY_PCT` (112 rows), zero differences
+      apart from rows the legacy views omitted (`n_hist` 0) and `robust_z` on
+      flat tablespace baselines (finite now).
+- [ ] **M15.7 Follow-ups.** Regenerate `docs/demo/` from
+      `test/demo_fixture.sql` (a manual lab step). Shift suppression and
+      episode collapsing in `CAPR_ALERTS` (owned by the review program's
+      alert-policy unit). Hourly observation docs are not exported to ELK
+      (`CAPR_HOURLY_POINTS` is ORDS-only). Warehouse mode has no per-source
+      timezone, so a fleet spanning timezones compares wall clocks.
+
 ## v2 (unchanged)
 
 - [ ] Memory forecasting (SGA/PGA from `DBA_HIST_MEM_DYNAMIC_COMPONENTS` /

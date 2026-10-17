@@ -130,7 +130,7 @@
             <tr><td><b>Tablespace growth</b></td><td>Projected size at +30 / +90 / +180 / +365 days with 95% prediction bands, and <code>days_to_full</code> with a worst/best-case range</td><td class="def">DBA_HIST_TBSPC_SPACE_USAGE</td></tr>
             <tr><td><b>CPU headroom</b></td><td>Host busy% (daily average, p95 "busy hour" and peak-window) plus DB CPU as a percent of core capacity, days-to-saturation, and level shifts</td><td class="def">DBA_HIST_OSSTAT · SYS_TIME_MODEL</td></tr>
             <tr><td><b>Fixed-ceiling series</b></td><td>Peak <code>processes</code> / <code>sessions</code> against the init parameters, redo GiB/day, and total DB size against the summed tablespace ceilings, each with days-to-limit</td><td class="def">DBA_HIST_RESOURCE_LIMIT · SYSSTAT · tablespace usage</td></tr>
-            <tr><td><b>Anomalies</b></td><td>Median + MAD flags, each reproducible by hand (value, median, k·σ, robust z)</td><td class="def">daily deltas</td></tr>
+            <tr><td><b>Anomalies</b></td><td>Median + MAD flags against three baselines side by side (the last 28 days, the same weekday, and for CPU the same weekday and hour), each reproducible by hand (value, median, k·σ, robust z)</td><td class="def">daily values · hourly CPU</td></tr>
             <tr><td><b>Which engine to trust</b></td><td>A holdout backtest that replays the recent past and scores each engine's MAPE and bias against what actually happened</td><td class="def">CAPF_BACKTEST</td></tr>
           </tbody>
         </table>

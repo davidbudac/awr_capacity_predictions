@@ -255,8 +255,8 @@
         <span class="inline">ddl/00_drop.sql</span> deliberately never drops it.</p>
       </div>
 
-      <h3>CPU — two containers</h3>
-      <p>The CPU fixture has <b>two</b> containers, and the split is not cosmetic: host OSSTAT records
+      <h3>CPU — three containers</h3>
+      <p>The CPU fixture has <b>three</b> containers, and the split is not cosmetic: host OSSTAT records
         under the CDB's <span class="inline">con_dbid</span> in real AWR, so giving a PDB its own
         OSSTAT rows would double <span class="inline">host_busy_sec</span> and break
         <span class="inline">host_share_pct</span>.</p>
@@ -269,12 +269,16 @@
           <tbody>
             <tr><td class="def">root — <code>FIXCDB</code> / <code>CDB$ROOT</code></td>
                 <td><code>42424242</code></td>
-                <td><b>OSSTAT + time model</b> (4 CPUs / 4 cores)</td>
-                <td>weekday 20% night / 60% day (daily average <b>40%</b>), weekend 10% / 30% (avg 20%), one injected Tuesday at 70% / 70%, the restart at day 60 and the Sunday AWR gap</td></tr>
+                <td><b>OSSTAT + time model</b> (8 CPUs / 4 cores)</td>
+                <td>weekday 20% night / 60% day (daily average <b>40%</b>), weekend 10% / 30% (avg 20%), one injected Tuesday at 70% / 70%, one inverted Wednesday at 40% / 40%, the restart at day 60 and the Sunday AWR gap</td></tr>
             <tr><td class="def">PDB — <code>FIXCDB</code> / <code>FIXPDB1</code></td>
                 <td><code>42424243</code></td>
                 <td><b>time model only</b> — no OSSTAT</td>
                 <td>a 7-day <code>DB_CPU_PCT</code> sawtooth 34,36,…,46 that steps <b>+18 points</b> for the last 7 days</td></tr>
+            <tr><td class="def">PDB — <code>FIXCDB</code> / <code>FIXPDB2</code></td>
+                <td><code>42424244</code></td>
+                <td><b>time model only</b></td>
+                <td><code>DB_CPU_PCT</code> at 60% on weekdays and 20% at weekends, plus a ramp of 1/12 point a day: the CPU deseasoning and slope-significance container</td></tr>
           </tbody>
         </table>
       </div>
@@ -284,9 +288,9 @@
         (<span class="inline">PERCENTILE_CONT(0.95)</span> of {20, 60}),
         <span class="inline">busy_max = 60</span>,
         <span class="inline">busy_peak_pct = 60</span> (the daytime interval alone),
-        <span class="inline">host_busy_sec = 138240</span>,
+        <span class="inline">host_busy_sec = 276480</span>,
         <span class="inline">db_cpu_sec = 400</span> and
-        <span class="inline">db_cpu_pct = 0.1157</span>.</p>
+        <span class="inline">db_cpu_pct = 0.0579</span> (400 seconds over 8 logical CPUs × 86400).</p>
 
       <div class="callout tip">
         <span class="ico">▸</span>
@@ -309,10 +313,31 @@
         <span class="inline">recent_med = 58</span> over the shifted last 7 —
         <span class="inline">shift_pct = 18</span>, with a real
         <span class="inline">base_mad_sigma = 4 × 1.4826 = 5.93</span> for the N-of-M confirmation to
-        clear. And the shift is invisible to every other layer: the PDB has no OSSTAT, the daily
-        <span class="inline">CAPA_CPU_ANOM</span> does not cover that metric, and the trend fit reads
-        the step as noise. <span class="inline">CAPA_CPU_SHIFT</span> is the only thing that can say
-        the container now runs 18 points hotter than it did a month ago.</p>
+        clear. The per-point anomaly modes see only the start of the step: each step day is 18 points
+        over its same-weekday priors, so SAME_DOW flags all 7 (a floored sigma, threshold 9, z 6) and
+        <code>DBCPU_ANOM</code> raises 7 WARNs, while TRAILING, whose window mixes in the sawtooth,
+        flags 3 of them. Once the step fills the baselines those flags stop, and the trend fit reads
+        the step as noise. <span class="inline">CAPA_CPU_SHIFT</span> is the only thing that keeps
+        saying the container now runs 18 points hotter than it did a month ago.</p>
+      </div>
+
+      <div class="callout tip">
+        <span class="ico">▸</span>
+        <p><strong>The inverted Wednesday exists for one mode.</strong> Both of its intervals read
+        40%, so its daily average is a normal weekday's 40%: TRAILING and SAME_DOW must not flag it.
+        Hour by hour it is upside down. HOUR_OF_WEEK flags 06:00 <code>HIGH</code> (40 against the
+        usual 20, z = 20 / 5 = 4) and 18:00 <code>LOW</code> (40 against 60). The injected Tuesday shows
+        the hour threshold at work: 06:00 reads 70 against 20 (z 10) and flags, while 18:00 reads 70
+        against 60, a 10-point move under the 15-point hour threshold, and must not.</p>
+      </div>
+
+      <div class="callout warn">
+        <span class="ico">!</span>
+        <p><strong>The injected Tuesday is also a FIXPDB1 step day.</strong> It is the latest Tuesday
+        in the spine, so it always falls inside the last 7 days, and FIXPDB1's
+        <code>DB_CPU_PCT</code> is scored too. A CPU anomaly lookup by day alone returns several rows.
+        Every lookup in <span class="inline">run_test.sql</span> names series, baseline mode and
+        <code>con_dbid</code> (the <code>anom_flag</code> and <code>anom_n</code> helpers).</p>
       </div>
 
       <h3>Fixed-ceiling series (M11)</h3>
@@ -354,10 +379,10 @@
             <tr><td class="def"><code>CAP_FIXTURE_TABLESPACE</code></td><td><code>DBA_HIST_TABLESPACE</code> — names, contents, <code>block_size</code></td></tr>
             <tr><td class="def"><code>CAP_FIXTURE_DATAFILE</code></td><td><code>DBA_HIST_DATAFILE</code> — the block-size <em>fallback</em> only</td></tr>
             <tr><td class="def"><code>CAP_FIXTURE_OSSTAT</code></td><td><code>DBA_HIST_OSSTAT</code> — cumulative centiseconds, root container only</td></tr>
-            <tr><td class="def"><code>CAP_FIXTURE_TIME_MODEL</code></td><td><code>DBA_HIST_SYS_TIME_MODEL</code> — cumulative microseconds, <b>both</b> containers</td></tr>
+            <tr><td class="def"><code>CAP_FIXTURE_TIME_MODEL</code></td><td><code>DBA_HIST_SYS_TIME_MODEL</code> — cumulative microseconds, <b>all three</b> containers</td></tr>
             <tr><td class="def"><code>CAP_FIXTURE_RESOURCE_LIMIT</code></td><td><code>DBA_HIST_RESOURCE_LIMIT</code> (M11) — <code>processes</code> / <code>sessions</code></td></tr>
             <tr><td class="def"><code>CAP_FIXTURE_SYSSTAT</code></td><td><code>DBA_HIST_SYSSTAT</code> (M11) — <code>redo size</code> + one decoy stat</td></tr>
-            <tr><td class="def"><code>CAP_FIXTURE_CONTAINER</code></td><td><code>DBA_HIST_PDB_INSTANCE</code> (M7.2) — <code>FIXCDB</code>/<code>CDB$ROOT</code> and <code>FIXCDB</code>/<code>FIXPDB1</code>, so both <code>db_pdb</code> label branches are asserted</td></tr>
+            <tr><td class="def"><code>CAP_FIXTURE_CONTAINER</code></td><td><code>DBA_HIST_PDB_INSTANCE</code> (M7.2) — <code>FIXCDB</code>/<code>CDB$ROOT</code>, <code>FIXCDB</code>/<code>FIXPDB1</code> and <code>FIXCDB</code>/<code>FIXPDB2</code>, so both <code>db_pdb</code> label branches are asserted</td></tr>
             <tr><td class="def"><code>CAP_FIXTURE_META</code></td><td>nothing in AWR — the <b>expectations</b>, see below</td></tr>
           </tbody>
         </table>
@@ -453,7 +478,7 @@ sqlplus captest/&lt;password&gt;@localhost:1521/pdb1.world</pre>
           <div class="step__body">
             <h4>Load the fixtures</h4>
             <p>Creates and fills the ten <span class="inline">CAP_FIXTURE_*</span> tables described
-              <a href="#fixture">above</a> — ten tablespace series, a two-container CPU series and the
+              <a href="#fixture">above</a> — ten tablespace series, a three-container CPU series and the
               three fixed-ceiling series — and seeds the three
               <span class="inline">CAP_TBSPC_OVERRIDE</span> rows. Every value is hand-calculated and
               dated relative to today; the known-correct answers land in
@@ -466,8 +491,9 @@ sqlplus captest/&lt;password&gt;@localhost:1521/pdb1.world</pre>
             <div class="term">
               <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
                 <span class="term__title">output</span><span class="term__tag out">expect</span></div>
-<pre>Fixtures loaded: base=2026-05-01 restart=2026-06-30 spike=2026-08-19
-  inj_tue=2026-08-25 Tue probe=2026-08-28 Fri cpu_gap=2026-07-19 Sun
+<pre>Fixtures loaded: base=2026-06-19 restart=2026-08-18 spike=2026-10-07
+inj_tue=2026-10-13 Tue probe=2026-10-16 Fri cpu_gap=2026-09-06 Sun
+partial=2026-07-09 Thu inverted_wed=2026-10-14 Wed
 M11 fixtures loaded: sessions 200..440 of 500, processes 150 of 300,
   redo 2 GiB/day, probe day index 119
 <span class="c-dim">Fixtures installed.  Next: @install.sql (seam_mode=fixture), then test/run_test.sql</span></pre>
@@ -477,8 +503,8 @@ M11 fixtures loaded: sessions 200..440 of 500, processes 150 of 300,
               <p><strong>Your dates will differ</strong> — everything is anchored to
               <span class="inline">TRUNC(SYSDATE)</span>. The <em>relative</em> positions never move:
               the restart is always day 60, the spike day 110, the purge day 90, the injected Tuesday
-              is the latest Tuesday in the last 30 days, and the CPU gap is the latest Sunday in days
-              70–80. Re-running the script rebuilds everything from scratch.</p>
+              is the latest Tuesday in the last 30 days, the inverted Wednesday is the latest Wednesday in
+              the same range, and the CPU gap is the latest Sunday in days 70–80. Re-running the script rebuilds everything from scratch.</p>
             </div>
           </div>
         </div>
@@ -539,9 +565,9 @@ M11 fixtures loaded: sessions 200..440 of 500, processes 150 of 300,
           <div class="step__body">
             <h4>Run the Tier 1 self-check</h4>
             <p>Every assertion over the fake data compares a result to its closed-form answer. The
-              number of assertions grows with each milestone, so this page does not quote one: read
-              the closing <span class="inline">RESULT: N passed, M failed</span> line, where M must be
-              0. It prints PASS/FAIL per check and <b>exits with an error code on any failure</b>
+              number of assertions grows with each milestone (659 at M15), so check the closing
+              <span class="inline">RESULT: N passed, M failed</span> line for M = 0 rather than for a
+              particular N. It prints PASS/FAIL per check and <b>exits with an error code on any failure</b>
               (<span class="inline">WHENEVER SQLERROR EXIT FAILURE</span> plus a final
               <span class="inline">RAISE_APPLICATION_ERROR</span>), so you can wire it straight into CI
               or a monitoring job.</p>
@@ -597,6 +623,14 @@ M11 fixtures loaded: sessions 200..440 of 500, processes 150 of 300,
   <span class="c-pass">PASS</span>  PROCESSES quality = FLAT
 <span class="c-dim">=== M11.2 redo GiB/day ===</span>
   <span class="c-pass">PASS</span>  REDO_GB_DAY probe value ~= 2
+<span class="c-dim">=== M15 root BUSY_PCT across the three modes ===</span>
+  <span class="c-pass">PASS</span>  SAME_DOW HIGH count = 1
+  <span class="c-pass">PASS</span>  HOW inverted Wednesday 06:00 (40 vs 20) = HIGH
+  <span class="c-pass">PASS</span>  inverted Wednesday invisible to SAME_DOW (daily avg 40)
+<span class="c-dim">=== M15 FIXPDB1 DB_CPU_PCT step days ===</span>
+  <span class="c-pass">PASS</span>  SAME_DOW HIGH exactly on the last 7 (step) days = 7
+<span class="c-dim">=== M15 knob flips ===</span>
+  <span class="c-pass">PASS</span>  alert_modes_cpu=6: CPU_ANOM (SAME_DOW + HOW Tue + HOW Wed) = 3
 ----------------------------------------
 RESULT: <span class="c-pass">&lt;N&gt; passed, 0 failed</span>
 
@@ -610,8 +644,37 @@ All fixture assertions passed.</pre>
               acceleration floor, the M8.1 alert kinds and M8.2 <span class="inline">CAPR_*</span>
               section views, the M9.1 intervals, M9.2 Theil–Sen (including a knob flip to THEILSEN
               mid-run and back), M9.3 reset, M9.4 backtest and M9.5 overrides, the M10.1/M10.2 CPU
-              peak and DB-CPU-percent closed forms, the M10.3 level shift, the M10.5 gap guard, and
-              the M11 fixed-ceiling series with their alerts.</p>
+              peak and DB-CPU-percent closed forms, the M10.3 level shift, the M10.5 gap guard,
+              the M11 fixed-ceiling series with their alerts, and the M15 anomaly modes: the hourly
+              buckets, the closed forms of every mode on every CPU container, tablespaces and M11
+              series under SAME_DOW, key uniqueness on <span class="inline">CAPA_ANOM</span> and the
+              feeds, the alerts under the shipped bitmasks, and knob flips that each assert and
+              restore.</p>
+            </div>
+            <div class="callout">
+              <span class="ico">i</span>
+              <p><strong>One script for steps 1 to 6 on dbmint.</strong>
+              <span class="inline">test/dbmint_harness.sh &lt;SCHEMA&gt; [--ml] [--no-fixture] [--sql FILE]</span>
+              runs <span class="inline">test/lint_anom_joins.sh</span> first and stops on a violation (exit 4),
+              rsyncs the checkout to <span class="inline">~/awr_cap_&lt;schema&gt;/</span>, runs the fixture
+              install, the install, <span class="inline">run_test.sql</span> and, with
+              <span class="inline">--ml</span>, the Tier&nbsp;2 steps as SYSDBA with
+              <span class="inline">CURRENT_SCHEMA</span> set in PDB1, and echoes the RESULT, FAIL and ORA- lines.
+              The full log is <span class="inline">/tmp/dbmint_harness_&lt;SCHEMA&gt;.log</span>. Give each
+              concurrent run its own schema: two runs reinstalling one schema fail each other with
+              ORA-04063 or ORA-00942.</p>
+            </div>
+            <div class="callout tip">
+              <span class="ico">▸</span>
+              <p><strong>The lint guards the anomaly key.</strong>
+              <span class="inline">CAPA_ANOM</span> has one row per point <em>and</em> baseline mode, so a
+              join on the point alone doubles every row. <span class="inline">test/lint_anom_joins.sh</span>
+              fails when a SQL or Python file outside <span class="inline">ddl/40</span>,
+              <span class="inline">ddl/45</span>, <span class="inline">test/</span>,
+              <span class="inline">bench/</span> and the drill scripts names <code>capa_anom</code>, and when a
+              drill script reads it without a <code>baseline_mode =</code> predicate within the next 8 lines.
+              Join <span class="inline">CAPA_ANOM_DAY</span> instead; it has one row per point. Run it on its
+              own from the repo root: <span class="inline">test/lint_anom_joins.sh</span>.</p>
             </div>
           </div>
         </div>
@@ -945,8 +1008,8 @@ control_management_pack_access     string   <span class="c-key">DIAGNOSTIC+TUNIN
           <tbody>
             <tr><td class="def"><b>SOE</b> (Order Entry) OLTP inserts</td><td>grow <code>SOETBS</code> monotonically — the input <code>CAPF_TBSPC_FORECAST</code> / days-to-full actually needs</td></tr>
             <tr><td class="def"><b>SH</b> (Sales History) rollups and cubes</td><td>burn CPU with essentially no growth, so the CPU and tablespace series move <em>independently</em></td></tr>
-            <tr><td class="def">Weekday / weekend contrast</td><td>gives <code>dow_weeks</code> (the same-weekday CPU baseline) a real seasonal signal</td></tr>
-            <tr><td class="def"><code>anomaly_load.sql</code> + a 24-user burst</td><td>a genuine outlier for <code>CAPA_TBSPC_ANOM</code> / <code>CAPA_CPU_ANOM</code> to find</td></tr>
+            <tr><td class="def">Weekday / weekend contrast</td><td>gives <code>dow_weeks</code> (the SAME_DOW and HOUR_OF_WEEK baselines) a real seasonal signal</td></tr>
+            <tr><td class="def"><code>anomaly_load.sql</code> + a 24-user burst</td><td>a genuine outlier for <code>CAPA_ANOM</code> to find</td></tr>
           </tbody>
         </table>
       </div>
