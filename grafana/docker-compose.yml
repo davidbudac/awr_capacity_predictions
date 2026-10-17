@@ -1,0 +1,41 @@
+# Grafana over the suite's ORDS REST module (route B, no Elasticsearch).
+#   docker compose -f grafana/docker-compose.yml up -d
+#   Grafana http://localhost:3001  (admin/admin, the image default, kept for the lab;
+#   anonymous users get read-only Viewer access)
+#   ORDS    http://localhost:8181/ords/capdemo/awrcap/  (install once: grafana/ords/README.md)
+# ORDS publishes on host port 8181 (8080 is taken on the lab host); ORDS_HOST_PORT overrides it.
+# ORDS_URL points Grafana at another ORDS; the default reaches the ords service
+# through the host's published port.
+services:
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: awrcap-grafana
+    ports:
+      - "3001:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      ORDS_URL: ${ORDS_URL:-http://host.docker.internal:${ORDS_HOST_PORT:-8181}/ords/capdemo/awrcap}
+      GF_PLUGINS_PREINSTALL: yesoreyeram-infinity-datasource
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/awrcap-fleet-anomalies.json
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+
+  ords:
+    image: container-registry.oracle.com/database/ords:latest
+    container_name: awrcap-ords
+    ports:
+      - "${ORDS_HOST_PORT:-8181}:8080"
+    volumes:
+      - ./ords/config:/etc/ords/config
+    entrypoint: ["ords"]
+    command: ["--config", "/etc/ords/config", "serve"]
+    restart: unless-stopped
+
+volumes:
+  grafana-data:

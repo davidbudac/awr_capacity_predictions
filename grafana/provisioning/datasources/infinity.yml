@@ -1,0 +1,12 @@
+apiVersion: 1
+datasources:
+  - name: AWR capacity (ORDS)
+    uid: awrcap-ords
+    type: yesoreyeram-infinity-datasource
+    access: proxy
+    isDefault: true
+    url: ${ORDS_URL}
+    jsonData:
+      allowedHosts:
+        - ${ORDS_URL}
+    editable: false
