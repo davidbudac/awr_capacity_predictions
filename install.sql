@@ -27,8 +27,11 @@
 -- will PROMPT once if you did not DEFINE it. Non-interactive callers (the test
 -- harness, CI) always DEFINE it up front to avoid the prompt consuming a line.
 --
--- Read-only against AWR data: the only rows this suite ever writes are into
--- its own CAP_CONFIG / CAP_ML_MODEL tables. No AWR object is modified.
+-- Read-only against AWR data: the suite writes only to CAP_* tables it owns.
+-- Operator tables (CAP_CONFIG, CAP_TBSPC_OVERRIDE) and derived tables
+-- (CAP_ML_MODEL; the results layer's CAP_RUN, CAP_FIT_HIST, CAP_ALERT_STATE,
+-- CAP_ALERT_EVENT) all survive a re-install: ddl/00_drop drops views only.
+-- No AWR object is modified.
 --
 SET DEFINE '&'
 SET VERIFY   OFF
@@ -105,12 +108,14 @@ PROMPT -- [35] fixed-ceiling series forecast (CAPF_SERIES_FORECAST) ...
 @@ddl/35_series_forecast.sql
 PROMPT -- [40] anomalies (CAPA_*) ...
 @@ddl/40_anomaly_views.sql
-PROMPT -- [45] integration/report layer (CAPR_CONTAINER + CAPR_ALERTS + sections) ...
+PROMPT -- [45] integration/report layer (CAPR_CONTAINER, CAPR_ANOMALIES, CAPR_SEVERITY, CAPR_FIT, sections) ...
 @@ddl/45_report_views.sql
 PROMPT -- [50] Tier 2 OML ESM (CAP_ML_MODEL + package + CAPF_ESM/COMPARE) ...
 @@ddl/50_ml.sql
-PROMPT -- [55] report views that need Tier 2 (CAPR_TBSPC_FORECAST/ESM_COMPARE/BACKTEST) ...
+PROMPT -- [55] report views that need Tier 2 (CAPR_TBSPC_FORECAST/ESM_COMPARE/BACKTEST/FORECAST_POINTS + CAPR_ALERTS) ...
 @@ddl/55_report_views_ml.sql
+PROMPT -- [60] results layer (CAP_RUN/FIT_HIST/ALERT_STATE/ALERT_EVENT + CAP_RESULTS + CAPR_ALERTS_LATEST etc) ...
+@@ddl/60_results.sql
 
 -- --------------------------------------------------------------------
 -- Recompile, then check. A re-install drops and recreates the views, which
@@ -207,6 +212,7 @@ PROMPT ============================================================
 PROMPT  Install complete (seam_mode = &&seam_mode, schema = &cap_schema).
 PROMPT  Next: report/report.sql  (text capacity report)
 PROMPT        cap_forecast_ml.train_all  (optional Tier 2 ESM models)
+PROMPT        cap_results.refresh  (optional run history + alert state)
 PROMPT ============================================================
 PROMPT
 

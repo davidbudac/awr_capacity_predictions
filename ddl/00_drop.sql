@@ -1,9 +1,10 @@
 --
 -- ddl/00_drop.sql -- idempotent teardown of all CAP_* / CAPV_ / CAPD_ / CAPF_ / CAPA_ objects.
 -- =====================================================================
--- Dropped in reverse dependency order (views first, then the two persisted
--- tables). Every drop is wrapped so a missing object is a no-op: the whole
--- suite re-installs cleanly whether or not a prior install exists.
+-- Drops the views (reverse dependency order) and the two ESM types. The
+-- persisted tables stay (see the NOTE below). Every drop is wrapped so a
+-- missing object is a no-op: the whole suite re-installs cleanly whether or
+-- not a prior install exists.
 --
 -- OML mining models (schema objects created by ml/cap_forecast_ml) are NOT
 -- dropped here -- they are owned by the ML package and removed by
@@ -21,6 +22,13 @@ DECLARE
     -- OR REPLACE handles order on install -- but keeps DBA_DEPENDENCIES clean).
     TYPE name_list IS TABLE OF VARCHAR2(30);
     v_views name_list := name_list(
+        'CAPR_FORECAST_ACCURACY',
+        'CAPR_WEEKLY_DIGEST',
+        'CAPR_FIT_HISTORY',
+        'CAPR_COVERAGE',
+        'CAPR_RUNS',
+        'CAPR_ALERT_EVENTS',
+        'CAPR_ALERTS_LATEST',
         'CAPR_ALERTS',
         'CAPR_FORECAST_POINTS',
         'CAPR_BACKTEST',
@@ -92,13 +100,15 @@ BEGIN
         END;
     END LOOP;
 
-    -- NOTE: the three PERSISTED tables (CAP_CONFIG, CAP_TBSPC_OVERRIDE,
-    -- CAP_ML_MODEL) are deliberately NOT dropped here. A re-install must preserve
+    -- NOTE: the PERSISTED tables are deliberately NOT dropped here: CAP_CONFIG,
+    -- CAP_TBSPC_OVERRIDE, CAP_ML_MODEL and the results layer's CAP_RUN,
+    -- CAP_FIT_HIST, CAP_ALERT_STATE, CAP_ALERT_EVENT. A re-install must preserve
     -- operator config overrides, the hand-set tablespace limits / exclusions
-    -- (M9.5) and the trained-model registry (05_config / 50_ml recreate them
-    -- idempotently and MERGE-seed only missing keys). Dropping CAP_ML_MODEL would
-    -- orphan the OML models (drop_all needs the registry to find them). Full
-    -- teardown lives in uninstall.sql.
+    -- (M9.5), the trained-model registry and the run history, alert state and
+    -- acks (05_config / 50_ml / 60_results recreate them idempotently).
+    -- Dropping CAP_ML_MODEL would orphan the OML models (drop_all needs the
+    -- registry to find them). The CAP_RESULTS package is replaced by ddl/60.
+    -- Full teardown lives in uninstall.sql.
 
     -- The two SQL types backing CAPF_ESM_FORECAST. FORCE because the
     -- cap_forecast_ml package (get_forecast RETURN cap_esm_tab) depends on them

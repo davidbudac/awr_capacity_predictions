@@ -352,14 +352,22 @@ LEFT   JOIN capr_container c
 --              CPU_SHIFT (M10.3) a flagged sustained level shift, UP = WARN,
 --              DOWN = INFO; capa_cpu_shift holds only the current state.
 --              DATA_STALE   the dbid's newest AWR snapshot is stale_hours or
---              more old (CAPR_FRESHNESS, the one SYSDATE test), WARN.
+--              more old (CAPR_FRESHNESS, the one SYSDATE test), WARN. A dbid
+--              data_stale_max_days or more old is retired: no alert, it shows
+--              in CAPR_COVERAGE (ddl/60) instead.
 --              MODEL_HEALTH Tier 2 FORECAST models per container: WARN when
 --              any failed its last build, INFO when none failed but some are
 --              stale. No registry rows, no row: a Tier 1 install stays silent.
 --              TBSPC_ANOM / CPU_ANOM / DBCPU_ANOM / SERIES_ANOM: the alerting
 --              CAPR_ANOMALIES rows (alert_modes_<family> enables the mode and
---              the day lies within anomaly_report_days), one row per (series,
---              day, baseline_mode); HIGH = WARN, LOW = INFO.
+--              the day lies within anomaly_report_days), one row per EPISODE:
+--              a run of consecutive flagged days of one (series,
+--              baseline_mode). day_dt, value, threshold and alert_key are the
+--              last day's; HIGH = WARN, LOW = INFO, the worst day wins. While
+--              CAPA_CPU_SHIFT reports UP / DOWN for a CPU series, its flagged
+--              days inside the shift's recent window are INFO and the message
+--              ends ' (level shift active)': the CPU_SHIFT row is the one
+--              alert for that step.
 --   value, unit       the number that crossed (DAYS, PCT, HOURS, COUNT, BYTES,
 --                     GIB)
 --   threshold         the level it crossed: on the forecast kinds the CRIT
@@ -381,6 +389,10 @@ LEFT   JOIN capr_container c
 --                     none): unique per ROW, so it changes with day_dt
 --   state_key         kind|dbid|con_dbid|series_key|mode: stable across days,
 --                     the key to track one issue from poll to poll
+--   first_day, n_days, max_z
+--                     anomaly kinds only (NULL elsewhere): the episode's first
+--                     day, its length in days (day_dt - first_day + 1) and the
+--                     robust z of its most extreme day (NULL = off-scale)
 -- So a poller can key, de-duplicate and alarm without parsing message.
 -- db_pdb resolves through CAPR_CONTAINER; unknown containers degrade to the
 -- raw con_dbid string.
@@ -400,7 +412,10 @@ WITH alerts AS (
                CAST(NULL AS VARCHAR2(12)) AS baseline_mode,
                s.direction,
                s.alarm_threshold,
-               s.is_current
+               s.is_current,
+               CAST(NULL AS DATE)   AS first_day,
+               CAST(NULL AS NUMBER) AS n_days,
+               CAST(NULL AS NUMBER) AS max_z
         FROM   capr_severity s
         WHERE  s.sev <> 'OK'
         UNION ALL
@@ -427,7 +442,8 @@ WITH alerts AS (
                NULL,
                'ABS',
                s.threshold_pct,
-               'Y'
+               'Y',
+               NULL, NULL, NULL
         FROM   capa_cpu_shift s
         WHERE  s.shift_flag IS NOT NULL
         UNION ALL
@@ -448,9 +464,12 @@ WITH alerts AS (
                NULL,
                'GE',
                f.stale_hours,
-               'Y'
+               'Y',
+               NULL, NULL, NULL
         FROM   capr_freshness f
+        CROSS  JOIN cap_cfg cfg
         WHERE  f.is_stale = 'Y'
+          AND  f.age_hours < cfg.data_stale_max_days * 24
         UNION ALL
         -- ---- MODEL_HEALTH: Tier 2 training that failed or went stale. The
         -- newest error comes straight from the registry (CAPF_ESM_HEALTH
@@ -472,7 +491,8 @@ WITH alerts AS (
                NULL,
                'GE',
                1,
-               'Y'
+               'Y',
+               NULL, NULL, NULL
         FROM   capf_esm_health_summary h
         LEFT   JOIN (SELECT dbid, con_dbid,
                             MAX(last_error) KEEP (DENSE_RANK LAST ORDER BY failed_at NULLS FIRST) AS last_error
@@ -483,36 +503,86 @@ WITH alerts AS (
         WHERE  h.n_failed > 0 OR h.n_stale > 0
         UNION ALL
         -- ---- TBSPC_ANOM / CPU_ANOM / DBCPU_ANOM / SERIES_ANOM (M15): the
-        -- alerting rows of CAPR_ANOMALIES, one per (series, day, baseline
-        -- mode). An HOUR_OF_WEEK day carries its worst hour (largest |z|,
-        -- earliest on a tie) and says how many hours flagged; it is a WARN
-        -- when any of them is. threshold = the bound crossed.
-        SELECT CASE WHEN x.day_rank = 2 THEN 'WARN' ELSE 'INFO' END,
-               x.alert_kind,
-               x.dbid, x.con_dbid,
-               x.series,
-               x.obs_day,
-               x.value,
-               x.expected + SIGN(x.value - x.expected) * x.threshold,
-               CASE x.unit WHEN 'bytes_per_day' THEN 'BYTES' WHEN 'pct' THEN 'PCT'
+        -- alerting rows of CAPR_ANOMALIES. Three steps:
+        --   d  one row per (series, baseline mode, day). An HOUR_OF_WEEK day
+        --      carries its worst hour (largest |z|, earliest on a tie) and
+        --      says how many hours flagged; it is HIGH-ranked when any is.
+        --      The CPU_SHIFT rows of the same read give each CPU series its
+        --      shift window (ts .. obs_day); a flagged day inside it is INFO.
+        --   g  gaps and islands: obs_day minus its row number is constant
+        --      along a run of consecutive days, so it numbers the episode.
+        --   e  one row per episode, carrying its last day.
+        SELECT CASE WHEN e.ep_rank = 2 THEN 'WARN' ELSE 'INFO' END,
+               e.alert_kind,
+               e.dbid, e.con_dbid,
+               e.series,
+               e.obs_day,
+               e.value,
+               e.expected + SIGN(e.value - e.expected) * e.threshold,
+               CASE e.unit WHEN 'bytes_per_day' THEN 'BYTES' WHEN 'pct' THEN 'PCT'
                            WHEN 'count' THEN 'COUNT' ELSE 'GIB' END,
-               x.message || CASE WHEN x.n_events > 1
-                                 THEN '; ' || x.n_events || ' hours flagged that day' END,
-               x.baseline_mode,
-               CASE WHEN x.anomaly_flag = 'LOW' THEN 'LE' ELSE 'GE' END,
-               x.expected + SIGN(x.value - x.expected) * x.threshold,
-               'Y'
-        FROM  (SELECT a.*,
-                      ROW_NUMBER() OVER (PARTITION BY a.alert_kind, a.dbid, a.con_dbid, a.series,
-                                                      a.baseline_mode, a.obs_day
-                                         ORDER BY ABS(a.z) DESC NULLS LAST, a.ts) AS rn,
-                      COUNT(*)        OVER (PARTITION BY a.alert_kind, a.dbid, a.con_dbid, a.series,
-                                                     a.baseline_mode, a.obs_day)  AS n_events,
-                      MIN(a.sev_rank) OVER (PARTITION BY a.alert_kind, a.dbid, a.con_dbid, a.series,
-                                                     a.baseline_mode, a.obs_day)  AS day_rank
-               FROM   capr_anomalies a
-               WHERE  a.alerting = 'Y' AND a.anomaly_kind <> 'CPU_SHIFT') x
-        WHERE  x.rn = 1
+               CASE WHEN e.n_days > 1
+                    THEN e.n_days || ' consecutive days, latest ' || TO_CHAR(e.obs_day, 'YYYY-MM-DD')
+                         || ', peak robust z ' || NVL(TO_CHAR(e.max_z, 'FMS999999990.0'), 'off-scale')
+                         || ': ' END
+               || e.message
+               || CASE WHEN e.n_events > 1
+                       THEN '; ' || e.n_events || ' hours flagged that day' END
+               || CASE WHEN e.ep_shift = 1 THEN ' (level shift active)' END,
+               e.baseline_mode,
+               CASE WHEN e.anomaly_flag = 'LOW' THEN 'LE' ELSE 'GE' END,
+               e.expected + SIGN(e.value - e.expected) * e.threshold,
+               'Y',
+               e.first_day,
+               e.n_days,
+               e.max_z
+        FROM  (SELECT g.*,
+                      MIN(g.obs_day) OVER (PARTITION BY g.alert_kind, g.dbid, g.con_dbid, g.series,
+                                                        g.baseline_mode, g.grp)           AS first_day,
+                      COUNT(*)       OVER (PARTITION BY g.alert_kind, g.dbid, g.con_dbid, g.series,
+                                                        g.baseline_mode, g.grp)           AS n_days,
+                      MIN(g.day_sev) OVER (PARTITION BY g.alert_kind, g.dbid, g.con_dbid, g.series,
+                                                        g.baseline_mode, g.grp)           AS ep_rank,
+                      MAX(g.in_shift) OVER (PARTITION BY g.alert_kind, g.dbid, g.con_dbid, g.series,
+                                                         g.baseline_mode, g.grp)          AS ep_shift,
+                      CASE WHEN COUNT(g.z) OVER (PARTITION BY g.alert_kind, g.dbid, g.con_dbid, g.series,
+                                                              g.baseline_mode, g.grp)
+                              = COUNT(*)   OVER (PARTITION BY g.alert_kind, g.dbid, g.con_dbid, g.series,
+                                                              g.baseline_mode, g.grp)
+                           THEN MAX(g.z) KEEP (DENSE_RANK LAST ORDER BY ABS(g.z))
+                                         OVER (PARTITION BY g.alert_kind, g.dbid, g.con_dbid, g.series,
+                                                            g.baseline_mode, g.grp)
+                      END                                                                 AS max_z,
+                      ROW_NUMBER()   OVER (PARTITION BY g.alert_kind, g.dbid, g.con_dbid, g.series,
+                                                        g.baseline_mode, g.grp
+                                           ORDER BY g.obs_day DESC)                       AS ep_rn
+               FROM  (SELECT d.*,
+                             d.obs_day - ROW_NUMBER() OVER (PARTITION BY d.alert_kind, d.dbid, d.con_dbid,
+                                                                         d.series, d.baseline_mode
+                                                            ORDER BY d.obs_day)           AS grp,
+                             CASE WHEN d.obs_day BETWEEN d.shift_from AND d.shift_to
+                                  THEN 1 ELSE 0 END                                       AS in_shift,
+                             CASE WHEN d.day_rank = 2
+                                   AND NOT (d.obs_day BETWEEN NVL(d.shift_from, d.obs_day + 1)
+                                                          AND NVL(d.shift_to, d.obs_day - 1))
+                                  THEN 2 ELSE 3 END                                       AS day_sev
+                      FROM  (SELECT a.*,
+                                    ROW_NUMBER() OVER (PARTITION BY a.alert_kind, a.dbid, a.con_dbid, a.series,
+                                                                    a.baseline_mode, a.obs_day
+                                                       ORDER BY ABS(a.z) DESC NULLS LAST, a.ts) AS rn,
+                                    COUNT(*)        OVER (PARTITION BY a.alert_kind, a.dbid, a.con_dbid, a.series,
+                                                                   a.baseline_mode, a.obs_day)  AS n_events,
+                                    MIN(a.sev_rank) OVER (PARTITION BY a.alert_kind, a.dbid, a.con_dbid, a.series,
+                                                                   a.baseline_mode, a.obs_day)  AS day_rank,
+                                    MAX(CASE WHEN a.anomaly_kind = 'CPU_SHIFT' THEN TRUNC(a.ts) END)
+                                                    OVER (PARTITION BY a.dbid, a.con_dbid, a.kind, a.series) AS shift_from,
+                                    MAX(CASE WHEN a.anomaly_kind = 'CPU_SHIFT' THEN a.obs_day END)
+                                                    OVER (PARTITION BY a.dbid, a.con_dbid, a.kind, a.series) AS shift_to
+                             FROM   capr_anomalies a
+                             WHERE  a.alerting = 'Y') d
+                      WHERE  d.rn = 1 AND d.anomaly_kind <> 'CPU_SHIFT') g
+              ) e
+        WHERE e.ep_rn = 1
      )
 SELECT a.severity,
        CASE a.severity WHEN 'CRIT' THEN 1 WHEN 'WARN' THEN 2 ELSE 3 END AS sev_rank,
@@ -533,7 +603,10 @@ SELECT a.severity,
          || NVL(a.baseline_mode, '-')                                      AS state_key,
        a.direction,
        a.alarm_threshold,
-       a.is_current
+       a.is_current,
+       a.first_day,
+       a.n_days,
+       a.max_z
 FROM   alerts a
 LEFT   JOIN capr_container c
   ON   c.dbid = a.dbid AND c.con_dbid = a.con_dbid;

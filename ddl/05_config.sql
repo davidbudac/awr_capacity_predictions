@@ -1,8 +1,9 @@
 --
 -- ddl/05_config.sql -- CAP_CONFIG name/value tuning table + idempotent seed.
 -- =====================================================================
--- One of only three persisted tables in the suite (the others are
--- CAP_TBSPC_OVERRIDE, created at the bottom of this file, and CAP_ML_MODEL).
+-- An operator table, like CAP_TBSPC_OVERRIDE (bottom of this file): both
+-- survive every re-install. The suite's other persisted tables are the
+-- CAP_ML_MODEL registry (ddl/50) and the results cache (ddl/60).
 -- Every analytic view reads its knobs through the one-row view CAP_CFG
 -- (below), so tuning the toolkit never requires editing SQL -- just UPDATE a
 -- value.
@@ -127,6 +128,10 @@ USING (
     UNION ALL SELECT 'alert_modes_cpu',         2,        'M15 BITMASK of baseline modes raising CPU_ANOM and DBCPU_ANOM: 1=TRAILING 2=SAME_DOW 4=HOUR_OF_WEEK, 0=none.' FROM dual
     UNION ALL SELECT 'alert_modes_series',      1,        'M15 BITMASK of baseline modes raising SERIES_ANOM: 1=TRAILING 2=SAME_DOW (4 has no effect: day grain only).' FROM dual
     UNION ALL SELECT 'stale_hours',            36,        'CAPR_ALERTS raises DATA_STALE for a dbid whose newest AWR snapshot ended at least this many hours before SYSDATE (the dead-man check).' FROM dual
+    UNION ALL SELECT 'data_stale_max_days',    14,        'A dbid whose newest AWR snapshot is at least this many days old is retired: no DATA_STALE alert, listed in CAPR_COVERAGE with retired = Y.' FROM dual
+    UNION ALL SELECT 'resolve_grace_runs',      2,        'Results layer: consecutive refresh runs an OPEN alert must be missing from CAPR_ALERTS before CAP_RESULTS.refresh marks it RESOLVED.' FROM dual
+    UNION ALL SELECT 'refresh_stale_hours',    36,        'Results layer: CAPR_RUNS.stale_run = Y when the last OK live refresh run ended at least this many hours ago, or none ever did.' FROM dual
+    UNION ALL SELECT 'digest_days',             7,        'Results layer: CAPR_WEEKLY_DIGEST compares the latest run with the latest run whose as_of_day is at least this many days earlier.' FROM dual
 ) s
 ON (c.cfg_name = s.cfg_name)
 WHEN MATCHED THEN
@@ -200,7 +205,11 @@ SELECT MAX(CASE WHEN cfg_name = 'train_days'             THEN cfg_value END) AS 
        MAX(CASE WHEN cfg_name = 'alert_modes_tbspc'      THEN cfg_value END) AS alert_modes_tbspc,
        MAX(CASE WHEN cfg_name = 'alert_modes_cpu'        THEN cfg_value END) AS alert_modes_cpu,
        MAX(CASE WHEN cfg_name = 'alert_modes_series'     THEN cfg_value END) AS alert_modes_series,
-       MAX(CASE WHEN cfg_name = 'stale_hours'            THEN cfg_value END) AS stale_hours
+       MAX(CASE WHEN cfg_name = 'stale_hours'            THEN cfg_value END) AS stale_hours,
+       MAX(CASE WHEN cfg_name = 'data_stale_max_days'    THEN cfg_value END) AS data_stale_max_days,
+       MAX(CASE WHEN cfg_name = 'resolve_grace_runs'     THEN cfg_value END) AS resolve_grace_runs,
+       MAX(CASE WHEN cfg_name = 'refresh_stale_hours'    THEN cfg_value END) AS refresh_stale_hours,
+       MAX(CASE WHEN cfg_name = 'digest_days'            THEN cfg_value END) AS digest_days
 FROM   cap_config;
 
 COMMENT ON TABLE cap_cfg IS 'One row, one NUMBER column per CAP_CONFIG knob (column name = knob name). NULL = the knob row is missing.';
@@ -227,7 +236,9 @@ WITH u AS (
                cpu_deseason, suite_version,
                cpu_min_mad_pct_hour, hour_gap_ratio,
                series_floor_count, series_floor_gib, alert_modes_tbspc,
-               alert_modes_cpu, alert_modes_series, stale_hours))
+               alert_modes_cpu, alert_modes_series, stale_hours,
+               data_stale_max_days, resolve_grace_runs, refresh_stale_hours,
+               digest_days))
      ),
      r AS (
         SELECT u.knob, u.value,
@@ -269,6 +280,14 @@ WITH u AS (
                         THEN 'must be between 1 and 100 (percent of a day)'
                    WHEN u.knob IN ('stale_days', 'stale_hours') AND u.value < 0
                         THEN 'must be >= 0'
+                   WHEN u.knob = 'data_stale_max_days' AND u.value * 24 <= c.stale_hours
+                        THEN 'must be more than stale_hours (' || c.stale_hours || ') / 24, or DATA_STALE can never fire'
+                   WHEN u.knob = 'resolve_grace_runs'  AND (u.value <> TRUNC(u.value) OR u.value < 1)
+                        THEN 'must be a whole number >= 1'
+                   WHEN u.knob = 'refresh_stale_hours' AND u.value <= 0
+                        THEN 'must be > 0'
+                   WHEN u.knob = 'digest_days'         AND (u.value <> TRUNC(u.value) OR u.value < 1)
+                        THEN 'must be a whole number >= 1'
                    WHEN u.knob = 'cyclic_min_cliffs'   AND (u.value <> TRUNC(u.value) OR u.value = 1 OR u.value < 0)
                         THEN 'must be 0 (off) or a whole number >= 2: one cliff is a purge, the M9.3 reset handles it'
                    WHEN u.knob = 'cpu_quality_gate'    AND u.value NOT IN (0, 1)
@@ -294,8 +313,7 @@ COMMENT ON TABLE cap_cfg_check IS 'One row per knob: value, status OK / MISSING 
 -- =====================================================================
 -- CAP_TBSPC_OVERRIDE (M9.5) -- per-tablespace limit overrides / exclusions.
 -- =====================================================================
--- The THIRD persisted table (with CAP_CONFIG and CAP_ML_MODEL). Operator data,
--- so ddl/00_drop.sql leaves it alone and a re-install preserves it; only
+-- Operator data, like CAP_CONFIG, so ddl/00_drop.sql leaves it alone and a re-install preserves it; only
 -- uninstall.sql drops it.
 --
 -- Why it exists: the autoextend `maxsize` recorded in AWR is a promise the

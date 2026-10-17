@@ -11,7 +11,9 @@
 --   FIX_LINEAR   : exactly 10 MiB/day growth, 8 KiB blocks, 50 GiB maxsize.
 --   FIX_SPIKE    :  5 MiB/day + a one-time +2 GiB step at day 110.
 --   FIX_FLAT     : constant usage at 66.7% of allocation (quality FLAT).
---   FIX_GAP      : 60 MiB/day with a 3-day AWR gap (rate normalization).
+--   FIX_GAP      : 60 MiB/day with a 3-day AWR gap (rate normalization),
+--                  plus a 3-day burst of +256 MiB a day on days 115..117
+--                  (one 3-day TBSPC_ANOM episode in CAPR_ALERTS).
 --   FIX_NEARFULL : constant at exactly 97.0% of maxsize (FLAT quality but
 --                  near-full NOW -> M7.1 ranking + TBSPC_NEARFULL alert).
 --   FIX_FILLING  : 10 MiB/day against a small maxsize -> days_to_full = 20
@@ -168,6 +170,12 @@ DECLARE
     c_bs     CONSTANT NUMBER := 8192;
     c_restart CONSTANT PLS_INTEGER := 60;
     c_spike  CONSTANT PLS_INTEGER := 110;
+    -- FIX_GAP's burst: +32768 blocks (256 MiB) on each of the 3 days
+    -- c_burst .. c_burst + 2. Inside the 14-day alert window, after the
+    -- spike, and 2.5x the 100 MiB anomaly floor while 0.25 GiB stays under
+    -- DB_SIZE_GB's 0.5 GiB series floor, so only the tablespace flags.
+    c_burst  CONSTANT PLS_INTEGER := 115;
+    c_burstb CONSTANT NUMBER      := 32768;
     -- M9.3: FIX_PURGE's cliff. Day 90 of 120 leaves 31 post-purge days --
     -- comfortably above min_train_days (14), and 30 days back from the last
     -- day, i.e. OUTSIDE the 14-day anomaly_report_days alert window.
@@ -551,7 +559,8 @@ BEGIN
         -- gap normalization the 240 MiB raw delta would exceed the 100 MiB floor
         -- and false-flag. Exercises the CAPD_TBSPC_DELTA day_gap / rate fix.
         IF i NOT BETWEEN 100 AND 102 THEN
-            v_used := 7680 * i + 6400;
+            v_used := 7680 * i + 6400
+                      + c_burstb * LEAST(GREATEST(i - c_burst + 1, 0), 3);
             INSERT INTO cap_fixture_tbspc_usage
             VALUES (c_dbid, c_con, 2001 + 2 * i, 13, v_used, v_max50g, v_used);
         END IF;
@@ -660,6 +669,17 @@ BEGIN
     INSERT INTO cap_fixture_meta (mkey, dval) VALUES ('BASE_DAY',    v_base);
     INSERT INTO cap_fixture_meta (mkey, dval) VALUES ('LAST_DAY',    v_base + c_nd);
     INSERT INTO cap_fixture_meta (mkey, dval) VALUES ('SPIKE_DAY',   v_base + c_spike);
+    -- Results layer: FIX_GAP's burst episode and the robust z of its days
+    -- (dev / (abs_floor_bytes / mad_k): every baseline there is flat, so
+    -- the floor sets eff_sigma), and FIX_SPIKE's single day for contrast.
+    INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('BURST_FIRST', v_base + c_burst, c_burst);
+    INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('BURST_LAST',  v_base + c_burst + 2, c_burst + 2);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('BURST_DAYS', 3);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('BURST_Z',    c_burstb * c_bs / (104857600 / 3));  -- 7.68
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SPIKE_Z',    262144 * c_bs / (104857600 / 3));    -- 61.44
+    -- FIX_LINEAR seen 7 days ago (last row i = c_nd - 7): 7 more days of headroom.
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('LINEAR_DTF7',
+        FLOOR((c_50g - (1280 * (c_nd - 7) + 12800) * c_bs) / 10485760));                         -- 4997
     INSERT INTO cap_fixture_meta (mkey, dval) VALUES ('RESTART_DAY', v_base + c_restart);
     INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('INJECTED_TUE', v_base + v_inj, v_inj);
     INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('PROBE_DAY',    v_base + v_probe, v_probe);
@@ -854,6 +874,24 @@ BEGIN
         END LOOP;
         INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_BT_MAPE', mape / 28 * 100);
         INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_BT_BIAS', bias / 28 * 100);
+
+        -- Results layer (CAPR_FORECAST_ACCURACY): the forecast a run issued 7
+        -- days ago, fitted on the 90 days i = c_nd - 96 .. c_nd - 7 and
+        -- anchored at zz(c_nd - 7), against today's zz(c_nd). run_test.sql
+        -- issues it by hiding FIX_ZIGZAG's last 7 days around a backdated
+        -- cap_results.refresh.
+        n := 0; sx := 0; sy := 0; sxx := 0; sxy := 0;
+        FOR i IN (c_nd - 96) .. (c_nd - 7) LOOP
+            y := zz(i);
+            n := n + 1; sx := sx + i; sy := sy + y;
+            sxx := sxx + i * i; sxy := sxy + i * y;
+        END LOOP;
+        bxx   := sxx - sx * sx / n;
+        bxy   := sxy - sx * sy / n;
+        slope := bxy / bxx;
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_ACC7_SLOPE', slope);
+        y := zz(c_nd) - (zz(c_nd - 7) + 7 * slope);    -- PLS-00231: no local function in SQL
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_ACC7_ERR', y);
     END;
 
     -- ---- M9.2 Theil-Sen expectation for FIX_ZIGZAG -----------------------

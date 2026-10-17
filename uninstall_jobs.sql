@@ -1,7 +1,7 @@
 --
 -- uninstall_jobs.sql -- remove everything install_jobs.sql created.
 -- =====================================================================
--- Drops the two DBMS_SCHEDULER jobs and the CAP_REPORT_SPOOL procedure from
+-- Drops the three DBMS_SCHEDULER jobs and the CAP_REPORT_SPOOL procedure from
 -- the current schema. Idempotent: safe against a partial install or a schema
 -- that never had the jobs. Touches nothing else -- the suite's views, tables
 -- and OML models are untouched (use uninstall.sql for those).
@@ -31,6 +31,7 @@ DECLARE
             END IF;
     END drop_job;
 BEGIN
+    drop_job('CAP_REFRESH_JOB');
     drop_job('CAP_ML_RETRAIN');
     drop_job('CAP_REPORT_SPOOL_JOB');
 END;

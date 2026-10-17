@@ -3,7 +3,7 @@
 -- =====================================================================
 -- Removes the opt-in scheduler jobs first (uninstall_jobs.sql), then the OML
 -- models (via the package, which needs the registry), then all views, then
--- the three persisted tables, the two types and the package. Idempotent: safe
+-- the persisted tables, the two types and the two packages. Idempotent: safe
 -- to run against a partial or already-removed install. "Does not exist" is
 -- silent; any other error is printed and the script carries on. The last
 -- block counts what is left in the current schema (0 expected).
@@ -45,8 +45,8 @@ SET DEFINE OFF
 SET SERVEROUTPUT ON SIZE UNLIMITED FORMAT WRAPPED
 SET FEEDBACK OFF
 
-PROMPT -- dropping persisted tables, types and package ...
--- The three persisted tables outlive 00_drop (which preserves them across a
+PROMPT -- dropping persisted tables, types and packages ...
+-- The persisted tables outlive 00_drop (which preserves them across a
 -- re-install). A true uninstall removes them here.
 DECLARE
     PROCEDURE drop_it(p_ddl IN VARCHAR2, p_gone IN PLS_INTEGER) IS
@@ -61,6 +61,11 @@ DECLARE
     END drop_it;
 BEGIN
     -- ORA-00942 table does not exist, ORA-04043 object does not exist.
+    drop_it('DROP PACKAGE cap_results',            -4043);
+    drop_it('DROP TABLE cap_alert_event PURGE',    -942);
+    drop_it('DROP TABLE cap_alert_state PURGE',    -942);
+    drop_it('DROP TABLE cap_fit_hist PURGE',       -942);
+    drop_it('DROP TABLE cap_run PURGE',            -942);
     drop_it('DROP TABLE cap_ml_model PURGE',       -942);
     drop_it('DROP TABLE cap_tbspc_override PURGE', -942);
     drop_it('DROP TABLE cap_config PURGE',         -942);

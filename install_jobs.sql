@@ -2,8 +2,16 @@
 -- install_jobs.sql -- OPT-IN DBMS_SCHEDULER automation for the suite.
 -- =====================================================================
 -- NOT part of install.sql. Run it separately, in the schema that owns the
--- suite, only if you want the two background jobs below:
+-- suite, only if you want the three background jobs below:
 --
+--   CAP_REFRESH_JOB   daily (01:30) cap_results.refresh -- snapshot CAPR_FIT
+--                     and CAPR_ALERTS into the results tables (CAP_RUN,
+--                     CAP_FIT_HIST, CAP_ALERT_STATE, CAP_ALERT_EVENT), so
+--                     pollers get NEW / RESOLVED events and the reports and
+--                     CAPR_ALERTS_LATEST read the last run instead of the
+--                     view chain. The schedule is the refresh_interval
+--                     DEFINE. A failed refresh ends FAILED and leaves a
+--                     FAILED row in CAP_RUN with the error stack.
 --   CAP_ML_RETRAIN    daily (02:00) cap_forecast_ml.train_all -- refresh
 --                     the Tier 2 OML ESM models against the latest AWR days.
 --                     Needs CREATE MINING MODEL. The schedule is the
@@ -16,7 +24,10 @@
 --                     to build; the reason is in CAPF_ESM_HEALTH.last_error.
 --   CAP_REPORT_SPOOL_JOB
 --                     daily (03:00) cap_report_spool(<dir>) -- writes an
---                     alert-snapshot text file into a directory object.
+--                     alert-snapshot text file into a directory object. With
+--                     a refresh run on record it lists the OPEN, not acked
+--                     alerts of CAPR_ALERTS_LATEST plus the last run's
+--                     events; with none it evaluates CAPR_ALERTS live.
 --
 -- Why the "_JOB" suffix: DBMS_SCHEDULER jobs live in the SAME schema
 -- namespace as procedures, so a job called CAP_REPORT_SPOOL beside a
@@ -24,15 +35,15 @@
 -- 19c). The procedure keeps the plain name -- it is the thing you call by
 -- hand -- and the job takes the suffix.
 --
--- BOTH JOBS ARE CREATED DISABLED. Nothing runs until you enable them (the
+-- ALL JOBS ARE CREATED DISABLED. Nothing runs until you enable them (the
 -- closing PROMPT block shows how). Re-running this script is idempotent: it
 -- drops the jobs if they exist, then recreates them, again disabled.
 --
 -- Why the spool job is not "the report": SQL*Plus spooling cannot happen
 -- inside a scheduler PL/SQL job -- there is no SQL*Plus there. So the job
 -- writes a POLLABLE SNAPSHOT, not the full report: a header (timestamp,
--- database, CRIT/WARN/INFO counts) plus one pipe-delimited line per
--- CAPR_ALERTS row. For the full formatted report keep using
+-- database, data freshness, last refresh run, CRIT/WARN/INFO counts) plus
+-- one pipe-delimited line per alert. For the full formatted report keep using
 -- `sqlplus ... @report/report.sql` from cron / the OS scheduler.
 --
 -- Usage:
@@ -40,14 +51,16 @@
 --   SQL> DEFINE report_dir = 'MY_DIR'    -- optional; default CAP_REPORTS
 --   SQL> DEFINE retrain_interval = 'FREQ=WEEKLY;BYDAY=SUN;BYHOUR=2'
 --                                        -- optional; default daily 02:00
+--   SQL> DEFINE refresh_interval = 'FREQ=HOURLY;BYMINUTE=15'
+--                                        -- optional; default daily 01:30
 --   SQL> @install_jobs.sql
 --
 -- The directory object is NOT created here (that needs CREATE ANY DIRECTORY
 -- and a path decision only you can make). The script checks ALL_DIRECTORIES
 -- and prints the exact DDL if it is missing.
 --
--- Read-only against AWR, as ever: the jobs only read CAPR_ALERTS / the CAPD_*
--- series and write to CAP_ML_MODEL + the OS file.
+-- Read-only against AWR, as ever: the jobs only read the CAP views and write
+-- to CAP_ML_MODEL, the results tables and the OS file.
 --
 -- Remove everything with @uninstall_jobs.sql.
 --
@@ -71,6 +84,9 @@ SELECT UPPER(NVL('&report_dir', 'CAP_REPORTS')) AS report_dir FROM dual;
 COLUMN retrain_interval NEW_VALUE retrain_interval NOPRINT
 SELECT CAST(NULL AS VARCHAR2(200)) AS retrain_interval FROM dual WHERE 1 = 0;
 SELECT NVL('&retrain_interval', 'FREQ=DAILY;BYHOUR=2;BYMINUTE=0;BYSECOND=0') AS retrain_interval FROM dual;
+COLUMN refresh_interval NEW_VALUE refresh_interval NOPRINT
+SELECT CAST(NULL AS VARCHAR2(200)) AS refresh_interval FROM dual WHERE 1 = 0;
+SELECT NVL('&refresh_interval', 'FREQ=DAILY;BYHOUR=1;BYMINUTE=30;BYSECOND=0') AS refresh_interval FROM dual;
 SET TERMOUT ON
 
 PROMPT
@@ -79,6 +95,7 @@ PROMPT  AWR Capacity Predictions -- scheduler jobs (opt-in)
 PROMPT ============================================================
 PROMPT  report_dir = &report_dir  (directory object for the alert snapshot)
 PROMPT  retrain    = &retrain_interval  (CAP_ML_RETRAIN schedule)
+PROMPT  refresh    = &refresh_interval  (CAP_REFRESH_JOB schedule)
 PROMPT
 
 -- --------------------------------------------------------------------
@@ -121,24 +138,54 @@ AS
     -- Pollable alert snapshot, written to <p_dir>/cap_alerts.txt (overwritten
     -- on every run, so a poller can just read the one stable file name).
     -- NOT the full capacity report -- that needs SQL*Plus formatting; this is
-    -- the CAPR_ALERTS view flattened to one line per alert plus a header.
+    -- one line per alert plus a header.
     -- Format: SEVERITY|KIND|DB_PDB|SERIES_KEY|DAY|VALUE|THRESHOLD|UNIT|MESSAGE
     -- The header says how fresh the data is (one "data through" line per dbid,
-    -- from CAPR_FRESHNESS) and DATA_STALE rows come first: a stalled AWR
-    -- would otherwise read as a quiet system.
+    -- from CAPR_FRESHNESS) and which refresh run the list comes from.
+    -- With an OK live refresh run on record the alerts are the OPEN, not
+    -- acked states of CAPR_ALERTS_LATEST (the last run's view; acked ones
+    -- are left out) and the run's events follow as '#event|' lines; with
+    -- none they are CAPR_ALERTS, evaluated now. DATA_STALE rows come first:
+    -- a stalled AWR would otherwise read as a quiet system.
     c_file  CONSTANT VARCHAR2(30) := 'cap_alerts.txt';
     l_f     UTL_FILE.FILE_TYPE;
     l_crit  PLS_INTEGER := 0;
     l_warn  PLS_INTEGER := 0;
     l_info  PLS_INTEGER := 0;
     l_tot   PLS_INTEGER := 0;
+    l_run   NUMBER;
+
+    PROCEDURE alert_line(p_sev VARCHAR2, p_kind VARCHAR2, p_db VARCHAR2, p_key VARCHAR2,
+                         p_day DATE, p_val NUMBER, p_thr NUMBER, p_unit VARCHAR2, p_msg VARCHAR2) IS
+    BEGIN
+        UTL_FILE.PUT_LINE(l_f,
+            p_sev                                   || '|' ||
+            p_kind                                  || '|' ||
+            NVL(p_db, '-')                          || '|' ||
+            NVL(p_key, '-')                         || '|' ||
+            NVL(TO_CHAR(p_day, 'YYYY-MM-DD'), '-')  || '|' ||
+            NVL(TO_CHAR(ROUND(p_val, 2)), '-')      || '|' ||
+            NVL(TO_CHAR(ROUND(p_thr, 2)), '-')      || '|' ||
+            NVL(p_unit, '-')                        || '|' ||
+            NVL(p_msg, '-'));
+    END alert_line;
 BEGIN
-    SELECT COUNT(CASE WHEN severity = 'CRIT' THEN 1 END),
-           COUNT(CASE WHEN severity = 'WARN' THEN 1 END),
-           COUNT(CASE WHEN severity = 'INFO' THEN 1 END),
-           COUNT(*)
-    INTO   l_crit, l_warn, l_info, l_tot
-    FROM   capr_alerts;
+    SELECT MAX(run_id) INTO l_run FROM cap_run WHERE status = 'OK' AND backdated = 'N';
+    IF l_run IS NOT NULL THEN
+        SELECT COUNT(CASE WHEN severity = 'CRIT' THEN 1 END),
+               COUNT(CASE WHEN severity = 'WARN' THEN 1 END),
+               COUNT(CASE WHEN severity = 'INFO' THEN 1 END),
+               COUNT(*)
+        INTO   l_crit, l_warn, l_info, l_tot
+        FROM   capr_alerts_latest;
+    ELSE
+        SELECT COUNT(CASE WHEN severity = 'CRIT' THEN 1 END),
+               COUNT(CASE WHEN severity = 'WARN' THEN 1 END),
+               COUNT(CASE WHEN severity = 'INFO' THEN 1 END),
+               COUNT(*)
+        INTO   l_crit, l_warn, l_info, l_tot
+        FROM   capr_alerts;
+    END IF;
 
     l_f := UTL_FILE.FOPEN(UPPER(p_dir), c_file, 'w', 32767);
 
@@ -156,31 +203,62 @@ BEGIN
                                || TO_CHAR(d.age_hours, 'FM9999990.0') || ' h ago'
                                || CASE WHEN d.is_stale = 'Y' THEN ' (STALE)' END);
     END LOOP;
+    IF l_run IS NULL THEN
+        UTL_FILE.PUT_LINE(l_f, '# refresh   : no refresh run yet (live evaluation of CAPR_ALERTS)');
+    END IF;
+    FOR r IN (SELECT run_id, as_of_day, status, last_ok_age_hours, stale_run, summary, is_last
+              FROM   capr_runs
+              WHERE  is_last = 'Y' OR run_id = l_run
+              ORDER  BY run_id DESC) LOOP
+        UTL_FILE.PUT_LINE(l_f, '# refresh   : ' || CASE WHEN r.is_last = 'Y' THEN 'last ' ELSE 'last OK ' END
+                               || r.summary || ', as of ' || TO_CHAR(r.as_of_day, 'YYYY-MM-DD')
+                               || ', status ' || r.status
+                               || CASE WHEN r.run_id = l_run
+                                       THEN ', ' || TO_CHAR(r.last_ok_age_hours, 'FM9999990.0') || ' h ago' END
+                               || CASE WHEN r.stale_run = 'Y' THEN ' (STALE REFRESH)' END);
+    END LOOP;
     UTL_FILE.PUT_LINE(l_f, '# alerts    : ' || l_tot || ' total  ('
                            || l_crit || ' CRIT, ' || l_warn || ' WARN, '
-                           || l_info || ' INFO)');
+                           || l_info || ' INFO)'
+                           || CASE WHEN l_run IS NOT NULL
+                                   THEN ' open and not acked as of run ' || l_run END);
     UTL_FILE.PUT_LINE(l_f, '# columns   : '
                            || 'SEVERITY|KIND|DB_PDB|SERIES_KEY|DAY|VALUE|THRESHOLD|UNIT|MESSAGE');
     UTL_FILE.PUT_LINE(l_f, '#');
 
     IF l_tot = 0 THEN
         UTL_FILE.PUT_LINE(l_f, 'OK|NONE|-|-|-|-|-|-|No capacity alerts.');
+    ELSIF l_run IS NOT NULL THEN
+        FOR r IN (SELECT severity, kind, db_pdb, series_key, day_dt,
+                         value, threshold, unit, message
+                  FROM   capr_alerts_latest
+                  ORDER  BY CASE kind WHEN 'DATA_STALE' THEN 0 ELSE 1 END,
+                            sev_rank, kind, db_pdb, series_key) LOOP
+            alert_line(r.severity, r.kind, r.db_pdb, r.series_key, r.day_dt,
+                       r.value, r.threshold, r.unit, r.message);
+        END LOOP;
     ELSE
         FOR r IN (SELECT severity, kind, db_pdb, series_key, day_dt,
                          value, threshold, unit, message
                   FROM   capr_alerts
                   ORDER  BY CASE kind WHEN 'DATA_STALE' THEN 0 ELSE 1 END,
                             sev_rank, kind, db_pdb, series_key) LOOP
-            UTL_FILE.PUT_LINE(l_f,
-                r.severity                                  || '|' ||
-                r.kind                                      || '|' ||
-                NVL(r.db_pdb, '-')                          || '|' ||
-                NVL(r.series_key, '-')                       || '|' ||
-                NVL(TO_CHAR(r.day_dt, 'YYYY-MM-DD'), '-')    || '|' ||
-                NVL(TO_CHAR(ROUND(r.value, 2)), '-')         || '|' ||
-                NVL(TO_CHAR(ROUND(r.threshold, 2)), '-')     || '|' ||
-                NVL(r.unit, '-')                             || '|' ||
-                NVL(r.message, '-'));
+            alert_line(r.severity, r.kind, r.db_pdb, r.series_key, r.day_dt,
+                       r.value, r.threshold, r.unit, r.message);
+        END LOOP;
+    END IF;
+
+    IF l_run IS NOT NULL THEN
+        UTL_FILE.PUT_LINE(l_f, '#');
+        UTL_FILE.PUT_LINE(l_f, '# events of run ' || l_run
+                               || ': #event|EVENT|SEVERITY|KIND|DB_PDB|SERIES_KEY|AT|MESSAGE');
+        FOR e IN (SELECT event, severity, kind, db_pdb, series_key, at_time, message
+                  FROM   capr_alert_events
+                  WHERE  run_id = l_run
+                  ORDER  BY event_id) LOOP
+            UTL_FILE.PUT_LINE(l_f, '#event|' || e.event || '|' || e.severity || '|' || e.kind || '|'
+                                   || NVL(e.db_pdb, '-') || '|' || NVL(e.series_key, '-') || '|'
+                                   || TO_CHAR(e.at_time, 'YYYY-MM-DD HH24:MI') || '|' || NVL(e.message, '-'));
         END LOOP;
     END IF;
 
@@ -212,14 +290,14 @@ BEGIN
         DBMS_OUTPUT.PUT_LINE('  [WARN] procedure CAP_REPORT_SPOOL was not created.');
     ELSIF v_status = 'INVALID' THEN
         DBMS_OUTPUT.PUT_LINE('  [WARN] procedure CAP_REPORT_SPOOL is INVALID '
-                             || '(is CAPR_ALERTS installed in this schema?).');
+                             || '(are CAPR_ALERTS and ddl/60 installed in this schema?).');
     ELSE
         DBMS_OUTPUT.PUT_LINE('  [ OK ] procedure CAP_REPORT_SPOOL is VALID.');
     END IF;
 END;
 /
 
-PROMPT -- (re)creating the two jobs, DISABLED ...
+PROMPT -- (re)creating the three jobs, DISABLED ...
 
 -- --------------------------------------------------------------------
 -- Drop-if-exists. ORA-27475 (unknown job) / ORA-27476 (does not exist) are
@@ -237,8 +315,25 @@ DECLARE
             END IF;
     END drop_job;
 BEGIN
+    drop_job('CAP_REFRESH_JOB');
     drop_job('CAP_ML_RETRAIN');
     drop_job('CAP_REPORT_SPOOL_JOB');
+END;
+/
+
+BEGIN
+    -- Results layer: one refresh run per schedule tick. A failure re-raises,
+    -- so the job run reads FAILED in the scheduler log as well as in CAP_RUN.
+    DBMS_SCHEDULER.CREATE_JOB(
+        job_name        => 'CAP_REFRESH_JOB',
+        job_type        => 'PLSQL_BLOCK',
+        job_action      => 'BEGIN cap_results.refresh; END;',
+        start_date      => SYSTIMESTAMP,
+        repeat_interval => '&refresh_interval',
+        enabled         => FALSE,
+        auto_drop       => FALSE,
+        comments        => 'AWR capacity: results layer refresh (cap_results.refresh)');
+    DBMS_OUTPUT.PUT_LINE('  created CAP_REFRESH_JOB   (disabled, &refresh_interval)');
 END;
 /
 
@@ -283,13 +378,14 @@ COLUMN repeat_interval FORMAT A44
 SELECT job_name, enabled, repeat_interval
 FROM   all_scheduler_jobs
 WHERE  owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')
-  AND  job_name IN ('CAP_ML_RETRAIN', 'CAP_REPORT_SPOOL_JOB')
+  AND  job_name IN ('CAP_REFRESH_JOB', 'CAP_ML_RETRAIN', 'CAP_REPORT_SPOOL_JOB')
 ORDER  BY job_name;
 SET FEEDBACK OFF
 
 PROMPT
 PROMPT ============================================================
 PROMPT  Jobs installed, DISABLED. To turn them on:
+PROMPT    EXEC DBMS_SCHEDULER.ENABLE('CAP_REFRESH_JOB')
 PROMPT    EXEC DBMS_SCHEDULER.ENABLE('CAP_ML_RETRAIN')
 PROMPT    EXEC DBMS_SCHEDULER.ENABLE('CAP_REPORT_SPOOL_JOB')
 PROMPT  To run one once, right now:

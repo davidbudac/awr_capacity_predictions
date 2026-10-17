@@ -462,6 +462,10 @@ DECLARE
   v_p95_dts   NUMBER;
   v_p95_q     VARCHAR2(30);
   v_bt_rows   PLS_INTEGER := 0;
+  v_run_line  VARCHAR2(600);       -- CAPR_RUNS: the last refresh run, or none
+  v_cov_line  VARCHAR2(4000);      -- CAPR_COVERAGE summaries, one per dbid
+  v_n_dbid    PLS_INTEGER := 0;
+  v_n_current PLS_INTEGER := 0;    -- dbids not retired (data_stale_max_days)
   v_kind_lbl  VARCHAR2(60);
   v_main      VARCHAR2(1000);
   v_sub       VARCHAR2(1000);
@@ -1710,11 +1714,27 @@ BEGIN
     v_p95_cur := c.cur_val; v_p95_dts := c.days_to_sat; v_p95_q := c.quality;
   END LOOP;
   SELECT COUNT(*) INTO v_bt_rows FROM capr_backtest WHERE esm_mape IS NOT NULL;
+  -- Results layer and coverage lines (ddl/60). Both views answer on an
+  -- install that never ran cap_results.refresh.
+  SELECT NVL(MAX(CASE WHEN r.is_last = 'Y'
+                      THEN 'last ' || r.summary
+                           || CASE WHEN r.stale_run = 'Y'
+                                   THEN ' (stale: no OK refresh run in the last '
+                                        || TO_CHAR(cfg.refresh_stale_hours) || ' h)' END END),
+             'no refresh run yet (live evaluation)')
+    INTO v_run_line
+    FROM capr_runs r CROSS JOIN cap_cfg cfg;
+  SELECT COUNT(*), COUNT(CASE WHEN retired = 'N' THEN 1 END),
+         LISTAGG(summary, ' | ' ON OVERFLOW TRUNCATE) WITHIN GROUP (ORDER BY dbid)
+    INTO v_n_dbid, v_n_current, v_cov_line
+    FROM capr_coverage;
 
   p('<div class="rep-head">');
   p('<div><h1>AWR Capacity Report</h1><div class="id"><b>' || esc(cap_db) || '</b> &middot; ' || esc(cap_host)
     || ' &middot; generated ' || esc(cap_gen) || ' &middot; ' || TO_CHAR(v_hist_days, 'FM999990')
-    || ' days of AWR history &middot; schema ' || esc(cap_user) || '</div></div>');
+    || ' days of AWR history &middot; schema ' || esc(cap_user) || '</div>'
+    || '<div class="id">' || esc(v_run_line) || '</div>'
+    || '<div class="id">' || esc(NVL(v_cov_line, 'coverage: no AWR snapshots in this seam')) || '</div></div>');
   p('<div class="tools"><button class="tbtn" id="themeBtn" type="button" title="Switch light / dark">&#9681; Theme</button>'
     || '<button class="tbtn" type="button" onclick="window.print()">&#9113; Print</button></div>');
   p('<div class="kpis">');
@@ -1797,7 +1817,13 @@ BEGIN
   -- sentence, one line of supporting numbers and the number that matters
   -- at the right. The lookups only fetch columns the detail sections print.
   ----------------------------------------------------------------------
-  IF v_n_crit + v_n_warn = 0 THEN
+  IF v_n_crit + v_n_warn = 0 AND v_n_current = 0 THEN
+    -- Nothing alerts because nothing current is left to judge: every dbid
+    -- is retired (CAPR_COVERAGE), so "all clear" would be a false comfort.
+    p('<div class="glance-warn">No current data: ' || TO_CHAR(v_n_dbid, 'FM999990')
+      || ' database(s) in this schema, none with an AWR snapshot in the last '
+      || 'data_stale_max_days days, so there is nothing to judge. See the coverage line above.</div>');
+  ELSIF v_n_crit + v_n_warn = 0 THEN
     p('<div class="glance-ok">All clear: nothing is near-full, no tablespace, series or CPU is forecast to hit its limit within '
       || TO_CHAR(dtf_warn, 'FM999990') || ' days, and no sustained shift or spike is open.'
       || CASE WHEN v_n_info > 0 THEN ' ' || TO_CHAR(v_n_info, 'FM999990') || ' informational item(s) below.' END || '</div>');

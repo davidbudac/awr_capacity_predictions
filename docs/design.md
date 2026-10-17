@@ -12,14 +12,18 @@ This document explains *why* each layer is shaped the way it is. For usage see
   threshold, robust z) so an operator can reproduce it by hand.
 - **Portable.** Analytics are written once against a thin seam so the same SQL
   serves local AWR, a fleet warehouse, or test fixtures.
-- **Read-only.** Nothing the report touches is ever modified; only the suite's
-  own config/registry tables are written.
-- **Idempotent, non-destructive re-install.** The three persisted tables
-  (`CAP_CONFIG`, `CAP_TBSPC_OVERRIDE`, `CAP_ML_MODEL`) are created only if
-  absent and MERGE-seeded for missing keys, and `00_drop` deliberately does
-  *not* drop them — so an operator's config overrides, hand-set tablespace
-  limits and trained-model registry survive `@install.sql`.
-  Full teardown is `@uninstall.sql`.
+- **Read-only.** Nothing the report touches is ever modified. The suite
+  writes only to `CAP_*` tables it owns, never to AWR: the config and
+  override tables (operator), the model registry (`cap_forecast_ml`) and the
+  results tables (`CAP_RESULTS`, Layer 7).
+- **Idempotent, non-destructive re-install.** The persisted tables are
+  created only if absent (the config seed MERGE adds missing keys), and
+  `00_drop` deliberately does *not* drop them: operator tables
+  (`CAP_CONFIG`, `CAP_TBSPC_OVERRIDE`) and derived ones (`CAP_ML_MODEL`, and
+  the results layer's `CAP_RUN`, `CAP_FIT_HIST`, `CAP_ALERT_STATE`,
+  `CAP_ALERT_EVENT`) all survive `@install.sql`. Operator tables are state
+  nobody can recompute; derived tables are a cache the live views never
+  need. Full teardown is `@uninstall.sql`.
 - **One config access path.** Every threshold is a `CAP_CONFIG` row, and views
   read knobs only through the one-row view `CAP_CFG` (one NUMBER column per
   knob, named after it), joined as `CROSS JOIN cap_cfg cfg`. No view pivots
@@ -767,7 +771,7 @@ row is an observation:
 | `CAPA_ANOM` | observation × mode | `baseline_mode`, in the key |
 | `CAPA_ANOM_DAY` | day observation | rolled up: `anomaly` (any day mode flagged), `anomaly_modes`, the headline mode's numbers |
 | `CAPR_ANOMALIES` | flagged observation × mode (+ one per `CAPA_CPU_SHIFT`) | `baseline_mode` (NULL for `CPU_SHIFT`), inside `doc_key` |
-| `CAPR_ALERTS` | anomaly kind × series × day × enabled mode | `baseline_mode`, inside `alert_key` |
+| `CAPR_ALERTS` | anomaly kind × series × episode (run of consecutive flagged days) × enabled mode | `baseline_mode`, inside `alert_key` |
 | `CAPR_TBSPC_ANOMALIES` / `CAPR_CPU_ANOMALIES` / `CAPR_SERIES_ANOMALIES` | flagged observation × mode | `baseline_mode`, `mode_short`, `mode_rank` |
 | `CAPR_SERIES_POINTS` | `CAPD_*` row (1:1) | none; headline numbers, `anomaly_modes`, `how_hours_flagged` |
 | `CAPR_HOURLY_POINTS` | `CAPD_CPU_HOURLY` row (1:1) | none; HOUR_OF_WEEK is the only hour mode |
@@ -795,11 +799,26 @@ separate decisions on purpose. Every mode is always computed and visible in
 The shipped values (tablespaces 1, CPU 2, series 1) keep the pre-M15 paging
 for tablespaces and host busy%, and page the new kinds (`DBCPU_ANOM`,
 `SERIES_ANOM`) on the same footing. HOUR_OF_WEEK pages only when you add bit 4.
-When it does, `CAPR_ALERTS` raises one row per (series, day, mode): the
-day's worst hour (largest `|z|`, earliest on a tie), with "N hours flagged that
-day" appended to the message. Shift suppression and episode collapsing
-(one alert for a run of flagged days) are not built; they are alert policy and
-belong to a later unit.
+When it does, each flagged day of a (series, mode) carries its worst hour
+(largest `|z|`, earliest on a tie), with "N hours flagged that day" appended
+to the message.
+
+Two alert policies sit on top, both inside `CAPR_ALERTS`' one anomaly branch:
+
+- **Episodes.** Consecutive flagged days of one (kind, series, mode) are one
+  row (gaps and islands: `obs_day` minus its row number is constant along a
+  run). `day_dt`, `value`, `threshold` and `alert_key` are the last day's;
+  `first_day`, `n_days` and `max_z` (the robust z of the most extreme day,
+  NULL = off-scale) are appended columns; the severity is the worst day's.
+  The message gains a prefix: "7 consecutive days, latest 2026-10-17, peak
+  robust z +6.0: ". A burst that flags three days running used to page three
+  times, and a step change fourteen times.
+- **Shift suppression.** While `CAPA_CPU_SHIFT` reports UP or DOWN for a CPU
+  series, that series' flagged days inside the shift's recent window are
+  INFO and the message ends " (level shift active)". The step days are the
+  shift, seen one day at a time: `CPU_SHIFT` is the one WARN for them. The
+  shift windows come from the `CPU_SHIFT` rows of the same `CAPR_ANOMALIES`
+  read, so the branch still reads the anomaly engine once.
 
 ### `CAPA_CPU_SHIFT` (M10.3)
 
@@ -948,8 +967,10 @@ no partitioned ESM) via `DBMS_DATA_MINING.CREATE_MODEL2(mining_function =>
 
 ### Retraining (M8.3 — opt-in, never part of `install.sql`)
 
-`@install_jobs.sql` at the repo root creates two `DBMS_SCHEDULER` jobs, both
-**DISABLED**, idempotently: `CAP_ML_RETRAIN` (daily 02:00 by default,
+`@install_jobs.sql` at the repo root creates three `DBMS_SCHEDULER` jobs, all
+**DISABLED**, idempotently: `CAP_REFRESH_JOB` (daily 01:30,
+`cap_results.refresh`, `DEFINE refresh_interval`; Layer 7),
+`CAP_ML_RETRAIN` (daily 02:00 by default,
 `cap_forecast_ml.train_all`; `DEFINE retrain_interval` overrides the calendar
 string) and `CAP_REPORT_SPOOL_JOB` (daily 03:00), which
 calls the `cap_report_spool(p_dir)` procedure the same script creates. That
@@ -958,13 +979,16 @@ through `UTL_FILE` — *not* the formatted report, because SQL\*Plus spooling
 cannot happen inside a scheduler job; keep driving `report/report.sql` from
 cron for that. The file's header has one "data through" line per dbid (newest snapshot and
 its age, from `CAPR_FRESHNESS`) and `DATA_STALE` rows come first, so a
-stalled AWR cannot pass for a quiet system. The directory object is not
+stalled AWR cannot pass for a quiet system. Once a refresh run exists the
+file lists the OPEN, not acked alerts of `CAPR_ALERTS_LATEST` and the last
+run's events, with a header line naming the run, its age and a STALE REFRESH
+mark when the job stopped (Layer 7). The directory object is not
 created for you: the script checks
 `ALL_DIRECTORIES` and prints the exact `CREATE DIRECTORY` / `GRANT READ, WRITE`
 DDL if it is missing (`DEFINE report_dir` overrides the default `CAP_REPORTS`).
 The `_JOB` suffix on the second job is not decoration: jobs share the schema
 namespace with procedures, so `CAP_REPORT_SPOOL` for both would be ORA-27477.
-`@uninstall_jobs.sql` drops both jobs and the procedure. The retrain used to
+`@uninstall_jobs.sql` drops the jobs and the procedure. The retrain used to
 be weekly. It is daily now because of the age gate: a weekly model sits up to
 7 days behind the data, right at `esm_max_age_days`, and its ESM value is
 dated up to a week before the REGR value it is compared with.
@@ -1016,14 +1040,18 @@ M8.2, for the bundled reports themselves:
   kinds only), `alert_key` and, appended, `state_key`, `direction`,
   `alarm_threshold` and `is_current`. The kinds: the eight forecast kinds
   above (every non-OK `CAPR_SEVERITY` row), `CPU_SHIFT` (UP = WARN, DOWN =
-  INFO), `DATA_STALE` (one WARN per dbid from `CAPR_FRESHNESS`),
+  INFO), `DATA_STALE` (one WARN per dbid from `CAPR_FRESHNESS`, except a
+  dbid `data_stale_max_days` (14) or more old: that one is retired, an
+  imported or decommissioned DBID, and shows in `CAPR_COVERAGE` instead of
+  paging forever),
   `MODEL_HEALTH` (per container from `CAPF_ESM_HEALTH_SUMMARY`: WARN when a
   forecast model failed its last build, INFO when none failed but some are
   stale; no registry rows, no row, so a Tier 1 install stays silent; the
   message carries the counts and the newest `last_error`), and the four
   anomaly kinds `TBSPC_ANOM`, `CPU_ANOM`, `DBCPU_ANOM`, `SERIES_ANOM` (the
-  alerting `CAPR_ANOMALIES` rows; they use the `anomaly_report_days` knob as
-  their window, the reports' `anomaly_days` DEFINE is presentation-only).
+  alerting `CAPR_ANOMALIES` rows, one row per episode with `first_day`,
+  `n_days` and `max_z`, see Layer 4; they use the `anomaly_report_days` knob
+  as their window, the reports' `anomaly_days` DEFINE is presentation-only).
   `CPU_HOT` / `DBCPU_HOT` page a saturated CPU even without a trend: the
   busy-hour p95 (`BUSY_P95` on the host, `DB_CPU_P95` per container) has a
   recent median (`recent_p95_med`, the last `shift_days` complete days) at or
@@ -1097,6 +1125,101 @@ the saturation line `cpu_sat_pct`, not 100, and `pct` is the value as a
 percent of it. `CAPR_FORECAST_POINTS`' CPU horizon 0 is `anchor_value`, where
 the projection starts. `CAPR_FIT.sev` is the worst `CAPR_SEVERITY` sev of the
 series.
+
+## Layer 7: results (`CAP_RUN`, `CAP_ALERT_STATE`, `CAP_RESULTS`)
+
+The live views answer "what is true now" and stay the one tested definition
+of every number. What they cannot answer is anything about time: is this
+alert new, did it clear, is this tablespace worse than last week, were last
+month's forecasts right, did the refresh stop. And every consumer pays the
+whole view chain on every poll (`CAPR_ALERTS` costs seconds; `CAPR_ALERTS_LATEST`
+costs a table scan). `ddl/60_results.sql` adds a small writer that snapshots
+the live views, and read-only views over what it wrote.
+
+The rule, restated: the suite writes only to `CAP_*` tables it owns, never to
+AWR. Operator tables survive re-install, derived tables are a cache. Only the
+`CAP_RESULTS` package writes the four tables below, and every view over them
+answers on empty tables, so an install that never ran `refresh` still
+installs and reports.
+
+| table | one row per | key |
+| --- | --- | --- |
+| `CAP_RUN` | `refresh` call | `run_id` = `YYYYMMDDHH24MISSFF3` of the start (bumped past the max on a clash) |
+| `CAP_FIT_HIST` | run × `CAPR_FIT` row | `(run_id, kind, dbid, con_dbid, series)`, plus `as_of_day` and every `CAPR_FIT` column |
+| `CAP_ALERT_STATE` | `CAPR_ALERTS.state_key` ever seen | `state_key` |
+| `CAP_ALERT_EVENT` | state change | `event_id` = `run_id * 100000 + n` (no sequence, so no extra privilege) |
+
+The tables are created with their key columns and then gain every other
+column one `ALTER TABLE ... ADD` at a time (ORA-01430 ignored), so a later
+column reaches an older install on the next `@install.sql`.
+
+**`CAP_RESULTS.refresh(p_as_of)`** inserts the `CAP_RUN` row as `RUNNING` and
+commits it at once (a hung run stays visible), copies `CAPR_FIT` into
+`CAP_FIT_HIST`, merges `CAPR_ALERTS` into the state table, marks the run `OK`
+with its counts and commits. On any error it rolls the run's work back,
+marks it `FAILED` with the error stack in `error_text` and re-raises, so the
+scheduler log says FAILED too. `CAPR_ALERTS` is read once: one row per
+`state_key` (worst severity, then latest day; an anomaly key can carry
+several episodes). A `p_as_of` before today records a backdated run: the
+fits as the views show them now, labelled with that day, and no alert state,
+because the state machine runs in real time. A `LOCK TABLE` on the state
+table serialises two refreshes.
+
+The state machine, per `state_key`, on each live run:
+
+| before | this run | after | event |
+| --- | --- | --- | --- |
+| no row | present | OPEN, `first_seen` = `last_seen` = now | NEW |
+| OPEN | present, same severity | OPEN, `last_seen` = now, `missed_runs` = 0 | none |
+| OPEN | present, higher severity | OPEN, `max_severity` updated, ack cleared | ESCALATED |
+| OPEN | present, lower severity | OPEN | DEESCALATED |
+| OPEN | missing, `missed_runs` + 1 < `resolve_grace_runs` | OPEN, `missed_runs` + 1 | none |
+| OPEN | missing for the `resolve_grace_runs`-th run | RESOLVED, `resolved_at` = now | RESOLVED |
+| RESOLVED | present | OPEN, `reopen_count` + 1, ack cleared, `first_seen` kept | REOPENED |
+
+The grace (`resolve_grace_runs`, 2) is the hysteresis: a `TBSPC_FULL` whose
+`days_to_full` wobbles across `dtf_warn` for one run does not resolve and
+reopen. Severity changes still show as events, which is what a pager wants.
+
+**Ack.** `CAP_RESULTS.ack(p_key, p_until, p_note, p_by)` takes a `state_key`
+or the `alert_key` the state last carried, and hides the state from
+`CAPR_ALERTS_LATEST` until `p_until` (NULL = until it resolves; the live
+`CAPR_ALERTS` never hides anything). An ESCALATED or REOPENED event clears
+the ack: the operator acknowledged a different situation. `unack` undoes it.
+`purge(p_keep_days)` deletes runs started more than that many days ago with
+their snapshots and events, and states resolved before then, but always
+keeps the newest run and the newest OK live run. `reset` forgets everything.
+
+| view | answers |
+| --- | --- |
+| `CAPR_ALERTS_LATEST` | OPEN, not acked states. The first columns mirror `CAPR_ALERTS` (values of the last run that saw the key), then `max_severity`, `first_seen`, `last_seen`, `age_days`, `reopen_count`, `run_id`, `events_since` (events since it last opened), `last_event`, `last_event_at` |
+| `CAPR_ALERT_EVENTS` | every event, newest first, with the run's `as_of_day` and the state's kind and keys |
+| `CAPR_RUNS` | every run with `duration_sec`, `is_last`, `last_ok_run_id`, `last_ok_age_hours` and `stale_run` (`Y` when the last OK live run ended `refresh_stale_hours` (36) or more ago, or never ran), plus a one-line `summary` |
+| `CAPR_COVERAGE` | per dbid, live: newest snapshot and its age, `history_days`, series by quality, `n_stale` (not current), `retired` (`data_stale_max_days`) and a one-line `summary` |
+| `CAPR_FIT_HISTORY` | `CAP_FIT_HIST` of the OK runs |
+| `CAPR_WEEKLY_DIGEST` | the latest OK run against the latest OK run at least `digest_days` (7) older: per series `days_to_full`, `pct`, quality and severity then and now, a `change` verdict, and the alert events in between (`n_new`, `n_resolved`, `n_reopened`, `n_sev_changes`, and `events`, the counts per kind) |
+| `CAPR_FORECAST_ACCURACY` | every snapshot row whose series has newer data today: `projected` = `value_then + slope_then * elapsed_days` (the anchored formula), `actual` = `CAPR_FIT.value` now, `error`, `error_pct`. Filter `elapsed_days` for a horizon |
+
+**Poller recipe.** Enable `CAP_REFRESH_JOB`, then poll
+`SELECT * FROM capr_alert_events WHERE run_id > :last_seen_run_id`, remember
+the highest `run_id`, page on NEW / ESCALATED / REOPENED and clear on RESOLVED.
+For a state board, read `CAPR_ALERTS_LATEST`. To silence a known issue,
+`EXEC cap_results.ack('<state_key>', SYSDATE + 7, 'ticket 123')`. Watch
+`CAPR_RUNS.stale_run`: a stopped job is the one failure the events cannot
+show.
+
+Section 0 of the text report and the HTML header print the last run
+(`last refresh run <id> at <time> (<n> alerts, <n> fits)`, or
+`no refresh run yet (live evaluation)`) and the `CAPR_COVERAGE` summary; the
+HTML "All clear" banner needs at least one dbid that is not retired. Both
+reports still evaluate the live views; the snapshot does not replace them.
+
+The fixture (`test/run_test.sql`) runs a backdated run with FIX_LINEAR's and
+FIX_ZIGZAG's last 7 days hidden, so the digest and the accuracy view see a
+forecast genuinely issued a week earlier: FIX_LINEAR's error is 0 and its
+`days_to_full` moves by exactly -7, FIX_ZIGZAG's error is the closed form
+`zz(120) - (zz(113) + 7 * slope(24..113))`. It then drives every row of the
+state machine table above, ack and unack, a FAILED run and `purge`.
 
 ## Report
 

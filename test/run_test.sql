@@ -136,7 +136,19 @@ BEGIN
     DBMS_OUTPUT.PUT_LINE('=== FIX_GAP (AWR-gap rate normalization) ===');
     SELECT MAX(day_gap) INTO v_n FROM capd_tbspc_delta WHERE tablespace_name = 'FIX_GAP';
     chk_int('GAP recorded (max day_gap)', v_n, 4);
-    chk_int('GAP no false anomaly (rate-normalized, TRAILING)', anom_n('TBSPC', 'FIX_GAP', 'TRAILING', 'ANY', v_dbid), 0);
+    -- The post-gap day (103) sees a 4-day, 240 MiB jump: rate-normalized it
+    -- is 60 MiB/day and must not flag. The only flags are the three days of
+    -- the +256 MiB/day burst (results layer: one TBSPC_ANOM episode).
+    chk_str('GAP post-gap day 103 not flagged (rate-normalized, TRAILING)',
+            NVL(anom_flag('TBSPC', 'FIX_GAP', 'TRAILING', meta_d('LAST_DAY') - 17, v_dbid), '-'), '-');
+    chk_int('GAP TRAILING flags = the BURST_DAYS burst days, all HIGH',
+            anom_n('TBSPC', 'FIX_GAP', 'TRAILING', 'HIGH', v_dbid), meta_n('BURST_DAYS'));
+    chk_int('GAP TRAILING flags in total (no LOW, nothing else)',
+            anom_n('TBSPC', 'FIX_GAP', 'TRAILING', 'ANY', v_dbid), meta_n('BURST_DAYS'));
+    chk_str('GAP burst first day HIGH (TRAILING)',
+            anom_flag('TBSPC', 'FIX_GAP', 'TRAILING', meta_d('BURST_FIRST'), v_dbid), 'HIGH');
+    chk_str('GAP burst last day HIGH (TRAILING)',
+            anom_flag('TBSPC', 'FIX_GAP', 'TRAILING', meta_d('BURST_LAST'), v_dbid), 'HIGH');
 
     DBMS_OUTPUT.PUT_LINE('=== FIX_NEARFULL (M7.1: near-full now, unreliable fit) ===');
     SELECT pct_used, quality INTO v_num, v_str
@@ -2008,6 +2020,11 @@ BEGIN
         v_flag  VARCHAR2(5);
         v_gflag VARCHAR2(1);
         v_mode  VARCHAR2(12);
+        v_dt0   DATE;
+        -- The HOW Tuesday and Wednesday are consecutive days (one episode)
+        -- unless the run day is a Tuesday: then the latest Tuesday is the
+        -- last day and the latest Wednesday lies 6 days before it.
+        v_adj   BOOLEAN := meta_d('INVERTED_WED') = meta_d('INJECTED_TUE') + 1;
     BEGIN
         SELECT mad_k INTO n_k FROM cap_cfg;
 
@@ -2237,7 +2254,8 @@ BEGIN
         SELECT COUNT(*) INTO v_n FROM capa_anom
           WHERE kind = 'TBSPC' AND baseline_mode = 'SAME_DOW' AND anomaly_flag IS NOT NULL
             AND series NOT IN ('FIX_CYCLIC', 'FIX_CYCLIC_UP');
-        chk_int('other TBSPC SAME_DOW flags: the spike and the purge only', v_n, 2);
+        chk_int('other TBSPC SAME_DOW flags: the spike, the purge and the FIX_GAP burst days',
+                v_n, 2 + meta_n('BURST_DAYS'));
         SELECT COUNT(*) INTO v_n FROM capa_anom
           WHERE kind = 'SERIES' AND series IN ('SESSIONS', 'PROCESSES', 'REDO_GB_DAY')
             AND anomaly_flag IS NOT NULL;
@@ -2288,14 +2306,33 @@ BEGIN
         chk_int('CPU_ANOM alerts', v_n, 1);
         SELECT baseline_mode INTO v_mode FROM capr_alerts WHERE kind = 'CPU_ANOM';
         chk_str('CPU_ANOM baseline_mode', v_mode, 'SAME_DOW');
+        -- The 7 FIXPDB1 step days are consecutive, so they fold into ONE
+        -- episode, and all 7 lie inside CAPA_CPU_SHIFT's recent window
+        -- (shift_days = 7 ending LAST_DAY), so the episode is INFO with the
+        -- level-shift suffix. The CPU_SHIFT row stays the one WARN.
         SELECT COUNT(*) INTO v_n FROM capr_alerts
-          WHERE kind = 'DBCPU_ANOM' AND severity = 'WARN' AND baseline_mode = 'SAME_DOW'
-            AND db_pdb = 'FIXCDB/FIXPDB1' AND series_key = 'DB_CPU_PCT';
-        chk_int('DBCPU_ANOM WARN alerts (the 7 FIXPDB1 step days)', v_n, 7);
+          WHERE kind = 'DBCPU_ANOM' AND severity = 'WARN';
+        chk_int('DBCPU_ANOM WARN alerts (the step days are INFO under the shift)', v_n, 0);
         SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'DBCPU_ANOM';
-        chk_int('DBCPU_ANOM alerts in total', v_n, 7);
+        chk_int('DBCPU_ANOM alerts in total (the 7 step days, one episode)', v_n, 1);
+        SELECT severity, n_days, first_day, day_dt, message INTO v_str, v_num, d_tstart, v_dt0, v_msg
+          FROM capr_alerts
+          WHERE kind = 'DBCPU_ANOM' AND baseline_mode = 'SAME_DOW'
+            AND db_pdb = 'FIXCDB/FIXPDB1' AND series_key = 'DB_CPU_PCT';
+        chk_str ('DBCPU_ANOM episode severity INFO (level shift active)', v_str, 'INFO');
+        chk_int ('DBCPU_ANOM episode n_days = shift_days', v_num, 7);
+        chk_int ('DBCPU_ANOM episode first_day = LAST_DAY - 6 (days back)', d_last - d_tstart, 6);
+        chk_int ('DBCPU_ANOM episode day_dt = LAST_DAY (days back)', d_last - v_dt0, 0);
+        chk_true('DBCPU_ANOM episode message: "7 consecutive days, latest <LAST_DAY>" ... " (level shift active)" (got: '
+                 || v_msg || ')',
+                 v_msg LIKE '7 consecutive days, latest ' || TO_CHAR(d_last, 'YYYY-MM-DD') || ', peak robust z %'
+                 AND v_msg LIKE '% (level shift active)');
+        SELECT COUNT(*), MAX(kind) INTO v_n, v_str FROM capr_alerts
+          WHERE con_dbid = n_pdb AND series_key = 'DB_CPU_PCT' AND severity = 'WARN';
+        chk_true('FIXPDB1 DB_CPU_PCT: CPU_SHIFT is the one WARN (got ' || v_n || ' ' || v_str || ')',
+                 v_n = 1 AND v_str = 'CPU_SHIFT');
         SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'TBSPC_ANOM';
-        chk_int('TBSPC_ANOM alerts (the spike; the purge predates the window)', v_n, 1);
+        chk_int('TBSPC_ANOM alerts (the spike + the FIX_GAP burst episode; the purge predates the window)', v_n, 2);
         SELECT COUNT(*) INTO v_n FROM capr_alerts
           WHERE kind = 'SERIES_ANOM' AND series_key = 'DB_SIZE_GB' AND day_dt = d_spike
             AND severity = 'WARN' AND baseline_mode = 'TRAILING';
@@ -2319,7 +2356,8 @@ BEGIN
         knob('alert_modes_cpu', 6);
         BEGIN
             SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_ANOM';
-            chk_int('alert_modes_cpu=6: CPU_ANOM (SAME_DOW + HOW Tue + HOW Wed)', v_n, 3);
+            chk_int('alert_modes_cpu=6: CPU_ANOM (SAME_DOW + HOW Tue + HOW Wed, one HOW episode when adjacent)',
+                    v_n, CASE WHEN v_adj THEN 2 ELSE 3 END);
             SELECT severity, value, threshold, message INTO v_str, v_num, v_num2, v_msg
               FROM capr_alerts
               WHERE kind = 'CPU_ANOM' AND baseline_mode = 'HOUR_OF_WEEK' AND day_dt = d_inv;
@@ -2328,13 +2366,29 @@ BEGIN
             chk_close('alert_modes_cpu=6: HOW inverted Wednesday bound 20 + 15', v_num2, 35, 0.000001);
             chk_true ('alert_modes_cpu=6: message says "2 hours flagged that day" (got: ' || v_msg || ')',
                       INSTR(v_msg, '; 2 hours flagged that day') > 0 AND INSTR(v_msg, 'for Wed 06:00') > 0);
-            SELECT value, threshold INTO v_num, v_num2 FROM capr_alerts
-              WHERE kind = 'CPU_ANOM' AND baseline_mode = 'HOUR_OF_WEEK' AND day_dt = d_inj;
-            chk_true('alert_modes_cpu=6: HOW injected Tuesday carries 06:00 (70 vs bound 35, got '
-                     || v_num || ' / ' || v_num2 || ')',
-                     ABS(v_num - 70) < 1e-9 AND ABS(v_num2 - 35) < 1e-9);
-            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'DBCPU_ANOM';
-            chk_int('alert_modes_cpu=6: DBCPU_ANOM (7 SAME_DOW + 7 HOW days)', v_n, 14);
+            IF v_adj THEN
+                -- Tuesday folds into the Wednesday's episode: its 06:00 hour
+                -- (z 50/5 = 10, the worst of both days) is the episode peak.
+                SELECT n_days, first_day, max_z, message INTO v_n, v_dt0, v_num, v_msg FROM capr_alerts
+                  WHERE kind = 'CPU_ANOM' AND baseline_mode = 'HOUR_OF_WEEK' AND day_dt = d_inv;
+                chk_true('alert_modes_cpu=6: HOW Tue + Wed one episode: n_days 2, first_day = INJECTED_TUE, '
+                         || 'max_z 10 (got ' || v_n || ' ' || TO_CHAR(v_dt0, 'YYYY-MM-DD') || ' ' || v_num || ')',
+                         v_n = 2 AND v_dt0 = d_inj AND ABS(v_num - 10) < 1e-9);
+                chk_true('alert_modes_cpu=6: HOW episode message "2 consecutive days, latest <Wed>, peak robust z +10.0: " (got: '
+                         || v_msg || ')',
+                         v_msg LIKE '2 consecutive days, latest ' || TO_CHAR(d_inv, 'YYYY-MM-DD')
+                                    || ', peak robust z +10.0: %');
+            ELSE
+                SELECT value, threshold, n_days INTO v_num, v_num2, v_n FROM capr_alerts
+                  WHERE kind = 'CPU_ANOM' AND baseline_mode = 'HOUR_OF_WEEK' AND day_dt = d_inj;
+                chk_true('alert_modes_cpu=6: HOW injected Tuesday carries 06:00 (70 vs bound 35, got '
+                         || v_num || ' / ' || v_num2 || '), its own one-day episode',
+                         ABS(v_num - 70) < 1e-9 AND ABS(v_num2 - 35) < 1e-9 AND v_n = 1);
+            END IF;
+            SELECT COUNT(*), COUNT(CASE WHEN severity = 'INFO' AND n_days = 7 THEN 1 END)
+              INTO v_n, v_num FROM capr_alerts WHERE kind = 'DBCPU_ANOM';
+            chk_true('alert_modes_cpu=6: DBCPU_ANOM = 2 episodes (SAME_DOW, HOW), each 7 days, INFO (got '
+                     || v_n || ' / ' || v_num || ')', v_n = 2 AND v_num = 2);
             SELECT COUNT(*) INTO v_n FROM (
                 SELECT alert_key FROM capr_alerts GROUP BY alert_key HAVING COUNT(*) > 1);
             chk_int('alert_modes_cpu=6: alert_key still unique', v_n, 0);
@@ -2438,6 +2492,7 @@ BEGIN
     DECLARE
         d_last   DATE   := meta_d('LAST_DAY');
         n_pdb2   NUMBER := meta_n('PDB2_CON_DBID');
+        n_pdb1   NUMBER := meta_n('PDB_CON_DBID');
         n_fw     NUMBER := meta_n('FILLING_OVR_DTF_WARN');
         n_fc     NUMBER := meta_n('FILLING_OVR_DTF_CRIT');
         n_fdtf   NUMBER := meta_n('FILLING_DTF');
@@ -2561,12 +2616,15 @@ BEGIN
                              || NVL(baseline_mode, '-')
              OR is_current <> 'Y' OR alarm_threshold IS NULL OR direction IS NULL;
         chk_int('state_key = kind|dbid|con_dbid|series_key|mode, is_current Y, alarm_threshold set', v_n, 0);
-        -- The seven FIXPDB1 step days: seven rows, seven alert_keys, ONE state.
-        SELECT COUNT(*), COUNT(DISTINCT alert_key), COUNT(DISTINCT state_key), COUNT(DISTINCT day_dt)
-          INTO v_n, v_a, v_b, v_c
+        -- The seven FIXPDB1 step days: one episode row, its alert_key that of
+        -- the last day, n_days 7, ONE state.
+        SELECT COUNT(*), COUNT(DISTINCT alert_key), COUNT(DISTINCT state_key), MAX(n_days), MAX(alert_key)
+          INTO v_n, v_a, v_b, v_c, v_akey
           FROM capr_alerts WHERE kind = 'DBCPU_ANOM';
-        chk_true('DBCPU_ANOM: 7 rows, 7 alert_keys, 7 days, 1 state_key (got ' || v_n || '/' || v_a
-                 || '/' || v_c || '/' || v_b || ')', v_n = 7 AND v_a = 7 AND v_c = 7 AND v_b = 1);
+        chk_true('DBCPU_ANOM: 1 row, 1 alert_key, n_days 7, 1 state_key (got ' || v_n || '/' || v_a
+                 || '/' || v_c || '/' || v_b || ')', v_n = 1 AND v_a = 1 AND v_c = 7 AND v_b = 1);
+        chk_str ('DBCPU_ANOM episode alert_key = the last day''s', v_akey,
+                 v_dbid || '|' || n_pdb1 || '|DBCPU_ANOM|DB_CPU_PCT|' || TO_CHAR(d_last, 'YYYY-MM-DD') || '|SAME_DOW');
         -- The direction law, every row: LE value <= alarm, GE value >= alarm,
         -- ABS |value| > alarm.
         SELECT COUNT(*) INTO v_n FROM capr_alerts
@@ -2872,6 +2930,83 @@ BEGIN
         SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'stale_hours';
         chk_str('CAP_CFG_CHECK stale_hours', v_str, 'OK');
 
+        DBMS_OUTPUT.PUT_LINE('=== alerts: retired dbids (data_stale_max_days) + CAPR_COVERAGE ===');
+        SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'data_stale_max_days';
+        chk_int('knob data_stale_max_days default', v_num, 14);
+        SELECT COUNT(*), MAX(retired), MAX(is_stale), MAX(history_days), MAX(n_series), MAX(n_stale), MAX(summary)
+          INTO v_n, v_c1, v_str, v_a, v_b, v_c, v_msg
+          FROM capr_coverage;
+        chk_int ('CAPR_COVERAGE one row per dbid', v_n, 1);
+        chk_true('CAPR_COVERAGE retired N, is_stale N (fixture anchored at TRUNC(SYSDATE))', v_c1 = 'N' AND v_str = 'N');
+        chk_int ('CAPR_COVERAGE history_days = LAST_DAY - BASE_DAY + 1', v_a, d_last - meta_d('BASE_DAY') + 1);
+        SELECT COUNT(*), COUNT(CASE WHEN is_current = 0 THEN 1 END) INTO v_n, v_num
+          FROM capr_fit WHERE dbid = v_dbid;
+        chk_true('CAPR_COVERAGE n_series / n_stale roll up CAPR_FIT (got ' || v_b || '/' || v_c
+                 || ', CAPR_FIT ' || v_n || '/' || v_num || ')', v_b = v_n AND v_c = v_num AND v_c >= 1);
+        chk_true('CAPR_COVERAGE summary "FIXCDB (dbid ..): current, <history> days of AWR, ..." (got: ' || v_msg || ')',
+                 v_msg LIKE 'FIXCDB (dbid ' || v_dbid || '): current, '
+                            || (d_last - meta_d('BASE_DAY') + 1) || ' days of AWR, ' || v_b || ' series (%');
+        -- Clock 20 days back: newest snapshot LAST_DAY - 20 18:00, 462..486 h
+        -- old, past data_stale_max_days (14 days = 336 h): retired, so no
+        -- DATA_STALE although stale_hours (36) is far exceeded.
+        SAVEPOINT as_retired;
+        BEGIN
+            UPDATE cap_fixture_snapshot
+               SET begin_interval_time = begin_interval_time - 20,
+                   end_interval_time   = end_interval_time - 20,
+                   startup_time        = startup_time - 20;
+            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'DATA_STALE';
+            chk_int('clock - 20 days: retired dbid raises no DATA_STALE', v_n, 0);
+            v_a := FLOOR(ROUND((SYSDATE - (d_last - 20 + 18/24)) * 24, 1) / 24);
+            SELECT retired, is_stale, summary INTO v_c1, v_str, v_msg FROM capr_coverage;
+            chk_true('clock - 20 days: CAPR_COVERAGE retired Y, is_stale Y', v_c1 = 'Y' AND v_str = 'Y');
+            chk_true('clock - 20 days: summary "RETIRED, no snapshot for ' || v_a || ' days" (got: ' || v_msg || ')',
+                     v_msg LIKE 'FIXCDB (dbid ' || v_dbid || '): RETIRED, no snapshot for ' || v_a || ' days, %');
+            knob('data_stale_max_days', 30);
+            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'DATA_STALE';
+            chk_int('clock - 20 days, data_stale_max_days 30: DATA_STALE back, one per dbid', v_n, 1);
+            SELECT retired INTO v_c1 FROM capr_coverage;
+            chk_str('clock - 20 days, data_stale_max_days 30: CAPR_COVERAGE retired', v_c1, 'N');
+        EXCEPTION
+            WHEN OTHERS THEN ROLLBACK TO SAVEPOINT as_retired; RAISE;
+        END;
+        ROLLBACK TO SAVEPOINT as_retired;
+
+        DBMS_OUTPUT.PUT_LINE('=== alerts: anomaly episodes (consecutive flagged days, one row) ===');
+        SELECT COUNT(*), MAX(severity), MAX(n_days), MAX(first_day), MAX(day_dt), MAX(max_z),
+               MAX(value), MAX(threshold), MAX(alert_key), MAX(message)
+          INTO v_n, v_sev, v_a, v_dt, v_dt2, v_b, v_c, v_num, v_akey, v_msg
+          FROM capr_alerts WHERE kind = 'TBSPC_ANOM' AND series_key = 'FIX_GAP';
+        chk_int ('FIX_GAP burst: one TBSPC_ANOM row for the 3 days', v_n, 1);
+        chk_true('FIX_GAP burst: WARN, n_days = BURST_DAYS, first_day = BURST_FIRST, day_dt = BURST_LAST (got '
+                 || v_sev || ' ' || v_a || ' ' || TO_CHAR(v_dt, 'YYYY-MM-DD') || ' ' || TO_CHAR(v_dt2, 'YYYY-MM-DD') || ')',
+                 v_sev = 'WARN' AND v_a = meta_n('BURST_DAYS')
+                 AND v_dt = meta_d('BURST_FIRST') AND v_dt2 = meta_d('BURST_LAST'));
+        chk_close('FIX_GAP burst: max_z = 256 MiB / (100 MiB / mad_k)', v_b, meta_n('BURST_Z'), 0.000001);
+        chk_close('FIX_GAP burst: value = the last day''s rate, 60 + 256 MiB/day', v_c, (7680 + 32768) * 8192, 0.000001);
+        chk_close('FIX_GAP burst: threshold = median + floor, 60 + 100 MiB/day', v_num, 7680 * 8192 + 104857600, 0.000001);
+        chk_str ('FIX_GAP burst: alert_key = the last day''s', v_akey,
+                 v_dbid || '|' || v_dbid || '|TBSPC_ANOM|FIX_GAP|' || TO_CHAR(meta_d('BURST_LAST'), 'YYYY-MM-DD') || '|TRAILING');
+        chk_true('FIX_GAP burst: message "3 consecutive days, latest <BURST_LAST>, peak robust z +7.7: Tablespace FIX_GAP grew ..." (got: '
+                 || v_msg || ')',
+                 v_msg LIKE '3 consecutive days, latest ' || TO_CHAR(meta_d('BURST_LAST'), 'YYYY-MM-DD')
+                            || ', peak robust z +7.7: Tablespace FIX_GAP grew % on '
+                            || TO_CHAR(meta_d('BURST_LAST'), 'YYYY-MM-DD') || ' %');
+        SELECT COUNT(*), MAX(n_days), MAX(first_day), MAX(day_dt), MAX(max_z), MAX(message)
+          INTO v_n, v_a, v_dt, v_dt2, v_b, v_msg
+          FROM capr_alerts WHERE kind = 'TBSPC_ANOM' AND series_key = 'FIX_SPIKE';
+        chk_true('FIX_SPIKE single day: one row, n_days 1, first_day = day_dt = SPIKE_DAY (got ' || v_n || ' ' || v_a || ')',
+                 v_n = 1 AND v_a = 1 AND v_dt = d_spike AND v_dt2 = d_spike);
+        chk_close('FIX_SPIKE max_z = 2 GiB / (100 MiB / mad_k)', v_b, meta_n('SPIKE_Z'), 0.000001);
+        chk_true('FIX_SPIKE message keeps the one-day form (got: ' || v_msg || ')',
+                 v_msg LIKE 'Tablespace FIX_SPIKE grew 2.00 GiB on %' AND v_msg NOT LIKE '%consecutive days%');
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+          WHERE (kind IN ('TBSPC_ANOM', 'CPU_ANOM', 'DBCPU_ANOM', 'SERIES_ANOM')
+                 AND (n_days IS NULL OR first_day IS NULL OR day_dt - first_day + 1 <> n_days))
+             OR (kind NOT IN ('TBSPC_ANOM', 'CPU_ANOM', 'DBCPU_ANOM', 'SERIES_ANOM')
+                 AND (n_days IS NOT NULL OR first_day IS NOT NULL OR max_z IS NOT NULL));
+        chk_int('first_day / n_days / max_z on anomaly kinds only, n_days = day_dt - first_day + 1', v_n, 0);
+
         DBMS_OUTPUT.PUT_LINE('=== alerts: CPU_HOT / DBCPU_HOT (hot_now, any quality) ===');
         SELECT COUNT(*), MAX(severity), MAX(con_dbid), MAX(series_key), MAX(value), MAX(threshold),
                MAX(alarm_threshold), MAX(db_pdb), MAX(message)
@@ -3043,6 +3178,28 @@ BEGIN
       WHERE knob IN ('cyclic_min_cliffs', 'slope_method', 'cpu_quality_gate', 'cpu_deseason') AND status = 'OK';
     chk_int('new knobs OK after reset', v_n, 4);
 
+    -- Results-layer knobs and their range rules.
+    SELECT COUNT(*) INTO v_n FROM cap_cfg
+      WHERE data_stale_max_days = 14 AND resolve_grace_runs = 2
+        AND refresh_stale_hours = 36 AND digest_days = 7;
+    chk_int('CAP_CFG results-layer knobs at their shipped values', v_n, 1);
+    UPDATE cap_config SET cfg_value = 1   WHERE cfg_name = 'data_stale_max_days';
+    UPDATE cap_config SET cfg_value = 0   WHERE cfg_name = 'resolve_grace_runs';
+    UPDATE cap_config SET cfg_value = 0   WHERE cfg_name = 'refresh_stale_hours';
+    UPDATE cap_config SET cfg_value = 2.5 WHERE cfg_name = 'digest_days';
+    SELECT COUNT(*) INTO v_n FROM cap_cfg_check
+      WHERE knob IN ('data_stale_max_days', 'resolve_grace_runs', 'refresh_stale_hours', 'digest_days')
+        AND status = 'BAD';
+    chk_int('CAP_CFG_CHECK BAD: data_stale_max_days 1 (24 h <= stale_hours), grace 0, refresh_stale_hours 0, digest_days 2.5',
+            v_n, 4);
+    UPDATE cap_config SET cfg_value = cfg_default
+     WHERE cfg_name IN ('data_stale_max_days', 'resolve_grace_runs', 'refresh_stale_hours', 'digest_days');
+    COMMIT;
+    SELECT COUNT(*) INTO v_n FROM cap_cfg_check
+      WHERE knob IN ('data_stale_max_days', 'resolve_grace_runs', 'refresh_stale_hours', 'digest_days')
+        AND status = 'OK';
+    chk_int('results-layer knobs OK after reset', v_n, 4);
+
     -- suite_version: stamped by every install, BAD when older than this release.
     SELECT suite_version INTO v_num FROM cap_cfg;
     chk_int('suite_version = 15', v_num, 15);
@@ -3084,6 +3241,386 @@ BEGIN
     chk_str('CAP_CFG_CHECK mad_k after re-INSERT', v_str, 'OK');
     chk_str('SPIKE HIGH on spike day after mad_k re-INSERT (TRAILING)',
             anom_flag('TBSPC', 'FIX_SPIKE', 'TRAILING', d_spike, v_dbid), 'HIGH');
+
+    -- ================================================================
+    -- Results layer (ddl/60). cap_results.refresh COMMITs, so every knob or
+    -- fixture change below is committed and restored in the handler. The
+    -- tables survive re-install, so cap_results.reset clears what an earlier
+    -- run_test left. Run order:
+    --   R0  backdated (as of TRUNC(SYSDATE) - 7) with FIX_LINEAR and
+    --       FIX_ZIGZAG's last 7 days hidden: the forecasts "issued a week
+    --       ago" that CAPR_FORECAST_ACCURACY scores and the digest compares
+    --   R1  every key NEW          R2  no events
+    --   R3  dtf_warn 1: FIX_OVERRIDE's TBSPC_FULL missing once (grace)
+    --   R4  missing twice: RESOLVED (resolve_grace_runs 2)
+    --   R5  dtf_warn back: REOPENED
+    --   R6  dtf_crit 80: FIX_OVERRIDE (74 days) ESCALATED to CRIT
+    --   R7  dtf_crit back: DEESCALATED      then a FAILED run, purge, R8
+    -- ================================================================
+    DECLARE
+        d_last   DATE   := meta_d('LAST_DAY');
+        n_pdb1   NUMBER := meta_n('PDB_CON_DBID');
+        n_fit    NUMBER;
+        n_state  NUMBER;
+        n_rows   NUMBER;
+        run_0 NUMBER; run_1 NUMBER; run_2 NUMBER; run_3 NUMBER; run_4 NUMBER;
+        run_5 NUMBER; run_6 NUMBER; run_7 NUMBER; run_f NUMBER; run_8 NUMBER;
+        v_okey   VARCHAR2(400) := 'TBSPC_FULL|' || v_dbid || '|' || v_dbid || '|FIX_OVERRIDE|-';
+        v_skey   VARCHAR2(400) := 'TBSPC_ANOM|' || v_dbid || '|' || v_dbid || '|FIX_SPIKE|TRAILING';
+        v_akey   VARCHAR2(400);
+        v_old    NUMBER;
+        v_a      NUMBER;
+        v_b      NUMBER;
+        v_c      NUMBER;
+        v_d      NUMBER;
+        v_dt     DATE;
+        v_dt2    DATE;
+        v_s1     VARCHAR2(400);
+        v_s2     VARCHAR2(400);
+        v_first  DATE;
+        v_ts     TIMESTAMP;
+        TYPE usage_tab IS TABLE OF cap_fixture_tbspc_usage%ROWTYPE;
+        v_hidden usage_tab;
+        v_restored BOOLEAN := TRUE;
+
+        FUNCTION last_run RETURN NUMBER IS x NUMBER;
+        BEGIN SELECT MAX(run_id) INTO x FROM cap_run; RETURN x; END;
+        FUNCTION n_ev(p_run NUMBER, p_event VARCHAR2) RETURN NUMBER IS x NUMBER;
+        BEGIN
+            SELECT COUNT(*) INTO x FROM cap_alert_event
+             WHERE run_id = p_run AND event = DECODE(p_event, 'ANY', event, p_event);
+            RETURN x;
+        END;
+        PROCEDURE restore_usage IS
+        BEGIN
+            IF NOT v_restored THEN
+                FORALL i IN 1 .. v_hidden.COUNT
+                    INSERT INTO cap_fixture_tbspc_usage VALUES v_hidden(i);
+                COMMIT;
+                v_restored := TRUE;
+            END IF;
+        END;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('=== results layer: empty tables ===');
+        cap_results.reset;
+        SELECT (SELECT COUNT(*) FROM capr_runs) + (SELECT COUNT(*) FROM capr_alerts_latest)
+               + (SELECT COUNT(*) FROM capr_alert_events) + (SELECT COUNT(*) FROM capr_fit_history)
+               + (SELECT COUNT(*) FROM capr_weekly_digest) + (SELECT COUNT(*) FROM capr_forecast_accuracy)
+          INTO v_n FROM dual;
+        chk_int('every results view answers on empty tables (rows)', v_n, 0);
+        chk_str('cap_results.seam_mode', cap_results.seam_mode, 'fixture');
+
+        DBMS_OUTPUT.PUT_LINE('=== results layer: R0 backdated, R1, R2 ===');
+        SELECT u.* BULK COLLECT INTO v_hidden
+          FROM cap_fixture_tbspc_usage u
+         WHERE u.tablespace_id IN (SELECT tablespace_id FROM cap_fixture_tablespace
+                                    WHERE tablespace_name IN ('FIX_LINEAR', 'FIX_ZIGZAG'))
+           AND u.snap_id IN (SELECT snap_id FROM cap_fixture_snapshot
+                              WHERE TRUNC(end_interval_time) > d_last - 7);
+        chk_int('hidden usage rows = 2 tablespaces x 7 days', v_hidden.COUNT, 14);
+        v_restored := FALSE;
+        DELETE FROM cap_fixture_tbspc_usage u
+         WHERE u.tablespace_id IN (SELECT tablespace_id FROM cap_fixture_tablespace
+                                    WHERE tablespace_name IN ('FIX_LINEAR', 'FIX_ZIGZAG'))
+           AND u.snap_id IN (SELECT snap_id FROM cap_fixture_snapshot
+                              WHERE TRUNC(end_interval_time) > d_last - 7);
+        COMMIT;
+        cap_results.refresh(p_as_of => TRUNC(SYSDATE) - 7);
+        run_0 := last_run;
+        restore_usage;
+        SELECT COUNT(*) INTO n_fit FROM capr_fit;
+        cap_results.refresh;
+        run_1 := last_run;
+        cap_results.refresh;
+        run_2 := last_run;
+
+        SELECT COUNT(*), COUNT(CASE WHEN status = 'OK' THEN 1 END), COUNT(CASE WHEN backdated = 'Y' THEN 1 END)
+          INTO v_n, v_a, v_b FROM cap_run;
+        chk_true('3 CAP_RUN rows, all OK, one backdated (got ' || v_n || '/' || v_a || '/' || v_b || ')',
+                 v_n = 3 AND v_a = 3 AND v_b = 1);
+        chk_true('run_id grows: R0 < R1 < R2', run_0 < run_1 AND run_1 < run_2);
+        SELECT as_of_day, backdated, n_alert, n_event, seam_mode, n_fit INTO v_dt, v_c1, v_a, v_b, v_str, v_c
+          FROM cap_run WHERE run_id = run_0;
+        chk_true('R0: as_of_day TRUNC(SYSDATE) - 7, backdated Y, no alert state (n_alert, n_event NULL), seam fixture (got '
+                 || TO_CHAR(v_dt, 'YYYY-MM-DD') || ' ' || v_c1 || ' ' || NVL(TO_CHAR(v_a), 'NULL') || ' ' || v_str || ')',
+                 v_dt = TRUNC(SYSDATE) - 7 AND v_c1 = 'Y' AND v_a IS NULL AND v_b IS NULL AND v_str = 'fixture');
+        chk_int ('R0 n_fit = CAPR_FIT rows', v_c, n_fit);
+        SELECT COUNT(*) INTO v_n FROM cap_fit_hist WHERE run_id = run_1;
+        chk_int ('R1 CAP_FIT_HIST rows = CAPR_FIT rows', v_n, n_fit);
+        SELECT COUNT(*) INTO v_n FROM cap_fit_hist;
+        chk_int ('CAP_FIT_HIST rows = 3 runs x CAPR_FIT rows', v_n, 3 * n_fit);
+        SELECT COUNT(*) INTO v_n FROM capr_fit_history;
+        chk_int ('CAPR_FIT_HISTORY rows = 3 runs x CAPR_FIT rows', v_n, 3 * n_fit);
+        SELECT COUNT(*) INTO v_n FROM cap_fit_hist h JOIN capr_fit f
+            ON f.kind = h.kind AND f.dbid = h.dbid AND f.con_dbid = h.con_dbid AND f.series = h.series
+         WHERE h.run_id = run_2
+           AND (DECODE(h.value, f.value, 0, 1) + DECODE(h.days_to_full, f.days_to_full, 0, 1)
+                + DECODE(h.quality, f.quality, 0, 1) + DECODE(h.sev, f.sev, 0, 1)
+                + DECODE(h.last_day, f.last_day, 0, 1) + DECODE(h.add_by_day, f.add_by_day, 0, 1)) > 0;
+        chk_int ('R2 snapshot = CAPR_FIT now (value, days_to_full, quality, sev, last_day, add_by_day mismatches)', v_n, 0);
+
+        -- The fixture's alerts: TBSPC_FULL 2 (FILLING, OVERRIDE), TBSPC_NEARFULL
+        -- 2 (NEARFULL, OVERFULL), SERIES_LIMIT 2 (SESSIONS, ASM_DG:+DATA),
+        -- SERIES_NEARLIMIT 1 (TEMP_PEAK), DBCPU_HOT 1 (FIXPDB2), CPU_SHIFT 1,
+        -- and 5 anomaly rows: TBSPC_ANOM 2 (spike, FIX_GAP burst), CPU_ANOM 1,
+        -- DBCPU_ANOM 1 (the step episode), SERIES_ANOM 1. One row per key.
+        SELECT COUNT(*), COUNT(DISTINCT state_key), COUNT(DISTINCT alert_key),
+               COUNT(CASE WHEN kind IN ('TBSPC_ANOM', 'CPU_ANOM', 'DBCPU_ANOM', 'SERIES_ANOM') THEN 1 END)
+          INTO n_rows, n_state, v_n, v_a FROM capr_alerts;
+        chk_true('CAPR_ALERTS: 14 rows, 14 state_keys, 14 alert_keys, 5 anomaly rows (got ' || n_rows || '/'
+                 || n_state || '/' || v_n || '/' || v_a || ')',
+                 n_rows = 14 AND n_state = 14 AND v_n = 14 AND v_a = 5);
+        SELECT COUNT(*), COUNT(CASE WHEN state = 'OPEN' THEN 1 END) INTO v_a, v_b FROM cap_alert_state;
+        chk_true('CAP_ALERT_STATE = the distinct CAPR_ALERTS state_keys, every one OPEN (got ' || v_a || '/' || v_b || ')',
+                 v_a = n_state AND v_b = n_state);
+        SELECT COUNT(*) INTO v_n FROM cap_alert_state s
+         WHERE NOT EXISTS (SELECT 1 FROM capr_alerts a
+                            WHERE a.state_key = s.state_key AND a.alert_key = s.last_alert_key
+                              AND a.severity = s.cur_severity AND a.severity = s.max_severity
+                              AND a.message = s.last_message AND a.value = s.last_value)
+            OR s.first_seen > s.last_seen OR s.reopen_count <> 0 OR s.missed_runs <> 0 OR s.last_run_id <> run_2;
+        chk_int ('every state carries its live row (alert_key, severity, message, value), seen by R2', v_n, 0);
+        chk_int ('R1 NEW events = the state count', n_ev(run_1, 'NEW'), n_state);
+        chk_int ('R1 events in total (NEW only)', n_ev(run_1, 'ANY'), n_state);
+        chk_int ('R2 NEW events', n_ev(run_2, 'NEW'), 0);
+        chk_int ('R2 events in total (nothing changed)', n_ev(run_2, 'ANY'), 0);
+        chk_int ('R0 events (backdated: no alert state)', n_ev(run_0, 'ANY'), 0);
+        SELECT n_alert, n_anom, n_event INTO v_a, v_b, v_c FROM cap_run WHERE run_id = run_1;
+        chk_true('R1 n_alert 14, n_anom 5, n_event 14 (got ' || v_a || '/' || v_b || '/' || v_c || ')',
+                 v_a = 14 AND v_b = 5 AND v_c = 14);
+        SELECT COUNT(*) INTO v_n FROM cap_alert_event
+         WHERE run_id = run_1 AND event_id NOT BETWEEN run_1 * 100000 + 1 AND run_1 * 100000 + n_state;
+        chk_int ('R1 event_id = run_id * 100000 + 1 .. n', v_n, 0);
+
+        SELECT COUNT(*), MAX(CASE WHEN is_last = 'Y' THEN run_id END), MAX(last_ok_run_id), MAX(stale_run),
+               MAX(CASE WHEN is_last = 'Y' THEN summary END), MAX(CASE WHEN run_id = run_0 THEN summary END)
+          INTO v_n, v_a, v_b, v_c1, v_s1, v_s2 FROM capr_runs;
+        chk_true('CAPR_RUNS: 3 rows, is_last = R2, last_ok_run_id = R2, stale_run N (got ' || v_n || ' '
+                 || v_a || ' ' || v_b || ' ' || v_c1 || ')', v_n = 3 AND v_a = run_2 AND v_b = run_2 AND v_c1 = 'N');
+        chk_true('CAPR_RUNS summary "refresh run <R2> at <time> (14 alerts, <n> fits)" (got: ' || v_s1 || ')',
+                 v_s1 LIKE 'refresh run ' || run_2 || ' at % (14 alerts, ' || n_fit || ' fits)');
+        chk_true('CAPR_RUNS R0 summary says backdated (got: ' || v_s2 || ')',
+                 v_s2 LIKE '% (backdated as of ' || TO_CHAR(TRUNC(SYSDATE) - 7, 'YYYY-MM-DD') || ', ' || n_fit
+                           || ' fits, no alert state)');
+
+        SELECT COUNT(*), MIN(events_since), MAX(events_since), MIN(last_event), MAX(last_event),
+               COUNT(CASE WHEN last_seen < first_seen OR age_days < 0 THEN 1 END)
+          INTO v_n, v_a, v_b, v_s1, v_s2, v_c FROM capr_alerts_latest;
+        chk_true('CAPR_ALERTS_LATEST: every OPEN state, events_since 1 (NEW), last_event NEW (got ' || v_n || ' '
+                 || v_a || '..' || v_b || ' ' || v_s1 || '/' || v_s2 || ')',
+                 v_n = n_state AND v_a = 1 AND v_b = 1 AND v_s1 = 'NEW' AND v_s2 = 'NEW' AND v_c = 0);
+        SELECT COUNT(*) INTO v_n
+          FROM capr_alerts_latest l
+          FULL OUTER JOIN capr_alerts a ON a.state_key = l.state_key
+         WHERE l.state_key IS NULL OR a.state_key IS NULL
+            OR l.severity <> a.severity OR l.sev_rank <> a.sev_rank OR l.kind <> a.kind
+            OR l.db_pdb <> a.db_pdb OR l.day_dt <> a.day_dt OR l.value <> a.value
+            OR l.threshold <> a.threshold OR l.unit <> a.unit OR l.message <> a.message
+            OR l.alert_key <> a.alert_key OR l.direction <> a.direction
+            OR l.alarm_threshold <> a.alarm_threshold;
+        chk_int ('CAPR_ALERTS_LATEST = CAPR_ALERTS column for column after R2 (mismatches)', v_n, 0);
+        SELECT COUNT(*), COUNT(CASE WHEN run_id = run_1 AND as_of_day = TRUNC(SYSDATE) AND event = 'NEW'
+                                     AND prev_severity IS NULL AND kind IS NOT NULL THEN 1 END)
+          INTO v_n, v_a FROM capr_alert_events;
+        chk_true('CAPR_ALERT_EVENTS: the R1 NEW events, as_of_day today, kind resolved (got ' || v_n || '/' || v_a || ')',
+                 v_n = n_state AND v_a = n_state);
+
+        DBMS_OUTPUT.PUT_LINE('=== results layer: CAPR_WEEKLY_DIGEST (R2 vs R0) ===');
+        SELECT COUNT(*), MIN(run_then), MIN(run_now), SUM(n_new), SUM(n_resolved), SUM(n_reopened), SUM(n_sev_changes)
+          INTO v_n, v_a, v_b, v_c, v_d, v_num, v_num2 FROM capr_weekly_digest;
+        chk_true('digest: one row per series, R0 vs R2 (got ' || v_n || ' rows, ' || v_a || ' vs ' || v_b || ')',
+                 v_n = n_fit AND v_a = run_0 AND v_b = run_2);
+        chk_true('digest: NEW = the state count, nothing resolved / reopened / re-graded (got ' || v_c || '/' || v_d
+                 || '/' || v_num || '/' || v_num2 || ')',
+                 v_c = n_state AND v_d = 0 AND v_num = 0 AND v_num2 = 0);
+        SELECT dtf_then, dtf_now, dtf_delta, pct_then, pct_now, change
+          INTO v_a, v_b, v_c, v_num, v_num2, v_str FROM capr_weekly_digest
+         WHERE kind = 'TBSPC' AND series = 'FIX_LINEAR';
+        chk_true('digest FIX_LINEAR: days_to_full LINEAR_DTF7 then, LINEAR_DTF now, delta -7, SAME (got '
+                 || v_a || ' ' || v_b || ' ' || v_c || ' ' || v_str || ')',
+                 v_a = meta_n('LINEAR_DTF7') AND v_b = n_dtf AND v_c = -7 AND v_str = 'SAME');
+        chk_true('digest FIX_LINEAR: pct then / now = ROUND(100 * used / limit, 1) (got ' || v_num || ' / ' || v_num2 || ')',
+                 v_num  = ROUND(100 * (meta_n('LINEAR_CUR') - 7 * n_slope) / meta_n('LINEAR_LIMIT'), 1)
+                 AND v_num2 = ROUND(100 * meta_n('LINEAR_CUR') / meta_n('LINEAR_LIMIT'), 1));
+        SELECT COUNT(*) INTO v_n FROM capr_weekly_digest
+         WHERE NVL(dtf_delta, 0) <> 0
+           AND NOT ((kind = 'TBSPC' AND series IN ('FIX_LINEAR', 'FIX_ZIGZAG'))
+                    OR (kind = 'SERIES' AND series = 'DB_SIZE_GB'));
+        chk_int ('digest: dtf_delta 0 on every series the hidden days do not touch', v_n, 0);
+        SELECT n_new, events INTO v_a, v_s1 FROM capr_weekly_digest WHERE kind = 'TBSPC' AND series = 'FIX_GAP';
+        chk_true('digest FIX_GAP: "TBSPC_ANOM NEW 1" (got ' || v_a || ' ' || v_s1 || ')',
+                 v_a = 1 AND v_s1 = 'TBSPC_ANOM NEW 1');
+        SELECT n_new, events INTO v_a, v_s1 FROM capr_weekly_digest
+         WHERE kind = 'CPU' AND con_dbid = n_pdb1 AND series = 'DB_CPU_PCT';
+        chk_true('digest FIXPDB1 DB_CPU_PCT: "CPU_SHIFT NEW 1, DBCPU_ANOM NEW 1" (got ' || v_a || ' ' || v_s1 || ')',
+                 v_a = 2 AND v_s1 = 'CPU_SHIFT NEW 1, DBCPU_ANOM NEW 1');
+
+        DBMS_OUTPUT.PUT_LINE('=== results layer: CAPR_FORECAST_ACCURACY (R0 forecasts vs today) ===');
+        SELECT COUNT(*), MIN(run_id), MAX(run_id), MIN(elapsed_days), MAX(elapsed_days)
+          INTO v_n, v_a, v_b, v_c, v_d FROM capr_forecast_accuracy;
+        chk_true('accuracy: 2 rows (FIX_LINEAR, FIX_ZIGZAG of R0), elapsed 7 days (got ' || v_n || ' ' || v_c || '..' || v_d || ')',
+                 v_n = 2 AND v_a = run_0 AND v_b = run_0 AND v_c = 7 AND v_d = 7);
+        SELECT projected, actual, error INTO v_a, v_b, v_c FROM capr_forecast_accuracy WHERE series = 'FIX_LINEAR';
+        chk_true('accuracy FIX_LINEAR: error 0 (perfectly linear), projected = actual = LINEAR_CUR (got error '
+                 || v_c || ')', ABS(v_c) < 1 AND ABS(v_b - meta_n('LINEAR_CUR')) < 1);
+        SELECT value_then, slope_then, error, error_pct INTO v_a, v_b, v_c, v_d
+          FROM capr_forecast_accuracy WHERE series = 'FIX_ZIGZAG';
+        chk_close('accuracy FIX_ZIGZAG value_then = zz(LAST - 7)', v_a, (12800 + 1280 * 113 - 2560) * 8192, 0.000001);
+        chk_close('accuracy FIX_ZIGZAG slope_then = OLS on i 24..113', v_b, meta_n('ZZ_ACC7_SLOPE'), 0.000001);
+        chk_close('accuracy FIX_ZIGZAG error = zz(LAST) - (zz(LAST - 7) + 7 * slope_then)', v_c, meta_n('ZZ_ACC7_ERR'), 0.000001);
+        chk_true ('accuracy FIX_ZIGZAG error non-zero (got ' || v_c || ', ' || v_d || '%)', ABS(v_c) > 1000000);
+
+        DBMS_OUTPUT.PUT_LINE('=== results layer: resolve (grace), reopen ===');
+        SELECT cfg_value INTO v_old FROM cap_config WHERE cfg_name = 'dtf_warn';
+        knob('dtf_warn', 1);
+        COMMIT;
+        BEGIN
+            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE state_key = v_okey;
+            chk_int('dtf_warn 1: FIX_OVERRIDE TBSPC_FULL (74 days, global thresholds) leaves CAPR_ALERTS', v_n, 0);
+            cap_results.refresh;
+            run_3 := last_run;
+            SELECT state, missed_runs INTO v_str, v_a FROM cap_alert_state WHERE state_key = v_okey;
+            chk_true('R3 (missing once, grace 2): still OPEN, missed_runs 1 (got ' || v_str || ' ' || v_a || ')',
+                     v_str = 'OPEN' AND v_a = 1);
+            chk_int ('R3 events (none: inside the grace)', n_ev(run_3, 'ANY'), 0);
+            SELECT COUNT(*) INTO v_n FROM capr_alerts_latest WHERE state_key = v_okey;
+            chk_int ('R3: CAPR_ALERTS_LATEST still lists it', v_n, 1);
+            cap_results.refresh;
+            run_4 := last_run;
+            SELECT state, missed_runs, resolved_at INTO v_str, v_a, v_dt FROM cap_alert_state WHERE state_key = v_okey;
+            chk_true('R4 (missing twice): RESOLVED, missed_runs 2, resolved_at set (got ' || v_str || ' ' || v_a || ')',
+                     v_str = 'RESOLVED' AND v_a = 2 AND v_dt IS NOT NULL);
+            SELECT COUNT(*), MAX(event), MAX(state_key), MAX(message) INTO v_n, v_s1, v_s2, v_msg
+              FROM cap_alert_event WHERE run_id = run_4;
+            chk_true('R4: one event, RESOLVED, for FIX_OVERRIDE (got ' || v_n || ' ' || v_s1 || ' ' || v_s2 || ')',
+                     v_n = 1 AND v_s1 = 'RESOLVED' AND v_s2 = v_okey);
+            chk_true('R4: RESOLVED message (got: ' || v_msg || ')',
+                     v_msg LIKE 'Resolved: missing from 2 consecutive refresh runs, last seen %');
+            SELECT COUNT(*) INTO v_n FROM capr_alerts_latest WHERE state_key = v_okey;
+            chk_int ('R4: CAPR_ALERTS_LATEST drops it', v_n, 0);
+        EXCEPTION
+            WHEN OTHERS THEN knob('dtf_warn', v_old); COMMIT; RAISE;
+        END;
+        knob('dtf_warn', v_old);
+        COMMIT;
+        SELECT first_seen INTO v_first FROM cap_alert_state WHERE state_key = v_okey;
+        cap_results.refresh;
+        run_5 := last_run;
+        SELECT state, reopen_count, missed_runs, resolved_at, first_seen, cur_severity
+          INTO v_str, v_a, v_b, v_dt, v_dt2, v_s1 FROM cap_alert_state WHERE state_key = v_okey;
+        chk_true('R5 (dtf_warn back): OPEN again, reopen_count 1, missed_runs 0, resolved_at NULL, first_seen kept, WARN (got '
+                 || v_str || ' ' || v_a || ' ' || v_b || ' ' || v_s1 || ')',
+                 v_str = 'OPEN' AND v_a = 1 AND v_b = 0 AND v_dt IS NULL AND v_dt2 = v_first AND v_s1 = 'WARN');
+        SELECT COUNT(*), MAX(event), MAX(state_key) INTO v_n, v_s1, v_s2 FROM cap_alert_event WHERE run_id = run_5;
+        chk_true('R5: one event, REOPENED, for FIX_OVERRIDE (got ' || v_n || ' ' || v_s1 || ')',
+                 v_n = 1 AND v_s1 = 'REOPENED' AND v_s2 = v_okey);
+        SELECT events_since, last_event INTO v_a, v_s1 FROM capr_alerts_latest WHERE state_key = v_okey;
+        chk_true('CAPR_ALERTS_LATEST events_since counts from the REOPENED (got ' || v_a || ' ' || v_s1 || ')',
+                 v_a = 1 AND v_s1 = 'REOPENED');
+
+        DBMS_OUTPUT.PUT_LINE('=== results layer: ack / unack ===');
+        cap_results.ack(v_skey, TRUNC(SYSDATE) + 1, 'known spike');
+        SELECT COUNT(*) INTO v_n FROM capr_alerts_latest WHERE state_key = v_skey;
+        chk_int ('ack FIX_SPIKE TBSPC_ANOM until tomorrow: absent from CAPR_ALERTS_LATEST', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE state_key = v_skey;
+        chk_int ('ack: still present in the live CAPR_ALERTS', v_n, 1);
+        SELECT ack_until, ack_note, ack_by INTO v_dt, v_s1, v_s2 FROM cap_alert_state WHERE state_key = v_skey;
+        chk_true('ack: ack_until tomorrow, note, ack_by = SESSION_USER (got ' || v_s2 || ')',
+                 v_dt = TRUNC(SYSDATE) + 1 AND v_s1 = 'known spike' AND v_s2 = SYS_CONTEXT('USERENV', 'SESSION_USER'));
+        cap_results.unack(v_skey);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts_latest WHERE state_key = v_skey;
+        chk_int ('unack: back in CAPR_ALERTS_LATEST', v_n, 1);
+        SELECT last_alert_key INTO v_akey FROM cap_alert_state WHERE state_key = v_okey;
+        cap_results.ack(v_akey);
+        SELECT ack_until INTO v_dt FROM cap_alert_state WHERE state_key = v_okey;
+        chk_true('ack by alert_key, no p_until: acked until it resolves (9999-12-31)', v_dt = DATE '9999-12-31');
+        BEGIN
+            cap_results.ack('NO|SUCH|KEY');
+            fail('ack of an unknown key raises ORA-20072');
+        EXCEPTION
+            WHEN OTHERS THEN
+                IF SQLCODE = -20072 THEN pass('ack of an unknown key raises ORA-20072'); ELSE RAISE; END IF;
+        END;
+
+        DBMS_OUTPUT.PUT_LINE('=== results layer: escalate / de-escalate ===');
+        SELECT cfg_value INTO v_old FROM cap_config WHERE cfg_name = 'dtf_crit';
+        knob('dtf_crit', 80);
+        COMMIT;
+        BEGIN
+            cap_results.refresh;
+            run_6 := last_run;
+            SELECT COUNT(*), MAX(event), MAX(state_key), MAX(severity), MAX(prev_severity)
+              INTO v_n, v_s1, v_s2, v_str, v_str2 FROM cap_alert_event WHERE run_id = run_6;
+            chk_true('R6 (dtf_crit 80): one event, ESCALATED WARN -> CRIT, FIX_OVERRIDE (got ' || v_n || ' ' || v_s1
+                     || ' ' || v_str2 || '->' || v_str || ')',
+                     v_n = 1 AND v_s1 = 'ESCALATED' AND v_s2 = v_okey AND v_str = 'CRIT' AND v_str2 = 'WARN');
+            SELECT max_severity, ack_until INTO v_s1, v_dt FROM cap_alert_state WHERE state_key = v_okey;
+            chk_true('R6: max_severity CRIT, the escalation cleared the ack', v_s1 = 'CRIT' AND v_dt IS NULL);
+            SELECT COUNT(*) INTO v_n FROM capr_alerts_latest WHERE state_key = v_okey AND severity = 'CRIT';
+            chk_int ('R6: CAPR_ALERTS_LATEST lists it again, CRIT', v_n, 1);
+        EXCEPTION
+            WHEN OTHERS THEN knob('dtf_crit', v_old); COMMIT; RAISE;
+        END;
+        knob('dtf_crit', v_old);
+        COMMIT;
+        cap_results.refresh;
+        run_7 := last_run;
+        SELECT COUNT(*), MAX(event), MAX(severity), MAX(prev_severity)
+          INTO v_n, v_s1, v_str, v_str2 FROM cap_alert_event WHERE run_id = run_7;
+        chk_true('R7 (dtf_crit back): one event, DEESCALATED CRIT -> WARN (got ' || v_n || ' ' || v_s1 || ')',
+                 v_n = 1 AND v_s1 = 'DEESCALATED' AND v_str = 'WARN' AND v_str2 = 'CRIT');
+        SELECT cur_severity, max_severity INTO v_s1, v_s2 FROM cap_alert_state WHERE state_key = v_okey;
+        chk_true('R7: cur_severity WARN, max_severity stays CRIT', v_s1 = 'WARN' AND v_s2 = 'CRIT');
+
+        DBMS_OUTPUT.PUT_LINE('=== results layer: FAILED run, stale_run, purge ===');
+        BEGIN
+            cap_results.refresh(p_as_of => TRUNC(SYSDATE) + 1);
+            fail('refresh with p_as_of tomorrow raises ORA-20071');
+        EXCEPTION
+            WHEN OTHERS THEN
+                IF SQLCODE = -20071 THEN pass('refresh with p_as_of tomorrow raises ORA-20071'); ELSE RAISE; END IF;
+        END;
+        run_f := last_run;
+        SELECT status, error_text, ended_at INTO v_str, v_msg, v_ts FROM cap_run WHERE run_id = run_f;
+        chk_true('the failed run: status FAILED, error_text has ORA-20071, ended_at set (got ' || v_str || ')',
+                 v_str = 'FAILED' AND v_msg LIKE '%ORA-20071%' AND v_ts IS NOT NULL);
+        SELECT COUNT(*) INTO v_n FROM cap_fit_hist WHERE run_id = run_f;
+        chk_int ('the failed run left no fit rows (rolled back)', v_n, 0);
+        SELECT MAX(CASE WHEN is_last = 'Y' THEN summary END), MAX(last_ok_run_id), MAX(stale_run)
+          INTO v_msg, v_a, v_c1 FROM capr_runs;
+        chk_true('CAPR_RUNS: the newest run reads FAILED, last_ok_run_id = R7, stale_run N (got: ' || v_msg || ')',
+                 v_msg LIKE 'refresh run ' || run_f || ' at % FAILED: ORA-20071%' AND v_a = run_7 AND v_c1 = 'N');
+        -- A stalled job: R7 (the newest OK live run) ended 48 h ago, past
+        -- refresh_stale_hours (36). Rolled back.
+        SAVEPOINT as_runstale;
+        UPDATE cap_run SET ended_at = ended_at - INTERVAL '2' DAY WHERE run_id = run_7;
+        SELECT MAX(stale_run), MAX(last_ok_age_hours) INTO v_c1, v_a FROM capr_runs;
+        chk_true('R7 ended 48 h ago: stale_run Y, last_ok_age_hours >= 48 (got ' || v_c1 || ' ' || v_a || ')',
+                 v_c1 = 'Y' AND v_a >= 48);
+        ROLLBACK TO SAVEPOINT as_runstale;
+
+        SELECT COUNT(*) INTO n_rows FROM cap_alert_event WHERE run_id = run_7;
+        cap_results.purge(0);
+        SELECT COUNT(*), MIN(run_id), MAX(run_id) INTO v_n, v_a, v_b FROM cap_run;
+        chk_true('purge(0) keeps the newest run (the FAILED one) and the newest OK live run (R7) (got ' || v_n || ')',
+                 v_n = 2 AND v_a = run_7 AND v_b = run_f);
+        SELECT COUNT(*), MIN(run_id) INTO v_n, v_a FROM cap_fit_hist;
+        chk_true('purge(0): only R7''s fit rows left', v_n = n_fit AND v_a = run_7);
+        SELECT COUNT(*) INTO v_n FROM cap_alert_event;
+        chk_int ('purge(0): only R7''s events left', v_n, n_rows);
+        SELECT COUNT(*) INTO v_n FROM cap_alert_state;
+        chk_int ('purge(0): every state stays (none resolved)', v_n, n_state);
+
+        -- End on an OK run so the reports show the last-run line.
+        cap_results.refresh;
+        run_8 := last_run;
+        SELECT status, n_event INTO v_str, v_a FROM cap_run WHERE run_id = run_8;
+        chk_true('R8: OK, no events', v_str = 'OK' AND v_a = 0);
+    EXCEPTION
+        WHEN OTHERS THEN
+            restore_usage;
+            fail('results-layer block raised ' || SQLERRM || ' ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);
+    END;
 
     DBMS_OUTPUT.PUT_LINE('----------------------------------------');
     DBMS_OUTPUT.PUT_LINE('RESULT: ' || g_pass || ' passed, ' || g_fail || ' failed');
