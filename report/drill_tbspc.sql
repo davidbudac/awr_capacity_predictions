@@ -9,6 +9,7 @@
 --   3. residual footer     -- SUM(resid) ~ 0 and resid_se = sqrt(SSE/(n-2)),
 --                             the number the M9.1 prediction bands are built on
 --   4. anomaly arithmetic  -- one spelled-out line per flagged (day, mode)
+--   5. who is filling it   -- the top 10 growing segments (CAPR_SEGMENT_GROWTH)
 --
 -- READ-ONLY: SELECTs against CAPD_/CAPF_/CAPA_/CAPR_ views only (never
 -- DBA_HIST_*), no DML/DDL, no database object created or modified.
@@ -74,6 +75,7 @@ COLUMN k_floor NEW_VALUE k_floor NOPRINT
 COLUMN k_hist  NEW_VALUE k_hist  NOPRINT
 COLUMN k_dow   NEW_VALUE k_dow   NOPRINT
 COLUMN k_whist NEW_VALUE k_whist NOPRINT
+COLUMN k_segw  NEW_VALUE k_segw  NOPRINT
 -- FM/RTRIM: a raw NUMBER NEW_VALUE keeps SQL*Plus's right-justified width
 -- ("WARN<=        90"), and FM on a whole number leaves a trailing "3." behind.
 SELECT TO_CHAR(c.train_days,                'FM9999990')         AS k_train,
@@ -83,7 +85,8 @@ SELECT TO_CHAR(c.train_days,                'FM9999990')         AS k_train,
        TO_CHAR(c.abs_floor_bytes / 1048576, 'FM99999990.0')      AS k_floor,
        TO_CHAR(c.trailing_min_hist,         'FM9999990')         AS k_hist,
        TO_CHAR(c.dow_weeks,                 'FM9999990')         AS k_dow,
-       TO_CHAR(c.weekly_min_hist,           'FM9999990')         AS k_whist
+       TO_CHAR(c.weekly_min_hist,           'FM9999990')         AS k_whist,
+       TO_CHAR(c.seg_window_days,           'FM9999990')         AS k_segw
 FROM   cap_cfg c;
 SET TERMOUT ON
 
@@ -341,6 +344,49 @@ SELECT arith FROM (
 ORDER  BY ord, srt, mrank;
 
 PROMPT
+PROMPT == 4. WHO IS FILLING IT (CAPR_SEGMENT_GROWTH, last &k_segw days, top 10) ==
+PROMPT    GROWN_MIB = SUM(space_allocated_delta) of the segment over the window
+PROMPT    (CAP_CONFIG seg_window_days), USED_MIB = SUM(space_used_delta).
+PROMPT    SHARE% = its part of the growth of the tablespace's growing segments.
+PROMPT    AWR keeps only the top segments of each snapshot, so small growers can be
+PROMPT    missing and the shares are shares of the captured growth.
+
+COLUMN db_pdb         FORMAT A20           HEADING 'DB/PDB'
+COLUMN seg_rank       FORMAT 990           HEADING 'RANK'
+COLUMN owner          FORMAT A16           HEADING 'OWNER'
+COLUMN object_name    FORMAT A30           HEADING 'OBJECT'
+COLUMN subobject_name FORMAT A20           HEADING 'SUBOBJECT'
+COLUMN object_type    FORMAT A16           HEADING 'TYPE'
+COLUMN grown_mb       FORMAT 999999990.00  HEADING 'GROWN_MIB'
+COLUMN used_grown_mb  FORMAT 999999990.00  HEADING 'USED_MIB'
+COLUMN share_pct      FORMAT 990.0         HEADING 'SHARE%'
+COLUMN seg_window     FORMAT A23           HEADING 'WINDOW'
+
+SELECT db_pdb,
+       rank_in_tbspc  AS seg_rank,
+       owner,
+       object_name,
+       subobject_name,
+       object_type,
+       grown_mb,
+       used_grown_mb,
+       share_pct,
+       TO_CHAR(window_from, 'YYYY-MM-DD') || '..' || TO_CHAR(window_to, 'YYYY-MM-DD') AS seg_window
+FROM   capr_segment_growth
+WHERE  tablespace_name = '&drill_ts'
+  AND  ('&drill_con' = '0' OR TO_CHAR(con_dbid) = '&drill_con')
+  AND  rank_in_tbspc <= 10
+ORDER  BY con_dbid, rank_in_tbspc;
+
+COLUMN note FORMAT A70 HEADING 'NOTE'
+SELECT '(no segment growth recorded for this tablespace in the window)' AS note
+FROM   dual
+WHERE  '&drill_ts' != '?'
+  AND  NOT EXISTS (SELECT 1 FROM capr_segment_growth
+                   WHERE  tablespace_name = '&drill_ts'
+                     AND  ('&drill_con' = '0' OR TO_CHAR(con_dbid) = '&drill_con'));
+
+PROMPT
 PROMPT ================================================================================
 PROMPT  End of drill-down -- read-only run, no database objects created or modified.
 PROMPT ================================================================================
@@ -364,4 +410,5 @@ UNDEFINE k_floor
 UNDEFINE k_hist
 UNDEFINE k_dow
 UNDEFINE k_whist
+UNDEFINE k_segw
 CLEAR COLUMNS

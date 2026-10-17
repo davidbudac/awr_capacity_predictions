@@ -9,13 +9,17 @@
 -- first, growing first, then biggest); this file only applies the WHERE, the
 -- same one report_html.sql applies, so a 500-tablespace database prints
 -- top_n interesting rows instead of 500. CAPR_TBSPC_FORECAST still has them all.
+-- Scoped runs re-number rank_report inside the scope (ROW_NUMBER() OVER
+-- (ORDER BY rank_report)), as section 1 does.
 --
 PROMPT
-PROMPT == 2. TABLESPACE FORECAST (GiB): current / +30 / +90 / +180, plus ESM +30 ==
+PROMPT == 2. TABLESPACE FORECAST (GiB): current / +30 / +90 / +180, plus the ESM point ==
 PROMPT    Showing &ts_shown of &ts_total tablespace(s): growing, near-full, or >= &min_gb GiB
 PROMPT    used (knob report_min_gb), capped at top &top_n -- CAPR_TBSPC_FORECAST has all.
 PROMPT    QUALITY: OK | LOW_CONFIDENCE (R2<gate) | FLAT (no growth) | INSUFFICIENT_HISTORY.
 PROMPT    ESM (Tier 2) only reaches +30 on 19c (hard horizon cap); +90/180 are REGR.
+PROMPT    ESM_GIB sits ESM_H days after the last day: the model's furthest step
+PROMPT    (esm_horizon_days, at most 30) minus its age (esm_age_days).
 PROMPT    180_LO/180_HI: 95% prediction band on the +180 projection (widest printed
 PROMPT    horizon); the +30/+90/+365 bands are in CAPF_TBSPC_FORECAST (proj_*_lo/hi).
 
@@ -30,7 +34,8 @@ COLUMN p180_lo         FORMAT 99990.00     HEADING '180_LO'
 COLUMN p180_hi         FORMAT 99990.00     HEADING '180_HI'
 COLUMN r2              FORMAT 90.999        HEADING 'R2'
 COLUMN quality         FORMAT A20          HEADING 'QUALITY'
-COLUMN esm30           FORMAT 99990.00     HEADING 'ESM+30'
+COLUMN esm30           FORMAT 99990.00     HEADING 'ESM_GIB'
+COLUMN esm_h           FORMAT 9990         HEADING 'ESM_H'
 
 SELECT db_pdb,
        tablespace_name,
@@ -43,8 +48,12 @@ SELECT db_pdb,
        p180_hi,
        r2,
        quality,
-       esm30
-FROM   capr_tbspc_forecast
+       esm30,
+       esm_horizon_days - esm_age_days AS esm_h
+FROM  (SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.rank_report) AS s_rank
+       FROM   capr_tbspc_forecast t
+       WHERE  (&cap_sdbid IS NULL OR t.dbid = &cap_sdbid)
+         AND  (&cap_scon  IS NULL OR t.con_dbid = &cap_scon))
 WHERE  is_reportable = 'Y'
-  AND  rank_report <= &top_n
-ORDER  BY rank_report;
+  AND  s_rank <= &top_n
+ORDER  BY s_rank;

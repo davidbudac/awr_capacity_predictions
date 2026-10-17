@@ -233,14 +233,38 @@ FROM   dual
 WHERE  1 = 0;
 
 -- --------------------------------------------------------------------
+-- CAPV_SEG_STAT -- zero-row stub. TODO: the awr-fleet-warehouse collector
+-- does not gather DBA_HIST_SEG_STAT / DBA_HIST_SEG_STAT_OBJ yet. Once it
+-- exposes them as an AWRV_* view keyed on (dbid, con_dbid), replace this
+-- with a pass-through shaped like ddl/10_seam_local.sql. Typed constants,
+-- not CAST(NULL ...), for the ORA-07445 reason above.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capv_seg_stat AS
+SELECT 0                           AS dbid,
+       0                           AS con_dbid,
+       0                           AS instance_number,
+       0                           AS snap_id,
+       0                           AS tablespace_id,
+       CAST('-' AS VARCHAR2(30))   AS tablespace_name,
+       CAST('-' AS VARCHAR2(128))  AS owner,
+       CAST('-' AS VARCHAR2(128))  AS object_name,
+       CAST('-' AS VARCHAR2(128))  AS subobject_name,
+       CAST('-' AS VARCHAR2(18))   AS object_type,
+       0                           AS space_used_delta,
+       0                           AS space_allocated_delta
+FROM   dual
+WHERE  1 = 0;
+
+-- --------------------------------------------------------------------
 -- CAPV_CONTRACT -- what this seam actually presents, one row per fact
 -- source: row count, distinct con_dbid, snap_id range and the newest
 -- snapshot end time. per_container_expected = 'Y' where the contract wants
--- one series per container (TBSPC_USAGE, TIME_MODEL, SYSSTAT) and 'N' where
+-- one series per container (TBSPC_USAGE, TIME_MODEL, SYSSTAT, SEG_STAT) and 'N' where
 -- the source is host / instance / spine level (OSSTAT, RESOURCE_LIMIT,
 -- PARAMETER, ASM_DISKGROUP, SNAPSHOT), so n_con_dbid = 1 against a 'Y' means
--- the per-PDB series are missing. ASM_DISKGROUP has n_rows = 0 on a database
--- without ASM. A diagnostic for doctor.sql: it full-scans every source, and no
+-- the per-PDB series are missing. SEG_STAT is per container too. ASM_DISKGROUP
+-- has n_rows = 0 on a database without ASM, SEG_STAT on the warehouse seam
+-- until the collector gathers it. A diagnostic for doctor.sql: it full-scans every source, and no
 -- analytic view selects from it. The body reads only CAPV_* and is the same
 -- in all three seam files.
 -- --------------------------------------------------------------------
@@ -254,6 +278,7 @@ WITH src AS (
         UNION ALL SELECT 'RESOURCE_LIMIT', dbid, con_dbid, snap_id FROM capv_resource_limit
         UNION ALL SELECT 'PARAMETER',      dbid, con_dbid, snap_id FROM capv_parameter
         UNION ALL SELECT 'ASM_DISKGROUP',  dbid, con_dbid, snap_id FROM capv_asm_diskgroup
+        UNION ALL SELECT 'SEG_STAT',       dbid, con_dbid, snap_id FROM capv_seg_stat
      ),
      per_con AS (
         SELECT source_name, dbid, con_dbid,
@@ -278,6 +303,7 @@ WITH src AS (
         UNION ALL SELECT 'RESOURCE_LIMIT', 'N' FROM dual
         UNION ALL SELECT 'PARAMETER',      'N' FROM dual
         UNION ALL SELECT 'ASM_DISKGROUP',  'N' FROM dual
+        UNION ALL SELECT 'SEG_STAT',       'Y' FROM dual
      )
 SELECT k.source_name,
        NVL(SUM(p.n_rows), 0)        AS n_rows,

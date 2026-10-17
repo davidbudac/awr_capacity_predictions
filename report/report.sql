@@ -12,8 +12,19 @@
 --   SQL> @report/report.sql                  -- defaults from report/defaults.sql
 --   SQL> @report/report.sql 5                -- top_n=5
 --   SQL> @report/report.sql 5 7 N            -- top_n / anomaly_days / show_esm
+--   SQL> @report/report.sql 10 30 AUTO 42424242 42424243   -- one container
+--   SQL> @report/report.sql - - - - - SNAPSHOT             -- from the last refresh run
 -- Arguments are positional and optional (M7.6); each one omitted falls back to
 -- report/defaults.sql. show_esm is AUTO | Y | N.
+--   [dbid] [con_dbid]  scope: every section shows only that database / that
+--                      container, and the top_n bounds rank inside the scope.
+--                      Omit them, or pass '-', for every database.
+--   [source]           LIVE (default): evaluate the CAPR views now.
+--                      SNAPSHOT: the alert list reads CAPR_ALERTS_LATEST, the
+--                      section 1 and 7 tables read CAPR_FIT_HISTORY of the
+--                      newest OK refresh run, and the coverage line is that
+--                      run's summary (fast: no live CAPR_ALERTS evaluation).
+--                      The other sections stay live.
 --
 -- Requires the suite installed (any seam mode). Tier 2 rows appear only if
 -- cap_forecast_ml.train_all has been run.
@@ -37,7 +48,7 @@ ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD';
 -- `@report/report.sql` never prompts / hangs on an undefined substitution var.
 -- To change them for every run, edit report/defaults.sql (the single source of
 -- truth); to change one run, pass them positionally (M7.6):
---   @report/report.sql [top_n] [anomaly_days] [show_esm]
+--   @report/report.sql [top_n] [anomaly_days] [show_esm] [dbid] [con_dbid] [source]
 @@report/defaults.sql
 
 -- M7.6: make &1..&3 safe to reference whether or not they were passed. A
@@ -50,17 +61,35 @@ SET TERMOUT OFF
 COLUMN 1 NEW_VALUE 1 NOPRINT
 COLUMN 2 NEW_VALUE 2 NOPRINT
 COLUMN 3 NEW_VALUE 3 NOPRINT
-SELECT NULL AS "1", NULL AS "2", NULL AS "3" FROM dual WHERE 1 = 0;
+COLUMN 4 NEW_VALUE 4 NOPRINT
+COLUMN 5 NEW_VALUE 5 NOPRINT
+COLUMN 6 NEW_VALUE 6 NOPRINT
+SELECT NULL AS "1", NULL AS "2", NULL AS "3",
+       NULL AS "4", NULL AS "5", NULL AS "6" FROM dual WHERE 1 = 0;
 
 -- Effective knobs = positional argument, else the defaults.sql value. An
 -- omitted argument is the empty string, and '' IS NULL in Oracle, so NVL
--- picks the default. Re-DEFINEs the same three names the sections already use.
+-- picks the default; '-' does the same, so a caller can skip an argument to
+-- reach a later one. Re-DEFINEs the same three names the sections already use.
 COLUMN eff_top_n NEW_VALUE top_n        NOPRINT
 COLUMN eff_anom  NEW_VALUE anomaly_days NOPRINT
 COLUMN eff_esm   NEW_VALUE show_esm     NOPRINT
-SELECT NVL('&1', '&top_n')               AS eff_top_n,
-       NVL('&2', '&anomaly_days')        AS eff_anom,
-       NVL(UPPER('&3'), UPPER('&show_esm')) AS eff_esm
+SELECT NVL(NULLIF(TRIM('&1'), '-'), '&top_n')                  AS eff_top_n,
+       NVL(NULLIF(TRIM('&2'), '-'), '&anomaly_days')           AS eff_anom,
+       NVL(NULLIF(UPPER(TRIM('&3')), '-'), UPPER('&show_esm')) AS eff_esm
+FROM   dual;
+
+-- Scope and source. cap_sdbid / cap_scon are a number or the literal NULL,
+-- so every section filters with
+--   (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+-- and an unscoped run reads (NULL IS NULL OR dbid = NULL): always true.
+-- Anything but digits (omitted, '-') means every database.
+COLUMN eff_sdbid NEW_VALUE cap_sdbid NOPRINT
+COLUMN eff_scon  NEW_VALUE cap_scon  NOPRINT
+COLUMN eff_src   NEW_VALUE cap_src   NOPRINT
+SELECT NVL(REGEXP_SUBSTR(TRIM('&4'), '^[0-9]+$'), 'NULL')                  AS eff_sdbid,
+       NVL(REGEXP_SUBSTR(TRIM('&5'), '^[0-9]+$'), 'NULL')                  AS eff_scon,
+       CASE WHEN UPPER(TRIM('&6')) = 'SNAPSHOT' THEN 'SNAPSHOT' ELSE 'LIVE' END AS eff_src
 FROM   dual;
 SET TERMOUT ON
 
@@ -86,6 +115,11 @@ COLUMN esm_file NEW_VALUE esm_file NOPRINT
 COLUMN min_gb   NEW_VALUE min_gb   NOPRINT
 COLUMN ts_total NEW_VALUE ts_total NOPRINT
 COLUMN ts_shown NEW_VALUE ts_shown NOPRINT
+COLUMN cap_scope_lbl NEW_VALUE cap_scope_lbl NOPRINT
+COLUMN cap_src_lbl   NEW_VALUE cap_src_lbl   NOPRINT
+COLUMN cap_snap_run  NEW_VALUE cap_snap_run  NOPRINT
+COLUMN sec1_file     NEW_VALUE sec1_file     NOPRINT
+COLUMN sec7_file     NEW_VALUE sec7_file     NOPRINT
 
 -- Identity via SYS_CONTEXT (no catalog/v$ privileges needed, so the report
 -- runs from any monitoring schema, not just one with SELECT_CATALOG_ROLE).
@@ -116,15 +150,59 @@ SELECT TO_CHAR(c.dtf_warn,                                                    'F
        -- report_min_gb may be fractional, so keep the decimals and strip the
        -- trailing point FM leaves behind on a whole number (1. -> 1).
        RTRIM(TO_CHAR(c.report_min_gb, 'FM9999990.999'), '.')                                    AS min_gb,
-       TO_CHAR((SELECT COUNT(*)  FROM capr_tbspc_forecast),                          'FM9999990') AS ts_total,
+       TO_CHAR((SELECT COUNT(*)  FROM capr_tbspc_forecast
+                WHERE  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+                  AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon)),               'FM9999990') AS ts_total,
        -- M7.4: how many of them sections 2 / 6a will actually print, i.e. the
        -- exact WHERE those sections apply -- so the header states the truth
-       -- even when top_n is larger than the number of tablespaces.
-       TO_CHAR((SELECT COUNT(*)  FROM capr_tbspc_forecast
-                WHERE is_reportable = 'Y' AND rank_report <= &top_n),               'FM9999990') AS ts_shown,
+       -- even when top_n is larger than the number of tablespaces. The rank
+       -- is re-numbered inside the scope, as the sections do.
+       TO_CHAR((SELECT COUNT(*)
+                FROM  (SELECT is_reportable,
+                              ROW_NUMBER() OVER (ORDER BY rank_report) AS s_rank
+                       FROM   capr_tbspc_forecast
+                       WHERE  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+                         AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon))
+                WHERE is_reportable = 'Y' AND s_rank <= &top_n),                    'FM9999990') AS ts_shown,
        TO_CHAR(c.mad_window_days,                                             'FM9999990') AS mad_w,
        TO_CHAR(c.dow_weeks,                                                   'FM9999990') AS dow_w
 FROM   cap_cfg c;
+
+-- Defaults first, so a failing lookup below (suite not installed) cannot
+-- leave a variable undefined and make SQL*Plus prompt for it.
+DEFINE sec1_file     = 'report/sections/01_days_to_full.sql'
+DEFINE sec7_file     = 'report/sections/07_series.sql'
+DEFINE cap_snap_run  = 0
+DEFINE cap_scope_lbl = 'see the arguments'
+DEFINE cap_src_lbl   = '&cap_src'
+
+-- Scope label (CAPR_CONTAINER names the container), source label, and the
+-- section 1 / 7 files for the source. The SNAPSHOT run is the newest OK
+-- live refresh run (CAPR_RUNS.last_ok_run_id).
+SELECT CASE WHEN &cap_sdbid IS NULL AND &cap_scon IS NULL THEN 'every database in this schema'
+            ELSE TRIM(CASE WHEN &cap_sdbid IS NOT NULL THEN 'dbid ' || '&cap_sdbid' END
+                      || CASE WHEN &cap_scon IS NOT NULL THEN ' con_dbid ' || '&cap_scon' END)
+                 || ' (' || NVL((SELECT LISTAGG(db_pdb, ', ') WITHIN GROUP (ORDER BY db_pdb)
+                                 FROM   capr_container
+                                 WHERE  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+                                   AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon)),
+                                'no such container') || ')'
+       END                                                                    AS cap_scope_lbl,
+       NVL((SELECT TO_CHAR(MAX(last_ok_run_id)) FROM capr_runs), '0')         AS cap_snap_run,
+       CASE WHEN '&cap_src' = 'SNAPSHOT'
+            THEN NVL((SELECT 'SNAPSHOT, from refresh run ' || r.run_id || ' at '
+                             || TO_CHAR(r.started_at, 'YYYY-MM-DD HH24:MI')
+                             || ' (as of ' || TO_CHAR(r.as_of_day, 'YYYY-MM-DD') || ')'
+                      FROM   capr_runs r
+                      WHERE  r.run_id = r.last_ok_run_id),
+                     'SNAPSHOT, but no OK refresh run exists yet: sections 0, 1 and 7 are empty')
+            ELSE 'LIVE (CAPR views evaluated now)'
+       END                                                                    AS cap_src_lbl,
+       CASE WHEN '&cap_src' = 'SNAPSHOT' THEN 'report/sections/01_days_to_full_snap.sql'
+            ELSE 'report/sections/01_days_to_full.sql' END                    AS sec1_file,
+       CASE WHEN '&cap_src' = 'SNAPSHOT' THEN 'report/sections/07_series_snap.sql'
+            ELSE 'report/sections/07_series.sql' END                          AS sec7_file
+FROM   dual;
 
 -- Section 6 dispatch:
 --   show_esm='N'                    -> skip stub (note only)
@@ -150,6 +228,8 @@ PROMPT  Schema   : &cap_user
 PROMPT  Generated: &cap_gen
 PROMPT  Config   : days-to-full WARN<=&dtf_warn CRIT<=&dtf_crit ; CPU saturation &cpu_sat%
 PROMPT  Tier 2   : OML ESM forecast models &esm_ok ok, &esm_failed failed, &esm_stale stale
+PROMPT  Scope    : &cap_scope_lbl
+PROMPT  Source   : &cap_src_lbl
 PROMPT ................................................................................
 PROMPT  NOTE: forecasts degrade loudly on short AWR retention -- watch TRAIN_N and
 PROMPT        QUALITY. INSUFFICIENT_HISTORY means fewer than the configured minimum
@@ -157,13 +237,13 @@ PROMPT        training days; raise DBMS_WORKLOAD_REPOSITORY retention for real t
 PROMPT ================================================================================
 
 @@report/sections/00_at_a_glance.sql
-@@report/sections/01_days_to_full.sql
+@@&sec1_file
 @@report/sections/02_tbspc_forecast.sql
 @@report/sections/03_tbspc_anomalies.sql
 @@report/sections/04_cpu_trend.sql
 @@report/sections/05_cpu_anomalies.sql
 @@&esm_file
-@@report/sections/07_series.sql
+@@&sec7_file
 
 PROMPT
 PROMPT ================================================================================
@@ -178,6 +258,9 @@ SPOOL OFF
 UNDEFINE 1
 UNDEFINE 2
 UNDEFINE 3
+UNDEFINE 4
+UNDEFINE 5
+UNDEFINE 6
 
 PROMPT
 PROMPT Report written to: &cap_path

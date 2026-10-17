@@ -24,6 +24,8 @@
 --                     one row per kind and series, with the gate that holds
 --                     a would-be alert back. The section views and CAPR_FIT
 --                     read their severity from it.
+--   CAPR_SEGMENT_GROWTH -- per tablespace, the segments that grew most over
+--                     the last seg_window_days (report/drill_tbspc.sql).
 --   CAPR_SERIES_POINTS / CAPR_HOURLY_POINTS / CAPR_FIT -- point feeds for
 --                     external dashboards (grafana/API.md, elk/), at the
 --                     bottom of this file.
@@ -837,6 +839,76 @@ LEFT   JOIN capr_container c
   ON   c.dbid = a.dbid AND c.con_dbid = a.con_dbid
 WHERE  a.kind = 'SERIES'
   AND  a.anomaly_flag IS NOT NULL;
+
+-- --------------------------------------------------------------------
+-- CAPR_SEGMENT_GROWTH -- "who is filling it": one row per (dbid, con_dbid,
+-- tablespace_name, owner, object_name, subobject_name) with the segment
+-- growth over the last seg_window_days (CAP_CONFIG) days, counted back from
+-- the dbid's newest snapshot day. Read by report/drill_tbspc.sql.
+--   grown_bytes       SUM(space_allocated_delta) over the window: the space
+--                     the segment took from its tablespace
+--   used_grown_bytes  SUM(space_used_delta) over the same snapshots
+--   share_pct         100 * grown_bytes / the summed grown_bytes of the
+--                     tablespace's growing segments (grown_bytes > 0), so
+--                     the growing segments of a tablespace add up to 100;
+--                     NULL when no segment of the tablespace grew
+--   rank_in_tbspc     1 = the biggest grower of its tablespace
+--   window_from / window_to  the first and last day of the window
+-- AWR keeps only the top segments per snapshot (CAPV_SEG_STAT), so the
+-- shares are shares of the captured growth, not of every segment.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capr_segment_growth AS
+WITH snap AS (
+        SELECT dbid, snap_id, TRUNC(CAST(MAX(end_interval_time) AS DATE)) AS day_dt
+        FROM   capv_snapshot
+        GROUP  BY dbid, snap_id
+     ),
+     win AS (
+        SELECT s.dbid,
+               MAX(s.day_dt) - cfg.seg_window_days + 1 AS window_from,
+               MAX(s.day_dt)                           AS window_to
+        FROM   snap s CROSS JOIN cap_cfg cfg
+        GROUP  BY s.dbid, cfg.seg_window_days
+     ),
+     g AS (
+        SELECT x.dbid, x.con_dbid, x.tablespace_name, x.owner, x.object_name,
+               x.subobject_name,
+               MAX(x.object_type)                AS object_type,
+               SUM(x.space_allocated_delta)      AS grown_bytes,
+               SUM(x.space_used_delta)           AS used_grown_bytes,
+               COUNT(DISTINCT x.snap_id)         AS n_snaps,
+               MAX(w.window_from)                AS window_from,
+               MAX(w.window_to)                  AS window_to
+        FROM   capv_seg_stat x
+        JOIN   snap s ON s.dbid = x.dbid AND s.snap_id = x.snap_id
+        JOIN   win  w ON w.dbid = x.dbid
+        WHERE  s.day_dt BETWEEN w.window_from AND w.window_to
+        GROUP  BY x.dbid, x.con_dbid, x.tablespace_name, x.owner, x.object_name, x.subobject_name
+     )
+SELECT g.dbid,
+       g.con_dbid,
+       NVL(c.db_pdb, TO_CHAR(g.con_dbid))  AS db_pdb,
+       g.tablespace_name,
+       g.owner,
+       g.object_name,
+       g.subobject_name,
+       g.object_type,
+       g.grown_bytes,
+       g.used_grown_bytes,
+       g.grown_bytes      / 1048576        AS grown_mb,
+       g.used_grown_bytes / 1048576        AS used_grown_mb,
+       100 * g.grown_bytes
+         / NULLIF(SUM(CASE WHEN g.grown_bytes > 0 THEN g.grown_bytes END)
+                      OVER (PARTITION BY g.dbid, g.con_dbid, g.tablespace_name), 0) AS share_pct,
+       ROW_NUMBER() OVER (PARTITION BY g.dbid, g.con_dbid, g.tablespace_name
+                          ORDER BY g.grown_bytes DESC NULLS LAST,
+                                   g.owner, g.object_name, g.subobject_name)      AS rank_in_tbspc,
+       g.n_snaps,
+       g.window_from,
+       g.window_to
+FROM   g
+LEFT   JOIN capr_container c
+  ON   c.dbid = g.dbid AND c.con_dbid = g.con_dbid;
 
 -- ====================================================================
 -- Point feeds for external dashboards (grafana/API.md over ORDS, and

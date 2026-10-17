@@ -108,7 +108,9 @@ DECLARE
         'DBA_HIST_CON_SYSSTAT',
         'DBA_HIST_PARAMETER',
         'DBA_HIST_ASM_DISKGROUP_STAT',
-        'DBA_HIST_ASM_DISKGROUP');
+        'DBA_HIST_ASM_DISKGROUP',
+        'DBA_HIST_SEG_STAT',
+        'DBA_HIST_SEG_STAT_OBJ');
 
     v_privs t_names := t_names(
         'CREATE TABLE',
@@ -809,6 +811,172 @@ BEGIN
         EXCEPTION
             WHEN OTHERS THEN
                 emit('WARN', 'CAP_CFG_CHECK', 'cannot read: ' || err || ' (re-run install.sql)');
+        END;
+    END IF;
+
+    -- =================================================================
+    -- 10. Results layer and seam coverage (installed only, ddl/60 + seam).
+    -- Every probe is dynamic SQL in its own block: a missing view or grant
+    -- prints a WARN line and the next probe runs.
+    -- =================================================================
+    IF v_installed THEN
+        hdr('10. Results layer and seam coverage');
+        DECLARE
+            v_cur   SYS_REFCURSOR;
+            v_id    NUMBER;
+            v_st    VARCHAR2(16);
+            v_day   VARCHAR2(10);
+            v_age   NUMBER;
+            v_stale VARCHAR2(1);
+            v_txt   VARCHAR2(400);
+            v_txt2  VARCHAR2(400);
+            v_n     NUMBER;
+            v_n2    NUMBER;
+            v_n3    NUMBER;
+            v_cdb   BOOLEAN := FALSE;
+        BEGIN
+            -- last refresh run
+            BEGIN
+                EXECUTE IMMEDIATE
+                    'SELECT run_id, status, TO_CHAR(as_of_day, ''YYYY-MM-DD''),'
+                    || ' ROUND((SYSDATE - CAST(NVL(ended_at, started_at) AS DATE)) * 24, 1), stale_run'
+                    || ' FROM capr_runs WHERE is_last = ''Y'''
+                    INTO v_id, v_st, v_day, v_age, v_stale;
+                emit(CASE WHEN v_st = 'OK' AND v_stale = 'N' THEN 'PASS' ELSE 'WARN' END,
+                     'last refresh run',
+                     v_id || ' ' || v_st || ', as of ' || v_day || ', ' || v_age || ' h ago'
+                     || CASE WHEN v_stale = 'Y' THEN ' -- stale_run: no OK live run within refresh_stale_hours' END);
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    emit('INFO', 'last refresh run', 'none yet: EXEC cap_results.refresh, or install_jobs.sql');
+                WHEN OTHERS THEN
+                    emit('WARN', 'last refresh run', 'cannot read CAPR_RUNS: ' || err);
+            END;
+            -- FAILED runs in the last 7 days, with the first line of the error
+            BEGIN
+                v_n := 0;
+                OPEN v_cur FOR
+                    'SELECT run_id, TO_CHAR(started_at, ''YYYY-MM-DD HH24:MI''),'
+                    || ' SUBSTR(REGEXP_SUBSTR(error_text, ''[^'' || CHR(10) || '']+''), 1, 120)'
+                    || ' FROM capr_runs WHERE status = ''FAILED'''
+                    || ' AND started_at > SYSTIMESTAMP - INTERVAL ''7'' DAY ORDER BY run_id DESC';
+                LOOP
+                    FETCH v_cur INTO v_id, v_txt, v_txt2;
+                    EXIT WHEN v_cur%NOTFOUND;
+                    v_n := v_n + 1;
+                    IF v_n <= 5 THEN
+                        emit('WARN', 'FAILED refresh run', v_id || ' at ' || v_txt || ': ' || v_txt2);
+                    END IF;
+                END LOOP;
+                CLOSE v_cur;
+                IF v_n = 0 THEN
+                    emit('PASS', 'FAILED refresh runs', 'none in the last 7 days');
+                ELSIF v_n > 5 THEN
+                    note((v_n - 5) || ' more FAILED run(s) in the last 7 days (CAPR_RUNS).');
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    IF v_cur%ISOPEN THEN CLOSE v_cur; END IF;
+                    emit('WARN', 'FAILED refresh runs', 'cannot read CAPR_RUNS: ' || err);
+            END;
+            -- RUNNING runs older than one hour (a killed session leaves them)
+            BEGIN
+                EXECUTE IMMEDIATE
+                    'SELECT COUNT(*), MIN(run_id) FROM capr_runs WHERE status = ''RUNNING'''
+                    || ' AND started_at < SYSTIMESTAMP - INTERVAL ''1'' HOUR'
+                    INTO v_n, v_id;
+                IF v_n = 0 THEN
+                    emit('PASS', 'stuck RUNNING runs', 'none older than 1 h');
+                ELSE
+                    emit('WARN', 'stuck RUNNING runs', v_n || ' older than 1 h, oldest run_id ' || v_id
+                         || ' (a killed refresh; the next refresh is unaffected)');
+                END IF;
+            EXCEPTION
+                WHEN OTHERS THEN emit('WARN', 'stuck RUNNING runs', 'cannot read CAPR_RUNS: ' || err);
+            END;
+            -- the refresh job and its last scheduler run
+            BEGIN
+                EXECUTE IMMEDIATE
+                    'SELECT enabled, state FROM all_scheduler_jobs'
+                    || ' WHERE owner = :o AND job_name = ''CAP_REFRESH_JOB'''
+                    INTO v_txt, v_txt2 USING v_schema;
+                emit(CASE WHEN v_txt = 'TRUE' THEN 'PASS' ELSE 'INFO' END, 'CAP_REFRESH_JOB',
+                     CASE WHEN v_txt = 'TRUE' THEN 'enabled' ELSE 'disabled (install_jobs.sql creates it disabled)' END
+                     || ', state ' || v_txt2);
+                BEGIN
+                    EXECUTE IMMEDIATE
+                        'SELECT status, TO_CHAR(actual_start_date, ''YYYY-MM-DD HH24:MI''),'
+                        || ' SUBSTR(errors, 1, 120) FROM ('
+                        || ' SELECT status, actual_start_date, errors FROM all_scheduler_job_run_details'
+                        || ' WHERE owner = :o AND job_name = ''CAP_REFRESH_JOB'''
+                        || ' ORDER BY log_date DESC) WHERE ROWNUM = 1'
+                        INTO v_st, v_txt2, v_txt USING v_schema;
+                    emit(CASE WHEN v_st = 'SUCCEEDED' THEN 'PASS' ELSE 'WARN' END, 'CAP_REFRESH_JOB last run',
+                         v_st || ' at ' || v_txt2 || CASE WHEN v_txt IS NOT NULL THEN ': ' || v_txt END);
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN emit('INFO', 'CAP_REFRESH_JOB last run', 'never ran');
+                    WHEN OTHERS THEN emit('INFO', 'CAP_REFRESH_JOB last run', 'cannot read job history: ' || err);
+                END;
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    emit('INFO', 'CAP_REFRESH_JOB', 'not created (install_jobs.sql)');
+                WHEN OTHERS THEN
+                    emit('INFO', 'CAP_REFRESH_JOB', 'cannot read ALL_SCHEDULER_JOBS: ' || err);
+            END;
+            -- alert states: open, acknowledged
+            BEGIN
+                EXECUTE IMMEDIATE
+                    'SELECT COUNT(CASE WHEN state = ''OPEN'' THEN 1 END),'
+                    || ' COUNT(CASE WHEN state = ''OPEN'' AND ack_until > SYSDATE THEN 1 END),'
+                    || ' COUNT(CASE WHEN state = ''RESOLVED'' THEN 1 END) FROM cap_alert_state'
+                    INTO v_n, v_n2, v_n3;
+                emit('INFO', 'alert states', v_n || ' OPEN (' || v_n2 || ' acknowledged, '
+                     || (v_n - v_n2) || ' in CAPR_ALERTS_LATEST), ' || v_n3 || ' RESOLVED');
+            EXCEPTION
+                WHEN OTHERS THEN emit('WARN', 'alert states', 'cannot read CAP_ALERT_STATE: ' || err);
+            END;
+            -- retired dbids (no snapshot for data_stale_max_days)
+            BEGIN
+                v_n := 0; v_txt := NULL;
+                OPEN v_cur FOR 'SELECT summary FROM capr_coverage WHERE retired = ''Y'' ORDER BY dbid';
+                LOOP
+                    FETCH v_cur INTO v_txt2;
+                    EXIT WHEN v_cur%NOTFOUND;
+                    v_n := v_n + 1;
+                    IF v_n <= 3 THEN note('retired: ' || SUBSTR(v_txt2, 1, 150)); END IF;
+                END LOOP;
+                CLOSE v_cur;
+                emit('INFO', 'retired dbids', v_n || ' (CAPR_COVERAGE.retired = Y: listed, never alerted)');
+            EXCEPTION
+                WHEN OTHERS THEN
+                    IF v_cur%ISOPEN THEN CLOSE v_cur; END IF;
+                    emit('WARN', 'retired dbids', 'cannot read CAPR_COVERAGE: ' || err);
+            END;
+            -- the live seam contract: a per-container source that shows one
+            -- con_dbid on a CDB is missing its PDB series
+            BEGIN
+                EXECUTE IMMEDIATE 'SELECT COUNT(DISTINCT con_dbid) FROM capv_container' INTO v_n;
+                v_cdb := v_n > 1;
+                OPEN v_cur FOR
+                    'SELECT source_name, n_rows, n_con_dbid, per_container_expected'
+                    || ' FROM capv_contract ORDER BY source_name';
+                LOOP
+                    FETCH v_cur INTO v_txt, v_n, v_n2, v_st;
+                    EXIT WHEN v_cur%NOTFOUND;
+                    IF v_st = 'Y' AND v_cdb AND v_n > 0 AND v_n2 = 1 THEN
+                        emit('WARN', 'seam ' || v_txt, v_n || ' rows, 1 con_dbid on a CDB:'
+                             || ' per-container rows expected, the PDB series are missing');
+                    ELSE
+                        emit('INFO', 'seam ' || v_txt, v_n || ' rows, ' || v_n2 || ' con_dbid'
+                             || CASE WHEN v_st = 'Y' THEN ' (per container)' END);
+                    END IF;
+                END LOOP;
+                CLOSE v_cur;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    IF v_cur%ISOPEN THEN CLOSE v_cur; END IF;
+                    emit('WARN', 'CAPV_CONTRACT', 'cannot read: ' || err);
+            END;
         END;
     END IF;
 

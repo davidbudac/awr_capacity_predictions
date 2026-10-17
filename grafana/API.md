@@ -71,3 +71,67 @@ should select from too, so both paths share one definition.
 Grafana reads these with the Infinity data source (JSON, root selector
 `items`), passing `${__from:date:iso}` / `${__to:date:iso}` and dashboard
 variables `$db`, `$series` into the query string.
+
+## Prometheus: `metrics`
+
+`GET .../awrcap/metrics` is a PL/SQL handler, not a JSON collection. It
+returns the Prometheus text exposition format (`Content-Type: text/plain;
+version=0.0.4`), read live from the CAPR views on every scrape:
+
+| Metric | Labels | Value | Source |
+|---|---|---|---|
+| `awrcap_alert` | `kind, severity, db, con_dbid, series, mode` | rows of that issue (normally 1); `mode` is the baseline mode or `-` | `CAPR_ALERTS` |
+| `awrcap_days_to_full` | `kind, db, con_dbid, series, quality` | days to the ceiling; series with no projected crossing are omitted | `CAPR_FIT.days_to_full` |
+| `awrcap_pct_used` | `kind, db, con_dbid, series` | value as a percent of the ceiling (CPU: of `cpu_sat_pct`) | `CAPR_FIT.pct` |
+| `awrcap_data_through_days` | `db, dbid` | days since the newest AWR snapshot day | `CAPR_FRESHNESS` |
+| `awrcap_up` | none | 1 when every view was read, 0 when one raised (a `# awrcap metrics failed:` comment says why) | the handler |
+
+Every family is a gauge with HELP and TYPE lines. Label values escape `\`,
+`"` and newlines. `con_dbid` and `mode` are added to the labels so two
+containers with the same display name, or one series alerting under two
+baseline modes, never produce duplicate series. An alert that clears simply
+disappears from the next scrape; alert on `awrcap_alert{severity="CRIT"}`
+and on `absent(awrcap_up == 1)`.
+
+Example output (fixture):
+
+```text
+# TYPE awrcap_alert gauge
+awrcap_alert{kind="TBSPC_FULL",severity="CRIT",db="FIXCDB",con_dbid="42424242",series="FIX_FILLING",mode="-"} 1
+# TYPE awrcap_days_to_full gauge
+awrcap_days_to_full{kind="TBSPC",db="FIXCDB",con_dbid="42424242",series="FIX_FILLING",quality="OK"} 20
+awrcap_up 1
+```
+
+Scrape configuration (each scrape evaluates `CAPR_ALERTS`, several seconds on
+a large fleet, so keep the interval long and the timeout generous):
+
+```yaml
+scrape_configs:
+  - job_name: awrcap
+    metrics_path: /ords/capdemo/awrcap/metrics
+    scrape_interval: 15m
+    scrape_timeout: 2m
+    static_configs:
+      - targets: ['ords-host:8080']
+```
+
+Security: like every handler in the module, `metrics` is public (no ORDS
+privilege). It exposes tablespace and series names and alert messages'
+subjects. On an untrusted network protect the module with
+`ORDS.DEFINE_PRIVILEGE` and give Prometheus OAuth client credentials, or put
+the endpoint behind the reverse proxy that already fronts ORDS.
+
+Trying the body without ORDS (any SQL*Plus session in the suite schema): the
+handler writes through HTP, so set up an OWA environment, run the block that
+`grafana/ords/awrcap_module.sql` passes to `plsql('metrics', ...)`, then
+print the page:
+
+```sql
+SET SERVEROUTPUT ON SIZE UNLIMITED
+DECLARE n OWA.VC_ARR; v OWA.VC_ARR;
+BEGIN n(1) := 'REQUEST_METHOD'; v(1) := 'GET'; OWA.INIT_CGI_ENV(1, n, v); END;
+/
+-- paste the DECLARE ... END; block of the metrics handler here, then /
+EXEC OWA_UTIL.SHOWPAGE
+```

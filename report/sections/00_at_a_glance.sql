@@ -5,9 +5,14 @@
 -- kinds use the CAP_CONFIG anomaly_report_days window (not this report's
 -- &anomaly_days). The two lines above them come from CAPR_COVERAGE (one per
 -- dbid) and CAPR_RUNS (the results layer, ddl/60).
+-- Scope (&cap_sdbid / &cap_scon) filters every query. Source SNAPSHOT reads
+-- the alerts from CAPR_ALERTS_LATEST (the OPEN, unacknowledged states of the
+-- last refresh run) and prints that run's summary as the coverage line,
+-- because CAPR_COVERAGE is not snapshotted. The UNION ALL branches carry a
+-- constant predicate, so the optimizer never evaluates the other source.
 --
 PROMPT
-PROMPT == 0. AT A GLANCE (from CAPR_ALERTS) ==
+PROMPT == 0. AT A GLANCE (from CAPR_ALERTS, or CAPR_ALERTS_LATEST when the source is SNAPSHOT) ==
 PROMPT    One row per current issue. TBSPC_FULL/CPU_SAT/DBCPU_SAT/SERIES_LIMIT: confident
 PROMPT    forecast inside the warning window. TBSPC_NEARFULL/SERIES_NEARLIMIT/CPU_HOT/DBCPU_HOT:
 PROMPT    at the line RIGHT NOW, any forecast quality. *_ANOM: flagged days in the alert
@@ -21,7 +26,14 @@ COLUMN run_line FORMAT A160 WORD_WRAPPED HEADING 'RESULTS LAYER'
 
 SELECT summary AS cov_line
 FROM   capr_coverage
-ORDER  BY dbid;
+WHERE  '&cap_src' = 'LIVE'
+  AND  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+  AND  (&cap_scon  IS NULL OR dbid IN (SELECT dbid FROM capr_container WHERE con_dbid = &cap_scon))
+UNION  ALL
+SELECT 'coverage as of ' || summary
+FROM   capr_runs
+WHERE  '&cap_src' = 'SNAPSHOT'
+  AND  run_id = last_ok_run_id;
 
 SELECT NVL(MAX(CASE WHEN is_last = 'Y'
                     THEN 'last ' || summary
@@ -39,7 +51,11 @@ COLUMN info_n  FORMAT 9990  HEADING 'INFO'
 SELECT NVL(SUM(CASE WHEN severity = 'CRIT' THEN 1 END), 0) AS crit_n,
        NVL(SUM(CASE WHEN severity = 'WARN' THEN 1 END), 0) AS warn_n,
        NVL(SUM(CASE WHEN severity = 'INFO' THEN 1 END), 0) AS info_n
-FROM   capr_alerts;
+FROM  (SELECT severity, dbid, con_dbid FROM capr_alerts        WHERE '&cap_src' = 'LIVE'
+       UNION ALL
+       SELECT severity, dbid, con_dbid FROM capr_alerts_latest WHERE '&cap_src' = 'SNAPSHOT')
+WHERE  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+  AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon);
 
 COLUMN severity FORMAT A4   HEADING 'SEV'
 COLUMN kind     FORMAT A16  HEADING 'KIND'
@@ -50,5 +66,11 @@ SELECT severity,
        kind,
        db_pdb,
        message
-FROM   capr_alerts
+FROM  (SELECT severity, sev_rank, kind, dbid, con_dbid, db_pdb, series_key, day_dt, message
+       FROM   capr_alerts        WHERE '&cap_src' = 'LIVE'
+       UNION ALL
+       SELECT severity, sev_rank, kind, dbid, con_dbid, db_pdb, series_key, day_dt, message
+       FROM   capr_alerts_latest WHERE '&cap_src' = 'SNAPSHOT')
+WHERE  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+  AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon)
 ORDER  BY CASE kind WHEN 'DATA_STALE' THEN 0 ELSE 1 END, sev_rank, kind, db_pdb, series_key, day_dt;

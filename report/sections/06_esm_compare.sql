@@ -49,11 +49,18 @@ SELECT db_pdb,
        esm_model,
        esm_at,
        esm_age_days AS esm_age
-FROM   capr_esm_compare
-WHERE  series_kind = 'TBSPC'
-  AND  is_reportable = 'Y'
-  AND  rank_report <= &top_n
-ORDER  BY rank_report, horizon_days;
+FROM   capr_esm_compare c
+-- the scoped rank of section 2, so 6a lists the same tablespaces
+JOIN  (SELECT dbid, con_dbid, tablespace_name,
+              ROW_NUMBER() OVER (ORDER BY rank_report) AS s_rank
+       FROM   capr_tbspc_forecast
+       WHERE  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+         AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon)) r
+  ON   r.dbid = c.dbid AND r.con_dbid = c.con_dbid AND r.tablespace_name = c.series_key
+WHERE  c.series_kind = 'TBSPC'
+  AND  c.is_reportable = 'Y'
+  AND  r.s_rank <= &top_n
+ORDER  BY r.s_rank, c.horizon_days;
 
 PROMPT
 PROMPT  6b. CPU (busy% / DB CPU sec):
@@ -76,6 +83,8 @@ SELECT db_pdb,
        esm_age_days AS esm_age
 FROM   capr_esm_compare
 WHERE  series_kind = 'CPU'
+  AND  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+  AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon)
 ORDER  BY con_dbid, series_key, horizon_days;
 
 PROMPT
@@ -109,4 +118,6 @@ SELECT db_pdb,
        better,
        esm_pick
 FROM   capr_backtest
+WHERE  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+  AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon)
 ORDER  BY con_dbid, series_kind, series_key;

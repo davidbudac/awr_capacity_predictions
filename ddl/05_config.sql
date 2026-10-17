@@ -119,7 +119,7 @@ USING (
     UNION ALL SELECT 'cpu_quality_gate',        1,        'CAPF_CPU_TREND quality gate: 1 = OK when |slope| > slope CI (slope significance), 0 = legacy R2 >= r2_gate.' FROM dual
     UNION ALL SELECT 'cpu_deseason',            1,        'CAPF_CPU_TREND: 1 = subtract the weekday / weekend mean (and add back the window mean) before the fit, 0 = fit the raw daily values.' FROM dual
     UNION ALL SELECT 'stale_days',              3,        'A CAPF_* series whose last_day is more than this many days before the newest day of its daily source (same dbid) reads is_current = N: dropped tablespace, retired DBID, stopped collection.' FROM dual
-    UNION ALL SELECT 'suite_version',          15,        'Suite release that built these objects (latest PLAN.md milestone). Set by every install; not a tuning knob.' FROM dual
+    UNION ALL SELECT 'suite_version',          16,        'Suite release that built these objects (latest PLAN.md milestone). Set by every install; not a tuning knob.' FROM dual
     UNION ALL SELECT 'cpu_min_mad_pct_hour',    5,        'M15: cpu_min_mad_pct for HOUR-grain CPU (HOUR_OF_WEEK): hourly values are noisier than daily averages.' FROM dual
     UNION ALL SELECT 'hour_gap_ratio',        1.5,        'M15: an interval <= 0 h or longer than LEAST(cpu_gap_hours, this x the instance''s median interval) is a gap at HOUR grain.' FROM dual
     UNION ALL SELECT 'series_floor_count',     10,        'M15: anomaly threshold floor for COUNT series (PROCESSES/SESSIONS), in sessions/processes.' FROM dual
@@ -132,6 +132,7 @@ USING (
     UNION ALL SELECT 'resolve_grace_runs',      2,        'Results layer: consecutive refresh runs an OPEN alert must be missing from CAPR_ALERTS before CAP_RESULTS.refresh marks it RESOLVED.' FROM dual
     UNION ALL SELECT 'refresh_stale_hours',    36,        'Results layer: CAPR_RUNS.stale_run = Y when the last OK live refresh run ended at least this many hours ago, or none ever did.' FROM dual
     UNION ALL SELECT 'digest_days',             7,        'Results layer: CAPR_WEEKLY_DIGEST compares the latest run with the latest run whose as_of_day is at least this many days earlier.' FROM dual
+    UNION ALL SELECT 'seg_window_days',        28,        'CAPR_SEGMENT_GROWTH: trailing days (up to the dbid''s newest snapshot) over which segment growth is summed for the "who is filling it" ranking.' FROM dual
 ) s
 ON (c.cfg_name = s.cfg_name)
 WHEN MATCHED THEN
@@ -209,7 +210,8 @@ SELECT MAX(CASE WHEN cfg_name = 'train_days'             THEN cfg_value END) AS 
        MAX(CASE WHEN cfg_name = 'data_stale_max_days'    THEN cfg_value END) AS data_stale_max_days,
        MAX(CASE WHEN cfg_name = 'resolve_grace_runs'     THEN cfg_value END) AS resolve_grace_runs,
        MAX(CASE WHEN cfg_name = 'refresh_stale_hours'    THEN cfg_value END) AS refresh_stale_hours,
-       MAX(CASE WHEN cfg_name = 'digest_days'            THEN cfg_value END) AS digest_days
+       MAX(CASE WHEN cfg_name = 'digest_days'            THEN cfg_value END) AS digest_days,
+       MAX(CASE WHEN cfg_name = 'seg_window_days'        THEN cfg_value END) AS seg_window_days
 FROM   cap_config;
 
 COMMENT ON TABLE cap_cfg IS 'One row, one NUMBER column per CAP_CONFIG knob (column name = knob name). NULL = the knob row is missing.';
@@ -238,7 +240,7 @@ WITH u AS (
                series_floor_count, series_floor_gib, alert_modes_tbspc,
                alert_modes_cpu, alert_modes_series, stale_hours,
                data_stale_max_days, resolve_grace_runs, refresh_stale_hours,
-               digest_days))
+               digest_days, seg_window_days))
      ),
      r AS (
         SELECT u.knob, u.value,
@@ -288,14 +290,16 @@ WITH u AS (
                         THEN 'must be > 0'
                    WHEN u.knob = 'digest_days'         AND (u.value <> TRUNC(u.value) OR u.value < 1)
                         THEN 'must be a whole number >= 1'
+                   WHEN u.knob = 'seg_window_days'     AND (u.value <> TRUNC(u.value) OR u.value < 1)
+                        THEN 'must be a whole number >= 1'
                    WHEN u.knob = 'cyclic_min_cliffs'   AND (u.value <> TRUNC(u.value) OR u.value = 1 OR u.value < 0)
                         THEN 'must be 0 (off) or a whole number >= 2: one cliff is a purge, the M9.3 reset handles it'
                    WHEN u.knob = 'cpu_quality_gate'    AND u.value NOT IN (0, 1)
                         THEN 'must be 0 (R2 gate) or 1 (slope significance)'
                    WHEN u.knob = 'cpu_deseason'        AND u.value NOT IN (0, 1)
                         THEN 'must be 0 (off) or 1 (weekday / weekend demeaning)'
-                   WHEN u.knob = 'suite_version'       AND u.value < 15
-                        THEN 'older than this release (13): re-run install.sql'
+                   WHEN u.knob = 'suite_version'       AND u.value < 16
+                        THEN 'older than this release (16): re-run install.sql'
                END AS reason
         FROM   u CROSS JOIN cap_cfg c
      )

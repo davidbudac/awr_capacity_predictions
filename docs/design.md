@@ -40,11 +40,11 @@ This document explains *why* each layer is shaped the way it is. For usage see
 
 ## Layer 1 — the seam (`CAPV_*`)
 
-Eleven views re-present the AWR dictionary in a stable shape. Everything
+Twelve views re-present the AWR dictionary in a stable shape. Everything
 downstream depends only on these, so swapping `ddl/10_seam_local.sql` for `11`
 (warehouse) or `12` (fixture) re-points the whole stack. Every view carries
-`(dbid, con_dbid)`. A twelfth view, `CAPV_CONTRACT`, describes what the other
-eleven present (see the last bullet).
+`(dbid, con_dbid)`. A thirteenth view, `CAPV_CONTRACT`, describes what the
+other twelve present (see the last bullet).
 
 - `DBA_HIST_SNAPSHOT` has no `CON_DBID`, so `CAPV_SNAPSHOT` sets
   `con_dbid := dbid`. The tablespace / OS / time-model views expose the **real**
@@ -125,13 +125,25 @@ eleven present (see the last bullet).
   `CAP_FIXTURE_PARAMETER` / `CAP_FIXTURE_ASM_DISKGROUP` and falls back to the
   same stubs when a table is missing, because `test/demo_fixture.sql` does
   not build them.
+- `CAPV_SEG_STAT` (U9) reads `DBA_HIST_SEG_STAT` joined to
+  `DBA_HIST_SEG_STAT_OBJ` on `(dbid, con_dbid, ts#, obj#, dataobj#)`: one
+  row per snapshot, instance and segment with `tablespace_id` (`TS#`),
+  `tablespace_name`, `owner`, `object_name`, `subobject_name`, `object_type`
+  and the byte deltas `space_used_delta` / `space_allocated_delta`. Verified
+  on 19.27 in `CDB$ROOT`: both views carry `CON_DBID`, with rows for the
+  root and every PDB, and a dropped object keeps its row named
+  `** MISSING **`. AWR keeps only the top segments of each snapshot, so the
+  deltas cover the busiest segments, not all of them. The warehouse seam is a
+  `WHERE 1 = 0` stub until the collector gathers both views; the fixture
+  reads `CAP_FIXTURE_SEG_STAT`, with the same fallback stub.
 - `CAPV_CONTRACT` is a diagnostic over the seam itself, the same body in all
   three seam files: one row per fact source (`SNAPSHOT`, `TBSPC_USAGE`,
   `OSSTAT`, `TIME_MODEL`, `SYSSTAT`, `RESOURCE_LIMIT`, `PARAMETER`,
-  `ASM_DISKGROUP`) with `n_rows`, `n_con_dbid`, `min_snap_id` /
+  `ASM_DISKGROUP`, `SEG_STAT`) with `n_rows`, `n_con_dbid`, `min_snap_id` /
   `max_snap_id`, `max_end_time` and `per_container_expected` (`Y` for
-  tablespace usage, time model and sysstat, `N` for the host, instance and
-  spine sources). `n_con_dbid = 1` against a
+  tablespace usage, time model, sysstat and segment stats, `N` for the host,
+  instance and spine sources). `doctor.sql` section 10 prints every row and
+  warns when a `Y` source shows a single `con_dbid` on a CDB. `n_con_dbid = 1` against a
   `Y` says the per-PDB series are missing, which is what a warehouse with the
   old collector shows. It full-scans every source, so no analytic view reads
   it. It is meant for `doctor.sql`.
@@ -1104,9 +1116,24 @@ All of them resolve `db_pdb` through `CAPR_CONTAINER` themselves. The last
 three read `CAPF_COMPARE` / `CAPF_BACKTEST`, which `ddl/50_ml.sql` creates
 *after* `ddl/45_report_views.sql`, so they live in `ddl/55_report_views_ml.sql`
 (loaded last by `install.sql`). What is still computed inside
-`report_html.sql` is only chart *geometry*: raw `CAPD_*` history points, the
-anomaly-dot / timeline placements, and the whole-database `cur_hero`
-regression that has no section of its own.
+`report_html.sql` is only chart *geometry*: the pixel positions of the
+`CAPD_*` history points, the anomaly dots and the timeline. The
+whole-database hero used to run its own regression (always OLS, no reset, its
+own gap fill, days to 100%), so the shipped demo said "5 mo" in the hero and
+"7 mo" in section 7. Since U9 it reads `CAPR_SERIES` `DB_SIZE_GB`, the row
+section 7 prints, with its history from `CAPR_SERIES_POINTS` and its
+projection and band from `CAPR_FORECAST_POINTS`; every chart draws the
+projections and band knots the views anchor, with no re-anchoring in the
+driver. The ESM marker sits at `last_day + esm_horizon_days -
+esm_age_days`, the offset `CAPR_FORECAST_POINTS` gives it.
+
+`CAPR_SEGMENT_GROWTH` (U9, ddl/45) answers "which segment is filling this
+tablespace": one row per (dbid, con_dbid, tablespace, owner, object,
+subobject) with `grown_bytes` = `SUM(space_allocated_delta)` and
+`used_grown_bytes` = `SUM(space_used_delta)` over the last `seg_window_days`
+(knob, default 28) days up to the dbid's newest snapshot day, `share_pct` =
+the segment's part of the growth of the tablespace's growing segments, and
+`rank_in_tbspc`. `report/drill_tbspc.sql` prints its top 10 as block 4.
 
 **Point feeds.** Three more `CAPR_*` views serve the external dashboards
 (`grafana/API.md` over ORDS, `elk/export_capacity.sql`, the APEX app), one
@@ -1247,14 +1274,16 @@ resulting bound in the section header ("Showing 7 of 8 tablespace(s) …"); the
 views keep every row for other consumers.
 
 **M7.6 — positional arguments.** `@report/report.sql [top_n] [anomaly_days]
-[show_esm]` and the same for `report_html.sql`. `report/defaults.sql` stays the
+[show_esm]` and the same for `report_html.sql` (U9 adds `[dbid] [con_dbid]
+[source]`, below). `report/defaults.sql` stays the
 fallback source of truth: both drivers load it, then override each value with
 its argument if one was passed. Unset `&1..&3` cannot prompt (a prompt would
 hang a non-interactive run and swallow the next heredoc line) because a
 `COLUMN 1 NEW_VALUE 1` whose query returns **no rows** defines the variable as
 empty, while an argument that *was* passed survives — SQL*Plus only reassigns a
 `NEW_VALUE` on a fetched row. Both scripts `UNDEFINE 1 2 3` at the end, so a
-second script in the same session does not inherit the first one's arguments.
+second script in the same session does not inherit the first one's arguments
+(`UNDEFINE 1 .. 6` since U9).
 
 **M7.5 — drill-down.** `report/drill_tbspc.sql <tablespace> [con_dbid]` and its
 CPU twin `report/drill_cpu.sql [metric] [con_dbid]` answer the question a
@@ -1271,6 +1300,44 @@ spelled-out arithmetic line per flagged (day, mode). `drill_cpu.sql` scores
 operational: the M9.1 bands can be checked with a calculator. Both arguments are
 optional and, like the report drivers, never prompt.
 
+**U9 — scope, source, CSV, cron.** Both drivers take three more optional
+positional arguments: `[top_n] [anomaly_days] [show_esm] [dbid] [con_dbid]
+[source]`. A `-` skips any of them. With a dbid and/or con_dbid every
+section filters on them and the header prints the scope with the container
+labels. The views' `rank_*` columns are fleet-wide, so the drivers re-number
+them inside the scope with `ROW_NUMBER() OVER (ORDER BY rank_*)`: the same
+order, `top_n` counted inside the scope, identical to `rank_*` when no scope
+is given. Section 6a joins section 2's scoped rank, so both list the same
+tablespaces. `source` is `LIVE` (default) or `SNAPSHOT`: SNAPSHOT reads the
+alert list from `CAPR_ALERTS_LATEST`, the section 1 and 7 tables from
+`CAPR_FIT_HISTORY` of the newest OK live refresh run, and prints that run's
+summary as the coverage line (`CAPR_COVERAGE` is not snapshotted); the header
+says which run. A section with a constant false predicate on the other
+source never evaluates it, so SNAPSHOT skips the live `CAPR_ALERTS`
+evaluation. `report/report_csv.sql [dbid] [con_dbid]` writes one quoted CSV
+per CAPR section view (`SET MARKUP CSV ON QUOTE ON`, header line, every row
+and column, `NUMFORMAT TM9`) into `reports/cap_csv_<db>_<ts>/`.
+`report/run_report.sh [connect] [--html] [--csv] [--scope D[:C]]
+[--snapshot] [--keep N] [--container P] [--schema O]` runs the drivers from
+the repo root without prompts, exits non-zero when a spool is missing or holds
+an `ORA-` / `SP2-` line, prints each path and rotates old reports only after
+a clean run; its header has a cron line.
+
+**U9 — HTML resilience.** `report_html.sql` renders the header and each of
+sections 0 to 7 inside its own `BEGIN ... EXCEPTION WHEN OTHERS` block. A
+failing query closes any open table, prints a red "Section N failed:
+<SQLERRM>" block where the section would be, and the page carries on; the
+footer says how many sections failed. The healthy-chip groups of section 0
+(tablespaces, series, hosts) each stop at 30 chips and print "+N more", so
+a fleet cannot overflow the 32000-byte accumulator.
+
+**U9 — Prometheus.** `grafana/ords/awrcap_module.sql` publishes a PL/SQL GET
+handler `metrics` next to the JSON ones: the text exposition format over
+`CAPR_ALERTS` (`awrcap_alert`), `CAPR_FIT` (`awrcap_days_to_full`,
+`awrcap_pct_used`), `CAPR_FRESHNESS` (`awrcap_data_through_days`) and an
+`awrcap_up` line. `grafana/API.md` has the label set, a `scrape_config` and
+the security note.
+
 **M8.4 — `doctor.sql`.** A read-only PASS/WARN/FAIL preflight, in one
 exception-wrapped anonymous block so a missing privilege prints one WARN line
 instead of aborting: pack access, direct `DBA_HIST_*` reads, `SESSION_PRIVS`,
@@ -1280,7 +1347,17 @@ with a plain-English explanation of why forecasts would read
 `INSUFFICIENT_HISTORY`. It queries `ALL_*` filtered on
 `SYS_CONTEXT('USERENV','CURRENT_SCHEMA')` rather than `USER_OBJECTS`, because
 the latter follows the *session* user and would report nothing useful when
-testing as SYSDBA with `CURRENT_SCHEMA` set elsewhere.
+testing as SYSDBA with `CURRENT_SCHEMA` set elsewhere. Section 10 (U9)
+covers the results layer and the live seam contract: the last `CAPR_RUNS`
+row and `stale_run`, FAILED runs of the last 7 days with the first error
+line, RUNNING runs older than an hour, `CAP_REFRESH_JOB` (enabled, last
+scheduler run), open versus acknowledged alert states, retired dbids from
+`CAPR_COVERAGE`, and every `CAPV_CONTRACT` row.
+
+`drill_cpu.sql`'s residual footer follows `cpu_deseason`: with the knob at 1
+the residuals are taken against the deseasoned fit input (value minus its
+weekday or weekend mean plus the window mean), as `CAPF_CPU_TREND` fits it,
+so `SUM(resid)` is 0 again and `CI_CALC` equals the view's `CI_VIEW`.
 
 ## Testing philosophy
 

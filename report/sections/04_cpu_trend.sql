@@ -59,4 +59,6 @@ SELECT db_pdb,
        sev,
        gate
 FROM   capr_cpu_trend
+WHERE  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+  AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon)
 ORDER  BY con_dbid, metric;

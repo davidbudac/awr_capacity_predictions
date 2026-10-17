@@ -102,7 +102,7 @@
         <code>esm_max_age_days</code> &ge; 0, <code>esm_auto_tie_pct</code> &ge; 0,
         <code>complete_day_pct</code> between 1 and 100, <code>stale_days</code> and <code>stale_hours</code> &ge; 0,
         <code>cyclic_min_cliffs</code> 0 or a whole number &ge; 2, <code>cpu_quality_gate</code> and <code>cpu_deseason</code> in 0/1,
-        <code>data_stale_max_days</code> &times; 24 &gt; <code>stale_hours</code>, <code>resolve_grace_runs</code> and <code>digest_days</code> whole numbers &ge; 1,
+        <code>data_stale_max_days</code> &times; 24 &gt; <code>stale_hours</code>, <code>resolve_grace_runs</code>, <code>digest_days</code> and <code>seg_window_days</code> whole numbers &ge; 1,
         <code>refresh_stale_hours</code> &gt; 0).
         A rule between two knobs is reported on the first one. The <span class="inline">reason</span> column says what to fix.</p>
       <div class="tablewrap">
@@ -129,6 +129,7 @@
             <tr><td><span class="k">resolve_grace_runs</span></td><td class="num">2</td><td class="def">Results layer: consecutive live <code>cap_results.refresh</code> runs an OPEN alert state must be missing from <code>CAPR_ALERTS</code> before it is RESOLVED. The hysteresis that stops a value wobbling across a threshold from resolving and reopening.</td></tr>
             <tr><td><span class="k">refresh_stale_hours</span></td><td class="num">36</td><td class="def">Results layer: <code>CAPR_RUNS.stale_run = 'Y'</code> when the last OK live refresh run ended at least this many hours ago, or none ever did. The dead-man check for the refresh job.</td></tr>
             <tr><td><span class="k">digest_days</span></td><td class="num">7</td><td class="def">Results layer: <code>CAPR_WEEKLY_DIGEST</code> compares the latest OK run with the latest OK run whose <code>as_of_day</code> is at least this many days earlier.</td></tr>
+            <tr><td><span class="k">seg_window_days</span></td><td class="num">28</td><td class="def"><code>CAPR_SEGMENT_GROWTH</code>: trailing days, up to the dbid's newest snapshot day, over which segment growth is summed for the "who is filling it" ranking in <span class="inline">report/drill_tbspc.sql</span>. A whole number &ge; 1.</td></tr>
             <tr><td><span class="k">reset_on_shrink</span></td><td class="num">1</td><td class="def"><strong>M9.3</strong>: 1 = restart a tablespace's training window at the most recent large negative <code>used_bytes</code> step, so a post-purge series is not fitted across the cliff (<code>train_start</code> / <code>reset_day</code>); 0 = fit straight through it.</td></tr>
             <tr><td><span class="k">shrink_mad_k</span></td><td class="num">6</td><td class="def"><strong>M9.3</strong> threshold: a daily delta below <code>−GREATEST(k·MAD_σ of the window's deltas, abs_floor_bytes)</code> is a shrink change-point. Higher than <code>mad_k</code> (3) on purpose — this restarts a fit, so it should only fire on real cliffs.</td></tr>
             <tr><td><span class="k">cpu_sat_pct</span></td><td class="num">80</td><td class="def">CPU busy percent treated as saturated for days-to-saturation.</td></tr>
@@ -152,6 +153,7 @@
             <tr><td><span class="k">alert_modes_tbspc</span></td><td class="num">1</td><td class="def"><strong>M15</strong> bitmask of the baseline modes that raise <code>TBSPC_ANOM</code>: <span class="num">1</span> = <code>TRAILING</code>, <span class="num">2</span> = <code>SAME_DOW</code>, <span class="num">4</span> = <code>HOUR_OF_WEEK</code> (no effect here: tablespaces are day grain only); add them, <span class="num">0</span> = none. Every mode is scored either way; this decides only what pages. It also picks the headline mode of the 1:1 point feeds (the lowest day bit set).</td></tr>
             <tr><td><span class="k">alert_modes_cpu</span></td><td class="num">2</td><td class="def"><strong>M15</strong> bitmask for <code>CPU_ANOM</code> and <code>DBCPU_ANOM</code>, same encoding. <span class="num">6</span> pages on both weekly modes; an <code>HOUR_OF_WEEK</code> day raises one row carrying its worst hour.</td></tr>
             <tr><td><span class="k">alert_modes_series</span></td><td class="num">1</td><td class="def"><strong>M15</strong> bitmask for <code>SERIES_ANOM</code>, same encoding (4 has no effect: day grain only).</td></tr>
+            <tr><td><span class="k">seg_window_days</span></td><td class="num">28</td><td class="def">CAPR_SEGMENT_GROWTH: trailing days (up to the dbid's newest snapshot) over which segment growth is summed for the "who is filling it" ranking.</td></tr>
             <tr><td><span class="k">cpu_gap_hours</span></td><td class="num">12</td><td class="def"><strong>M10.5</strong>: a snapshot interval <em>longer</em> than this many hours is an AWR gap / downtime. Its day gets <code>gap_flag = 'Y'</code>, is skipped by the CPU anomaly and level-shift baselines, and is left out of <code>busy_p95</code> / <code>busy_max</code> / the peak window. Half a day is deliberately loose: the flag <em>suppresses</em> scoring, so a tighter default would silence the CPU anomaly layer wherever snapshot intervals are wide.</td></tr>
             <tr><td><span class="k">complete_day_pct</span></td><td class="num">80</td><td class="def">Percent of a day (86400&nbsp;s) of valid counter intervals a <code>CAPD_CPU_DAILY</code> / <code>CAPD_DBTIME_DAILY</code> / <code>REDO_GB_DAY</code> day needs for <code>is_complete = 'Y'</code>. The first day of history, today, and restart or outage days fall below it; <code>gap_flag</code> does not catch those.</td></tr>
             <tr><td><span class="k">shift_days</span></td><td class="num">7</td><td class="def"><strong>M10.3</strong>: length of the recent window whose median <code>CAPA_CPU_SHIFT</code> compares against the baseline — and the <em>N</em> of the N-of-M confirmation.</td></tr>
@@ -186,7 +188,7 @@
           <caption>Everything the suite creates</caption>
           <thead><tr><th scope="col">Prefix / object</th><th scope="col">Kind</th><th scope="col">Purpose</th></tr></thead>
           <tbody>
-            <tr><td colspan="3"><b><span class="k">CAPV_</span> — seam views (11 + CAPV_CONTRACT)</b> · DBA_HIST-shaped, each carrying <code>(dbid, con_dbid)</code></td></tr>
+            <tr><td colspan="3"><b><span class="k">CAPV_</span> — seam views (12 + CAPV_CONTRACT)</b> · DBA_HIST-shaped, each carrying <code>(dbid, con_dbid)</code></td></tr>
             <tr><th scope="row"><code>CAPV_SNAPSHOT</code></th><td class="def">view</td><td class="def">AWR snapshot headers and interval times; sets <code>con_dbid := dbid</code> (source has no CON_DBID)</td></tr>
             <tr><th scope="row"><code>CAPV_TBSPC_USAGE</code></th><td class="def">view</td><td class="def">Per-snapshot tablespace space usage, in DB blocks</td></tr>
             <tr><th scope="row"><code>CAPV_TABLESPACE</code></th><td class="def">view</td><td class="def">Tablespace dimension; primary source for <code>block_size</code> (populated for every tablespace)</td></tr>
@@ -198,6 +200,7 @@
             <tr><th scope="row"><code>CAPV_SYSSTAT</code></th><td class="def">view</td><td class="def"><strong>M11</strong>: system statistics filtered to <code>redo size</code>, a cumulative byte counter. Per container in local mode (<code>DBA_HIST_CON_SYSSTAT</code>, same seed filter and non-CDB fallback as <code>CAPV_TIME_MODEL</code>); one CDB-level row in warehouse mode</td></tr>
             <tr><th scope="row"><code>CAPV_PARAMETER</code></th><td class="def">view</td><td class="def">Init parameters as numbers, one row per snapshot, instance and name: <code>cpu_count</code>, <code>processes</code>, <code>sessions</code>, <code>db_recovery_file_dest_size</code>, <code>sga_target</code>, <code>sga_max_size</code>, <code>pga_aggregate_target</code>, <code>pga_aggregate_limit</code>, <code>memory_target</code>. <code>value_num</code> converted from <code>DBA_HIST_PARAMETER.VALUE</code> (non-numeric &rarr; NULL). Root rows only, <code>con_dbid := dbid</code>. Zero rows in warehouse mode (not collected yet)</td></tr>
             <tr><th scope="row"><code>CAPV_ASM_DISKGROUP</code></th><td class="def">view</td><td class="def">ASM diskgroup size per snapshot: <code>group_name</code> (no <code>+</code>), <code>total_mb</code>, <code>free_mb</code> (raw, before mirroring) and <code>usable_file_mb</code> (NULL: not in the 19c AWR view). <code>DBA_HIST_ASM_DISKGROUP_STAT</code> joined to <code>DBA_HIST_ASM_DISKGROUP</code>. No rows without ASM; zero rows in warehouse mode</td></tr>
+            <tr><th scope="row"><code>CAPV_SEG_STAT</code></th><td class="def">view</td><td class="def">Segment space deltas per snapshot, instance and segment: <code>DBA_HIST_SEG_STAT</code> joined to <code>DBA_HIST_SEG_STAT_OBJ</code> on <code>(dbid, con_dbid, ts#, obj#, dataobj#)</code>, with <code>tablespace_id</code>, <code>tablespace_name</code>, <code>owner</code>, <code>object_name</code>, <code>subobject_name</code>, <code>object_type</code>, <code>space_used_delta</code>, <code>space_allocated_delta</code> (bytes). Per container. AWR keeps only the top segments of each snapshot. Warehouse mode: a <code>WHERE 1 = 0</code> stub</td></tr>
             <tr><th scope="row"><code>CAPV_CONTRACT</code></th><td class="def">view</td><td class="def">Diagnostic over the seam: one row per fact source with <code>n_rows</code>, <code>n_con_dbid</code>, <code>min_snap_id</code> / <code>max_snap_id</code>, <code>max_end_time</code> and <code>per_container_expected</code> (<code>Y</code> for tablespace usage, time model, sysstat). Full scans; meant for doctor.sql, never read by the analytic views</td></tr>
 
             <tr><td colspan="3"><b><span class="k">CAPD_</span> — daily views (9)</b> · one clean row per day (and, for CPU, per interval and per hour)</td></tr>
@@ -246,6 +249,7 @@
             <tr><th scope="row"><code>CAPR_HOURLY_POINTS</code></th><td class="def">view</td><td class="def"><strong>M15</strong>: one row per <code>CAPD_CPU_HOURLY</code> row, with <code>dow</code> (0 = Monday), <code>hour_of_day</code>, <code>gap</code> and that hour's <code>HOUR_OF_WEEK</code> verdict (<code>how_expected</code>, <code>how_threshold</code>, <code>how_z</code>, <code>how_flag</code>, <code>how_n_hist</code>); <code>doc_key</code>. Feeds the hourly ORDS endpoint</td></tr>
             <tr><th scope="row"><code>CAPR_FORECAST_POINTS</code></th><td class="def">view</td><td class="def">The REGR anchors (+0/30/90, plus +180/365 for TBSPC) with their bands, and the ESM +30 point, dated last day + horizon. CPU horizon 0 is <code>anchor_value</code>; CPU percent rows carry <code>limit_value</code> = <code>cpu_sat_pct</code> and <code>pct</code> = 100 &times; value / it</td></tr>
             <tr><th scope="row"><code>CAPR_FIT</code></th><td class="def">view</td><td class="def">The current fit per series: slope, R&sup2;, quality, days to the ceiling with its range, and a CRIT/WARN/OK <code>sev</code> (the worst <code>CAPR_SEVERITY</code> sev of the series; CPU <code>limit_value</code> = <code>cpu_sat_pct</code>, <code>pct</code> = 100 &times; value / it); appended: the TBSPC cycle columns, the CPU flags <code>slope_sig</code> / <code>hot_now</code> as 1/0, and the TBSPC sizing ask <code>need_gib_30</code> / <code>_90</code> / <code>_180</code>, <code>add_by_day</code></td></tr>
+            <tr><th scope="row"><code>CAPR_SEGMENT_GROWTH</code></th><td class="def">view</td><td class="def">"Who is filling it": one row per (dbid, con_dbid, tablespace, owner, object, subobject) with <code>grown_bytes</code> (<code>SUM(space_allocated_delta)</code>) and <code>used_grown_bytes</code> over the last <code>seg_window_days</code> days, <code>grown_mb</code>, <code>share_pct</code> (of the growth of the tablespace's growing segments), <code>rank_in_tbspc</code>, <code>n_snaps</code>, <code>window_from</code> / <code>window_to</code>. Read by <span class="inline">report/drill_tbspc.sql</span> (top 10)</td></tr>
             <tr><th scope="row"><code>CAPR_ANOMALIES</code></th><td class="def">view</td><td class="def">One row per flagged (observation, baseline mode) plus each flagged level shift, over the whole history: <code>anomaly_kind</code> (<code>TBSPC_GROWTH</code>, <code>CPU_BUSY</code>, <code>DBCPU_BUSY</code>, <code>SERIES_LEVEL</code>, <code>SERIES_GROWTH</code>, <code>CPU_SHIFT</code>), severity, message, <code>baseline_mode</code>, <code>grain</code>, <code>n_hist</code>, <code>alerting</code> (Y when the mode's bitmask bit is set and the day is inside <code>anomaly_report_days</code>), <code>alert_kind</code>, <code>raw_value</code>, <code>doc_key</code>. The single home of anomaly severity and alert eligibility; a level shift is dated at the start of its recent window</td></tr>
 
             <tr><td colspan="3"><b><span class="k">CAPR_</span> results-layer views (ddl/60)</b> · over the results tables, empty-safe</td></tr>
@@ -343,7 +347,7 @@
               <td class="def">local mode</td>
               <td class="def">Granted <b>directly</b>, not via a role; view compilation ignores
                 role-granted privileges, so the <span class="k">CAPV_</span> seam views won't compile
-                without direct grants on the fifteen underlying <span class="kt">DBA_HIST_*</span> views.
+                without direct grants on the seventeen underlying <span class="kt">DBA_HIST_*</span> views.
                 <span class="inline">doctor.sql</span> probes each one and checks the grants of the
                 target schema; <span class="inline">create_owner.sql</span> grants them.</td>
             </tr>
@@ -408,7 +412,7 @@
         or a PDB it creates the local user <span class="inline">AWRCAP</span>. It grants, all
         <b>directly</b>: the privileges in the table above plus <code>CREATE SESSION</code>, a quota
         (<span class="inline">owner_quota</span>, default 1G, on <span class="inline">owner_ts</span>,
-        default the database default tablespace), SELECT on the fifteen
+        default the database default tablespace), SELECT on the seventeen
         <span class="kt">DBA_HIST_*</span> views <span class="inline">ddl/10_seam_local.sql</span> reads,
         and SELECT on <span class="inline">DBA_HIST_WR_CONTROL</span> and
         <span class="inline">V_$PARAMETER</span>, which only <span class="inline">doctor.sql</span> reads.
@@ -459,13 +463,14 @@
           <tbody>
             <tr><td class="num">1</td><td><b>Target schema</b></td><td class="def">The schema objects would land in (<span class="inline">CURRENT_SCHEMA</span>). WARN when it is <span class="inline">SYS</span>, with a pointer to <span class="inline">create_owner.sql</span>.</td></tr>
             <tr><td class="num">2</td><td><b>Database settings</b></td><td class="def"><span class="inline">CONTROL_MANAGEMENT_PACK_ACCESS</span> includes <code>DIAGNOSTIC</code> (if not, AWR collects nothing to fit), and <span class="inline">STATISTICS_LEVEL</span> is not <code>BASIC</code> (which stops automatic snapshots).</td></tr>
-            <tr><td class="num">3</td><td><b>DBA_HIST_* readable</b></td><td class="def">Each of the fifteen views the local seam reads, probed one at a time as the session user: snapshot, tablespace usage / tablespace / datafile, OSSTAT, sys time model and its CON_ twin, PDB instance, database instance, resource limit, sysstat and its CON_ twin, parameter, ASM diskgroup stat and ASM diskgroup. When the target schema is not SYS it also checks that schema's <b>direct</b> grants in <span class="inline">DBA_TAB_PRIVS</span> / <span class="inline">ALL_TAB_PRIVS</span>; a grant through a role does not count.</td></tr>
+            <tr><td class="num">3</td><td><b>DBA_HIST_* readable</b></td><td class="def">Each of the seventeen views the local seam reads, probed one at a time as the session user: snapshot, tablespace usage / tablespace / datafile, OSSTAT, sys time model and its CON_ twin, PDB instance, database instance, resource limit, sysstat and its CON_ twin, parameter, ASM diskgroup stat and ASM diskgroup, segment stat and its object dimension. When the target schema is not SYS it also checks that schema's <b>direct</b> grants in <span class="inline">DBA_TAB_PRIVS</span> / <span class="inline">ALL_TAB_PRIVS</span>; a grant through a role does not count.</td></tr>
             <tr><td class="num">4</td><td><b>Install privileges</b></td><td class="def"><code>CREATE TABLE / VIEW / PROCEDURE / TYPE / MINING MODEL / JOB</code> in the session user's <span class="inline">SESSION_PRIVS</span>, plus a direct <code>CREATE MINING MODEL</code> on the target schema when it is not SYS.</td></tr>
             <tr><td class="num">5</td><td><b>AWR retention &amp; interval</b></td><td class="def">From <span class="inline">DBA_HIST_WR_CONTROL</span>, per dbid, against <span class="inline">train_days</span>. The remedy it prints raises retention to <span class="inline">train_days</span> days.</td></tr>
             <tr><td class="num">6</td><td><b>History per source</b></td><td class="def">How many <em>distinct days</em> each source holds against <span class="inline">min_train_days</span>, and how old the newest snapshot is per dbid (WARN past 24 hours).</td></tr>
             <tr><td class="num">7</td><td><b>Readiness per feature</b></td><td class="def">One line per feature with days needed, days available and PASS/WARN: trend fit (<span class="inline">min_train_days</span>), full training window (<span class="inline">train_days</span>), CPU weekday baseline (<span class="inline">dow_weeks</span>&times;7), CPU level shift (<span class="inline">shift_days</span>+<span class="inline">shift_baseline_days</span>), backtest (<span class="inline">backtest_holdout_days</span>+<span class="inline">min_train_days</span>) and the ESM +30 horizon (120 daily rows). Knobs come from <span class="inline">CAP_CONFIG</span> when installed, else the shipped defaults.</td></tr>
             <tr><td class="num">8</td><td><b>Install state</b></td><td class="def">Whether <span class="inline">CAP_CONFIG</span> exists, the <span class="inline">suite_version</span> that built the objects, any <code>INVALID</code> <span class="inline">CAP*</span> object, the seam mode (inferred from what <span class="inline">CAPV_SNAPSHOT</span> depends on), and how the tablespace and CPU fits came out by quality.</td></tr>
             <tr><td class="num">9</td><td><b>Config sanity</b></td><td class="def">Installed only: reads <a href="#config"><span class="inline">CAP_CFG_CHECK</span></a>. PASS when every knob is <code>OK</code>, else one WARN per <code>MISSING</code> or <code>BAD</code> knob with its reason.</td></tr>
+            <tr><td class="num">10</td><td><b>Results layer and seam coverage</b></td><td class="def">Installed only, every probe in its own exception handler: the last <span class="inline">CAPR_RUNS</span> row (run id, status, as-of day, age) and <code>stale_run</code>; FAILED runs of the last 7 days with the first line of the error; RUNNING runs older than an hour; whether <span class="inline">CAP_REFRESH_JOB</span> exists and is enabled, and its last scheduler run (<span class="inline">ALL_SCHEDULER_JOB_RUN_DETAILS</span>); OPEN versus acknowledged alert states; retired dbids from <span class="inline">CAPR_COVERAGE</span>; every <span class="inline">CAPV_CONTRACT</span> row, WARN when a per-container source shows one <code>con_dbid</code> on a CDB.</td></tr>
           </tbody>
         </table>
       </div>
@@ -764,10 +769,68 @@
         <span class="ico">i</span>
         <p><strong>The spool job is not "the report".</strong> SQL*Plus spooling cannot happen inside a
         scheduler job, since there is no SQL*Plus there, so what the job writes is a
-        <em>pollable alert snapshot</em>, not the formatted capacity report. For the full report, keep
-        driving <span class="inline">report/report.sql</span> from cron or your OS scheduler.
+        <em>pollable alert snapshot</em>, not the formatted capacity report. For the full report, run
+        <span class="inline">report/run_report.sh</span> from cron (next section).
         Re-running <span class="inline">install_jobs.sql</span> is idempotent: it drops both jobs if
         present, then recreates them, again disabled.</p>
+      </div>
+
+      <!-- ===================== DRIVERS ===================== -->
+      <div class="section-head" id="drivers">
+        <span class="eyebrow">Consumers</span>
+        <h2>Report drivers, CSV, cron and Prometheus</h2>
+        <p>Every driver is read-only and runs from the repo root (SQL*Plus resolves
+          <span class="inline">@@</span> against the outermost caller). Positional arguments are
+          optional, never prompt, and are <code>UNDEFINE</code>d at the end; <code>-</code> skips one.</p>
+      </div>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">sqlplus · the schema that owns the suite</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> @report/report.sql                         <span class="c-cmt">-- everything, report/defaults.sql</span>
+<span class="c-prompt">SQL&gt;</span> @report/report.sql 10 30 AUTO 42424242 42424243   <span class="c-cmt">-- one container</span>
+<span class="c-prompt">SQL&gt;</span> @report/report_html.sql - - - - - SNAPSHOT  <span class="c-cmt">-- from the last refresh run</span>
+<span class="c-prompt">SQL&gt;</span> @report/report_csv.sql - 42424243           <span class="c-cmt">-- CSV per view, one con_dbid</span>
+<span class="c-prompt">SQL&gt;</span> @report/drill_tbspc.sql AUDIT_TRAIL         <span class="c-cmt">-- incl. who is filling it</span></pre>
+      </div>
+
+      <div class="tablewrap">
+        <table>
+          <caption>Driver arguments and scripts</caption>
+          <thead><tr><th scope="col">Script</th><th scope="col">Arguments</th><th scope="col">Does</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><span class="inline">report/report.sql</span><br><span class="inline">report/report_html.sql</span></td>
+              <td class="def"><code>[top_n] [anomaly_days] [show_esm] [dbid] [con_dbid] [source]</code></td>
+              <td class="def">The text and HTML reports. With <code>dbid</code> / <code>con_dbid</code> every section shows only that database or container, the header prints the scope, and <code>top_n</code> counts inside the scope: the views' fleet-wide <code>rank_*</code> columns are re-numbered with <code>ROW_NUMBER() OVER (ORDER BY rank_*)</code> over the scoped rows. <code>source</code> = <code>LIVE</code> (default) or <code>SNAPSHOT</code>: the alert list from <code>CAPR_ALERTS_LATEST</code>, the section 1 and 7 tables from <code>CAPR_FIT_HISTORY</code> of the newest OK refresh run, the coverage line from that run's summary; the header names the run. The HTML renders each section in its own exception handler: a failing section prints a red "Section N failed" block, the rest of the page renders, and the footer counts the failures.</td>
+            </tr>
+            <tr>
+              <td><span class="inline">report/report_csv.sql</span></td>
+              <td class="def"><code>[dbid] [con_dbid]</code></td>
+              <td class="def">One quoted CSV with a header line per view into <span class="inline">reports/cap_csv_&lt;db&gt;_&lt;ts&gt;/</span>: <code>capr_alerts</code>, <code>capr_tbspc_days_to_full</code>, <code>capr_tbspc_forecast</code>, <code>capr_tbspc_anomalies</code>, <code>capr_cpu_trend</code>, <code>capr_cpu_anomalies</code>, <code>capr_cpu_shifts</code>, <code>capr_series</code>, <code>capr_fit</code>, <code>capr_anomalies</code>. Every column, every row in the scope; dates <code>YYYY-MM-DD HH24:MI:SS</code>, numbers unformatted.</td>
+            </tr>
+            <tr>
+              <td><span class="inline">report/run_report.sh</span></td>
+              <td class="def"><code>[connect] [--html] [--csv] [--scope D[:C]] [--snapshot] [--keep N] [--container P] [--schema O]</code></td>
+              <td class="def">The cron wrapper. Runs the text report (plus HTML / CSV) non-interactively from the repo root, connect string default <code>/ as sysdba</code>; exits non-zero when a spool is missing or contains an <code>ORA-</code> / <code>SP2-</code> line; prints each path; <code>--keep N</code> keeps the newest N reports of each kind, only after a clean run. A cron line is in its header.</td>
+            </tr>
+            <tr>
+              <td><span class="inline">report/drill_tbspc.sql</span></td>
+              <td class="def"><code>&lt;tablespace&gt; [con_dbid]</code></td>
+              <td class="def">Block 4, "who is filling it": the top 10 segments of the tablespace from <code>CAPR_SEGMENT_GROWTH</code> (grown MiB, used MiB, share of the growth) over <code>seg_window_days</code>.</td>
+            </tr>
+            <tr>
+              <td><span class="inline">report/drill_cpu.sql</span></td>
+              <td class="def"><code>[metric] [con_dbid]</code></td>
+              <td class="def">The residual footer and the daily series take residuals against <code>FIT_IN</code>, the deseasoned fit input when <code>cpu_deseason = 1</code>, so <code>SUM_RESID</code> is 0 and <code>CI_CALC</code> equals the view's <code>CI_VIEW</code>.</td>
+            </tr>
+            <tr>
+              <td><span class="inline">awrcap/metrics</span><br><span class="small">ORDS GET</span></td>
+              <td class="def">none</td>
+              <td class="def">A PL/SQL handler in <span class="inline">grafana/ords/awrcap_module.sql</span>: Prometheus text format (<code>text/plain; version=0.0.4</code>) with <code>awrcap_alert</code> (CAPR_ALERTS), <code>awrcap_days_to_full</code> and <code>awrcap_pct_used</code> (CAPR_FIT), <code>awrcap_data_through_days</code> (CAPR_FRESHNESS) and <code>awrcap_up</code>. Labels, a <code>scrape_config</code> and the security note are in <span class="inline">grafana/API.md</span>.</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
 
       <!-- ===================== REINSTALL ===================== -->

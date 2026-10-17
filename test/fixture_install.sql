@@ -114,7 +114,8 @@ DECLARE
               'CAP_FIXTURE_DATAFILE','CAP_FIXTURE_OSSTAT','CAP_FIXTURE_TIME_MODEL',
               'CAP_FIXTURE_CONTAINER','CAP_FIXTURE_META',
               'CAP_FIXTURE_RESOURCE_LIMIT','CAP_FIXTURE_SYSSTAT',
-              'CAP_FIXTURE_PARAMETER','CAP_FIXTURE_ASM_DISKGROUP');
+              'CAP_FIXTURE_PARAMETER','CAP_FIXTURE_ASM_DISKGROUP',
+              'CAP_FIXTURE_SEG_STAT');
 BEGIN
     FOR i IN 1 .. v.COUNT LOOP
         BEGIN EXECUTE IMMEDIATE 'DROP TABLE ' || v(i) || ' PURGE';
@@ -161,6 +162,12 @@ CREATE TABLE cap_fixture_parameter (
 CREATE TABLE cap_fixture_asm_diskgroup (
     dbid NUMBER, con_dbid NUMBER, snap_id NUMBER, group_name VARCHAR2(128),
     total_mb NUMBER, free_mb NUMBER, usable_file_mb NUMBER);
+-- Segment space deltas (CAPV_SEG_STAT), already joined to the names.
+CREATE TABLE cap_fixture_seg_stat (
+    dbid NUMBER, con_dbid NUMBER, instance_number NUMBER, snap_id NUMBER,
+    tablespace_id NUMBER, tablespace_name VARCHAR2(30), owner VARCHAR2(128),
+    object_name VARCHAR2(128), subobject_name VARCHAR2(128), object_type VARCHAR2(18),
+    space_used_delta NUMBER, space_allocated_delta NUMBER);
 
 DECLARE
     c_dbid   CONSTANT NUMBER := 42424242;
@@ -1557,6 +1564,42 @@ BEGIN
     DBMS_OUTPUT.PUT_LINE('Seam-extension fixtures loaded: cpu_count ' || c_ncpu
         || ', FRA 100 GiB, ASM DATA 200..' || TO_CHAR(200 + 5 * c_nd) || ' of 1000 GiB'
         || ', FIX_TEMP peak 19.5 of 20 GiB, FIX_UNDO 3 of 10 GiB');
+END;
+/
+
+-- =====================================================================
+-- Segment growth (CAPR_SEGMENT_GROWTH, report/drill_tbspc.sql).
+-- =====================================================================
+-- FIX_FILLING grows 10 MiB a day. Three segments take that growth at every
+-- 18:00 snapshot (2001 + 2i, i = 0 .. 120, one per day): APP.ORDERS 7 MiB
+-- (70%), APP.ORDERS_PK 2 MiB (20%) and APP.EVENTS partition P1 1 MiB (10%).
+-- space_used_delta is half of space_allocated_delta. One FIX_LINEAR segment
+-- (APP.LEDGER, 10 MiB a day) proves the shares are per tablespace. Rows
+-- exist on every day, so the seg_window_days (28) window holds exactly 28
+-- of them: closed forms 28 x 7 / 2 / 1 MiB and 28 x 10 MiB.
+DECLARE
+    c_mib CONSTANT NUMBER := 1048576;
+    PROCEDURE seg(p_snap NUMBER, p_ts NUMBER, p_tsname VARCHAR2, p_obj VARCHAR2,
+                  p_sub VARCHAR2, p_type VARCHAR2, p_alloc NUMBER) IS
+    BEGIN
+        INSERT INTO cap_fixture_seg_stat
+        VALUES (42424242, 42424242, 1, p_snap, p_ts, p_tsname, 'APP', p_obj, p_sub, p_type,
+                p_alloc / 2, p_alloc);
+    END;
+BEGIN
+    FOR i IN 0 .. 120 LOOP
+        seg(2001 + 2 * i, 15, 'FIX_FILLING', 'ORDERS',    NULL, 'TABLE',           7 * c_mib);
+        seg(2001 + 2 * i, 15, 'FIX_FILLING', 'ORDERS_PK', NULL, 'INDEX',           2 * c_mib);
+        seg(2001 + 2 * i, 15, 'FIX_FILLING', 'EVENTS',    'P1', 'TABLE PARTITION', 1 * c_mib);
+        seg(2001 + 2 * i, 10, 'FIX_LINEAR',  'LEDGER',    NULL, 'TABLE',          10 * c_mib);
+    END LOOP;
+    DELETE FROM cap_fixture_meta WHERE mkey LIKE 'SEG!_%' ESCAPE '!';
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SEG_WINDOW_DAYS', 28);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SEG_ORDERS_BYTES',    28 * 7 * c_mib);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SEG_ORDERS_PK_BYTES', 28 * 2 * c_mib);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SEG_EVENTS_BYTES',    28 * 1 * c_mib);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SEG_LEDGER_BYTES',    28 * 10 * c_mib);
+    COMMIT;
 END;
 /
 

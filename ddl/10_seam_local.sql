@@ -1,7 +1,7 @@
 --
 -- ddl/10_seam_local.sql -- CAPV_* portable seam over DBA_HIST_* (LOCAL mode).
 -- =====================================================================
--- These eleven views (plus the CAPV_CONTRACT diagnostic at the bottom) are the
+-- These twelve views (plus the CAPV_CONTRACT diagnostic at the bottom) are the
 -- ONLY place the analytics touch Oracle's AWR dictionary. Everything
 -- downstream (CAPD_/CAPF_/CAPA_/report) is written once against CAPV_* and
 -- runs byte-identically in local, warehouse, or fixture mode. Swapping this
@@ -307,14 +307,47 @@ JOIN   dba_hist_asm_diskgroup g
  AND   g.con_dbid = s.con_dbid;
 
 -- --------------------------------------------------------------------
+-- CAPV_SEG_STAT -- per-snapshot segment space deltas, named.
+--   * DBA_HIST_SEG_STAT carries SPACE_USED_DELTA / SPACE_ALLOCATED_DELTA
+--     (bytes) per snapshot, instance and segment, with CON_DBID (verified on
+--     19.27 in CDB$ROOT: rows for the root and every PDB). The segment
+--     names come from DBA_HIST_SEG_STAT_OBJ, joined on (dbid, con_dbid, ts#,
+--     obj#, dataobj#). A dropped object keeps its row there with the name
+--     '** MISSING **'; it passes through unchanged.
+--   * AWR keeps only the top segments of each snapshot (by the
+--     statistics_level top-N rules), so the deltas cover the busiest
+--     segments, not every one.
+--   * tablespace_id is TS#, which restarts per container like the
+--     TABLESPACE_ID of CAPV_TBSPC_USAGE.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capv_seg_stat AS
+SELECT s.dbid                   AS dbid,
+       s.con_dbid               AS con_dbid,
+       s.instance_number        AS instance_number,
+       s.snap_id                AS snap_id,
+       s.ts#                    AS tablespace_id,
+       o.tablespace_name        AS tablespace_name,
+       o.owner                  AS owner,
+       o.object_name            AS object_name,
+       o.subobject_name         AS subobject_name,
+       o.object_type            AS object_type,
+       s.space_used_delta       AS space_used_delta,
+       s.space_allocated_delta  AS space_allocated_delta
+FROM   dba_hist_seg_stat s
+JOIN   dba_hist_seg_stat_obj o
+  ON   o.dbid = s.dbid AND o.con_dbid = s.con_dbid
+ AND   o.ts# = s.ts# AND o.obj# = s.obj# AND o.dataobj# = s.dataobj#;
+
+-- --------------------------------------------------------------------
 -- CAPV_CONTRACT -- what this seam actually presents, one row per fact
 -- source: row count, distinct con_dbid, snap_id range and the newest
 -- snapshot end time. per_container_expected = 'Y' where the contract wants
--- one series per container (TBSPC_USAGE, TIME_MODEL, SYSSTAT) and 'N' where
+-- one series per container (TBSPC_USAGE, TIME_MODEL, SYSSTAT, SEG_STAT) and 'N' where
 -- the source is host / instance / spine level (OSSTAT, RESOURCE_LIMIT,
 -- PARAMETER, ASM_DISKGROUP, SNAPSHOT), so n_con_dbid = 1 against a 'Y' means
--- the per-PDB series are missing. ASM_DISKGROUP has n_rows = 0 on a database
--- without ASM. A diagnostic for doctor.sql: it full-scans every source, and no
+-- the per-PDB series are missing. SEG_STAT is per container too. ASM_DISKGROUP
+-- has n_rows = 0 on a database without ASM, SEG_STAT on the warehouse seam
+-- until the collector gathers it. A diagnostic for doctor.sql: it full-scans every source, and no
 -- analytic view selects from it. The body reads only CAPV_* and is the same
 -- in all three seam files.
 -- --------------------------------------------------------------------
@@ -328,6 +361,7 @@ WITH src AS (
         UNION ALL SELECT 'RESOURCE_LIMIT', dbid, con_dbid, snap_id FROM capv_resource_limit
         UNION ALL SELECT 'PARAMETER',      dbid, con_dbid, snap_id FROM capv_parameter
         UNION ALL SELECT 'ASM_DISKGROUP',  dbid, con_dbid, snap_id FROM capv_asm_diskgroup
+        UNION ALL SELECT 'SEG_STAT',       dbid, con_dbid, snap_id FROM capv_seg_stat
      ),
      per_con AS (
         SELECT source_name, dbid, con_dbid,
@@ -352,6 +386,7 @@ WITH src AS (
         UNION ALL SELECT 'RESOURCE_LIMIT', 'N' FROM dual
         UNION ALL SELECT 'PARAMETER',      'N' FROM dual
         UNION ALL SELECT 'ASM_DISKGROUP',  'N' FROM dual
+        UNION ALL SELECT 'SEG_STAT',       'Y' FROM dual
      )
 SELECT k.source_name,
        NVL(SUM(p.n_rows), 0)        AS n_rows,

@@ -16,6 +16,13 @@
 -- other read-only reports; protect the module with ORDS.DEFINE_PRIVILEGE if
 -- the network is not trusted.
 --
+-- Every handler is a json/collection query except `metrics`, a PL/SQL block
+-- that prints the Prometheus text exposition format (text/plain;
+-- version=0.0.4) over CAPR_ALERTS, CAPR_FIT and CAPR_FRESHNESS through HTP.
+-- To try its body without ORDS, initialise the OWA environment, run the
+-- block between plsql('metrics', q'~ and ~'); and print the page with
+-- OWA_UTIL.SHOWPAGE (grafana/API.md shows how).
+--
 SET DEFINE ON
 SET VERIFY OFF
 SET FEEDBACK OFF
@@ -69,6 +76,16 @@ DECLARE
                     || ''', p_source_type => ''URI'', p_param_type => ''STRING'', p_access_method => ''IN'')');
             END LOOP;
         END IF;
+    END;
+    -- A PL/SQL handler: the block writes the response itself through HTP.
+    PROCEDURE plsql(p_pattern VARCHAR2, p_source VARCHAR2) IS
+    BEGIN
+        run('define_template(' || v_sch || 'p_module_name => ''' || c_module
+            || ''', p_pattern => ''' || p_pattern || ''')');
+        run('define_handler(' || v_sch || 'p_module_name => ''' || c_module
+            || ''', p_pattern => ''' || p_pattern || ''', p_method => ''GET'''
+            || ', p_source_type => ''plsql/block'''
+            || ', p_source => ' || DBMS_ASSERT.ENQUOTE_LITERAL(REPLACE(p_source, '''', '''''')) || ')');
     END;
 BEGIN
     IF SYS_CONTEXT('USERENV', 'SESSION_USER') = v_schema THEN
@@ -152,6 +169,77 @@ SELECT TRIM(severity) AS sev, sev_rank, kind AS alert_kind,
 FROM   capr_alerts
 WHERE  (:db IS NULL OR db_pdb = :db)
 ORDER  BY sev_rank, db_pdb, kind, series_key]');
+
+    plsql('metrics', q'~
+DECLARE
+    -- Prometheus text exposition 0.0.4. Label values escape backslash,
+    -- double quote and newline; numbers print with a leading zero and a '.'
+    -- decimal, at most six decimals.
+    PROCEDURE ln(p_text VARCHAR2) IS
+    BEGIN
+        HTP.PRN(p_text || CHR(10));
+    END;
+    FUNCTION lv(p_val VARCHAR2) RETURN VARCHAR2 IS
+    BEGIN
+        RETURN REPLACE(REPLACE(REPLACE(p_val, '', '\'), '"', '"'), CHR(10), '
+');
+    END;
+    FUNCTION num(p_n NUMBER) RETURN VARCHAR2 IS
+    BEGIN
+        RETURN RTRIM(TO_CHAR(p_n, 'FM99999999999999990.999999', 'NLS_NUMERIC_CHARACTERS = ''.,'''), '.');
+    END;
+    PROCEDURE up(p_val PLS_INTEGER) IS
+    BEGIN
+        ln('# HELP awrcap_up 1 when the handler read every view, 0 when one raised.');
+        ln('# TYPE awrcap_up gauge');
+        ln('awrcap_up ' || p_val);
+    END;
+BEGIN
+    OWA_UTIL.MIME_HEADER('text/plain; version=0.0.4', TRUE);
+    ln('# HELP awrcap_alert Current CAPR_ALERTS rows per kind, severity, container, series and baseline mode (normally 1).');
+    ln('# TYPE awrcap_alert gauge');
+    FOR r IN (SELECT kind, TRIM(severity) AS severity, db_pdb, con_dbid, series_key,
+                     NVL(baseline_mode, '-') AS b_mode, COUNT(*) AS n
+              FROM   capr_alerts
+              GROUP  BY kind, TRIM(severity), db_pdb, con_dbid, series_key, NVL(baseline_mode, '-')
+              ORDER  BY kind, db_pdb, series_key, b_mode) LOOP
+        ln('awrcap_alert{kind="' || lv(r.kind) || '",severity="' || lv(r.severity)
+           || '",db="' || lv(r.db_pdb) || '",con_dbid="' || r.con_dbid
+           || '",series="' || lv(r.series_key) || '",mode="' || lv(r.b_mode) || '"} ' || r.n);
+    END LOOP;
+    ln('# HELP awrcap_days_to_full Days until the series reaches its ceiling (tablespace full, CPU saturation, series limit) from CAPR_FIT; series with no projected crossing are omitted.');
+    ln('# TYPE awrcap_days_to_full gauge');
+    FOR r IN (SELECT kind, db, con_dbid, series, quality, days_to_full
+              FROM   capr_fit
+              WHERE  days_to_full IS NOT NULL
+              ORDER  BY kind, db, series) LOOP
+        ln('awrcap_days_to_full{kind="' || lv(r.kind) || '",db="' || lv(r.db)
+           || '",con_dbid="' || r.con_dbid || '",series="' || lv(r.series)
+           || '",quality="' || lv(r.quality) || '"} ' || num(r.days_to_full));
+    END LOOP;
+    ln('# HELP awrcap_pct_used Current value as a percent of its ceiling from CAPR_FIT (CPU: of the saturation line cpu_sat_pct).');
+    ln('# TYPE awrcap_pct_used gauge');
+    FOR r IN (SELECT kind, db, con_dbid, series, pct
+              FROM   capr_fit
+              WHERE  pct IS NOT NULL
+              ORDER  BY kind, db, series) LOOP
+        ln('awrcap_pct_used{kind="' || lv(r.kind) || '",db="' || lv(r.db)
+           || '",con_dbid="' || r.con_dbid || '",series="' || lv(r.series) || '"} ' || num(r.pct));
+    END LOOP;
+    ln('# HELP awrcap_data_through_days Days since the newest AWR snapshot day of each database (CAPR_FRESHNESS); 0 = data through today.');
+    ln('# TYPE awrcap_data_through_days gauge');
+    FOR r IN (SELECT db_name, dbid, TRUNC(SYSDATE) - newest_day AS age_days
+              FROM   capr_freshness
+              ORDER  BY db_name, dbid) LOOP
+        ln('awrcap_data_through_days{db="' || lv(r.db_name) || '",dbid="' || r.dbid || '"} ' || num(r.age_days));
+    END LOOP;
+    up(1);
+EXCEPTION
+    WHEN OTHERS THEN
+        ln('# awrcap metrics failed: ' || REPLACE(REPLACE(SQLERRM, CHR(10), ' '), CHR(13), ' '));
+        up(0);
+END;
+~');
 
     COMMIT;
     DBMS_OUTPUT.PUT_LINE('awrcap module published for ' || v_schema || ' at /ords/' || v_alias || '/awrcap/ (via ' || v_pkg || ')');

@@ -35,6 +35,7 @@ DECLARE
         'CAPR_ESM_COMPARE',
         'CAPR_TBSPC_FORECAST',
         'CAPR_FIT',
+        'CAPR_SEGMENT_GROWTH',
         'CAPR_HOURLY_POINTS',
         'CAPR_SERIES_POINTS',
         'CAPR_CPU_SHIFTS',
@@ -84,6 +85,7 @@ DECLARE
         'CAPV_SYSSTAT',
         'CAPV_PARAMETER',
         'CAPV_ASM_DISKGROUP',
+        'CAPV_SEG_STAT',
         'CAPV_SNAPSHOT',
         'CAP_CFG_CHECK',
         'CAP_CFG'

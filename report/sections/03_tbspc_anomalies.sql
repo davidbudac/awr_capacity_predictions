@@ -46,5 +46,7 @@ SELECT db_pdb,
        anomaly_flag
 FROM   capr_tbspc_anomalies
 WHERE  days_ago < &anomaly_days
+  AND  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+  AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon)
 -- days_ago ASC is exactly day_dt DESC (days_ago = last collected day - day_dt)
 ORDER  BY days_ago, con_dbid, tablespace_name, mode_rank;

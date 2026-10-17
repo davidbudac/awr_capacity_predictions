@@ -1906,12 +1906,17 @@ BEGIN
 
         DBMS_OUTPUT.PUT_LINE('=== CAPV_CONTRACT ===');
         SELECT COUNT(*) INTO v_n FROM capv_contract;
-        chk_int('CAPV_CONTRACT one row per seam source', v_n, 8);
+        chk_int('CAPV_CONTRACT one row per seam source', v_n, 9);
         SELECT COUNT(*) INTO v_n FROM capv_contract
-          WHERE (source_name IN ('TBSPC_USAGE','TIME_MODEL','SYSSTAT')       AND per_container_expected = 'Y')
+          WHERE (source_name IN ('TBSPC_USAGE','TIME_MODEL','SYSSTAT','SEG_STAT') AND per_container_expected = 'Y')
              OR (source_name IN ('OSSTAT','RESOURCE_LIMIT','SNAPSHOT',
                                  'PARAMETER','ASM_DISKGROUP')                AND per_container_expected = 'N');
-        chk_int('CAPV_CONTRACT per_container_expected as specified', v_n, 8);
+        chk_int('CAPV_CONTRACT per_container_expected as specified', v_n, 9);
+        -- SEG_STAT: 4 segments on every 18:00 snapshot (121 days), root only.
+        SELECT n_rows, n_con_dbid INTO v_num, v_num2
+          FROM capv_contract WHERE source_name = 'SEG_STAT';
+        chk_int('CAPV_CONTRACT SEG_STAT n_rows', v_num, 4 * (d_last - d_base + 1));
+        chk_int('CAPV_CONTRACT SEG_STAT n_con_dbid', v_num2, 1);
         -- PARAMETER: 9 names on every snapshot. ASM_DISKGROUP: 2 groups.
         SELECT n_rows, n_con_dbid INTO v_num, v_num2
           FROM capv_contract WHERE source_name = 'PARAMETER';
@@ -3202,7 +3207,7 @@ BEGIN
 
     -- suite_version: stamped by every install, BAD when older than this release.
     SELECT suite_version INTO v_num FROM cap_cfg;
-    chk_int('suite_version = 15', v_num, 15);
+    chk_int('suite_version = 16', v_num, 16);
     UPDATE cap_config SET cfg_value = 12 WHERE cfg_name = 'suite_version';
     SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'suite_version';
     chk_str('CAP_CFG_CHECK suite_version=12 < 13', v_str, 'BAD');
@@ -3620,6 +3625,65 @@ BEGIN
         WHEN OTHERS THEN
             restore_usage;
             fail('results-layer block raised ' || SQLERRM || ' ' || DBMS_UTILITY.FORMAT_ERROR_BACKTRACE);
+    END;
+
+    -- CAPR_SEGMENT_GROWTH: FIX_FILLING's three segments take 7 / 2 / 1 MiB
+    -- of its 10 MiB a day, FIX_LINEAR's one segment all 10 MiB, on every
+    -- day; the seg_window_days window holds 28 of those days, so the
+    -- shares are 70 / 20 / 10 and 100, and used growth is half the bytes.
+    DECLARE
+        d_last DATE := meta_d('LAST_DAY');
+        PROCEDURE seg_chk(p_ts VARCHAR2, p_obj VARCHAR2, p_rank NUMBER, p_pct NUMBER, p_bytes NUMBER) IS
+            v_b NUMBER; v_u NUMBER; v_p NUMBER; v_r NUMBER; v_ns NUMBER;
+            v_from DATE; v_to DATE; v_db VARCHAR2(200);
+        BEGIN
+            SELECT grown_bytes, used_grown_bytes, share_pct, rank_in_tbspc, n_snaps,
+                   window_from, window_to, db_pdb
+              INTO v_b, v_u, v_p, v_r, v_ns, v_from, v_to, v_db
+              FROM capr_segment_growth
+             WHERE dbid = v_dbid AND con_dbid = v_dbid
+               AND tablespace_name = p_ts AND owner = 'APP' AND object_name = p_obj;
+            chk_int('CAPR_SEGMENT_GROWTH ' || p_obj || ' grown_bytes', v_b, p_bytes);
+            chk_int('CAPR_SEGMENT_GROWTH ' || p_obj || ' used_grown_bytes', v_u, p_bytes / 2);
+            chk_close('CAPR_SEGMENT_GROWTH ' || p_obj || ' share_pct', v_p, p_pct, 1e-9);
+            chk_int('CAPR_SEGMENT_GROWTH ' || p_obj || ' rank_in_tbspc', v_r, p_rank);
+            chk_int('CAPR_SEGMENT_GROWTH ' || p_obj || ' n_snaps', v_ns, meta_n('SEG_WINDOW_DAYS'));
+            chk_true('CAPR_SEGMENT_GROWTH ' || p_obj || ' window = last 28 days',
+                     v_from = d_last - meta_n('SEG_WINDOW_DAYS') + 1 AND v_to = d_last);
+            chk_str('CAPR_SEGMENT_GROWTH ' || p_obj || ' db_pdb', v_db, 'FIXCDB');
+        END;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('=== CAPR_SEGMENT_GROWTH (who is filling it) ===');
+        SELECT seg_window_days INTO v_num FROM cap_cfg;
+        chk_int('seg_window_days (shipped)', v_num, meta_n('SEG_WINDOW_DAYS'));
+        SELECT COUNT(*) INTO v_n FROM capr_segment_growth
+          WHERE dbid = v_dbid AND tablespace_name = 'FIX_FILLING';
+        chk_int('CAPR_SEGMENT_GROWTH FIX_FILLING segments', v_n, 3);
+        seg_chk('FIX_FILLING', 'ORDERS',    1, 70,  meta_n('SEG_ORDERS_BYTES'));
+        seg_chk('FIX_FILLING', 'ORDERS_PK', 2, 20,  meta_n('SEG_ORDERS_PK_BYTES'));
+        seg_chk('FIX_FILLING', 'EVENTS',    3, 10,  meta_n('SEG_EVENTS_BYTES'));
+        seg_chk('FIX_LINEAR',  'LEDGER',    1, 100, meta_n('SEG_LEDGER_BYTES'));
+        SELECT subobject_name, object_type INTO v_str, v_str2 FROM capr_segment_growth
+          WHERE dbid = v_dbid AND tablespace_name = 'FIX_FILLING' AND object_name = 'EVENTS';
+        chk_str('CAPR_SEGMENT_GROWTH EVENTS subobject / type', v_str || ' ' || v_str2, 'P1 TABLE PARTITION');
+        SELECT SUM(grown_bytes) INTO v_num FROM capr_segment_growth
+          WHERE dbid = v_dbid AND tablespace_name = 'FIX_FILLING';
+        chk_int('CAPR_SEGMENT_GROWTH FIX_FILLING total = 28 days x 10 MiB', v_num, 28 * 10485760);
+        -- seg_window_days drives the window: 7 days -> 7 x 7 MiB.
+        UPDATE cap_config SET cfg_value = 7 WHERE cfg_name = 'seg_window_days';
+        SELECT grown_bytes INTO v_num FROM capr_segment_growth
+          WHERE dbid = v_dbid AND tablespace_name = 'FIX_FILLING' AND object_name = 'ORDERS';
+        chk_int('CAPR_SEGMENT_GROWTH ORDERS grown_bytes at seg_window_days = 7', v_num, 7 * 7 * 1048576);
+        UPDATE cap_config SET cfg_value = 0 WHERE cfg_name = 'seg_window_days';
+        SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'seg_window_days';
+        chk_str('CAP_CFG_CHECK seg_window_days = 0', v_str, 'BAD');
+        UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'seg_window_days';
+        COMMIT;
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'seg_window_days';
+            COMMIT;
+            fail('segment-growth block raised ' || SQLERRM);
     END;
 
     DBMS_OUTPUT.PUT_LINE('----------------------------------------');

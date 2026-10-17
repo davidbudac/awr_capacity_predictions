@@ -66,6 +66,8 @@ SELECT db_pdb,
        quality,
        fra_days_at_cur AS fra_days
 FROM   capr_series
+WHERE  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+  AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon)
 ORDER  BY rank_series;
 
 PROMPT
@@ -102,4 +104,6 @@ SELECT db_pdb,
        anomaly_flag
 FROM   capr_series_anomalies
 WHERE  days_ago < &anomaly_days
+  AND  (&cap_sdbid IS NULL OR dbid = &cap_sdbid)
+  AND  (&cap_scon  IS NULL OR con_dbid = &cap_scon)
 ORDER  BY days_ago, con_dbid, series, mode_rank;

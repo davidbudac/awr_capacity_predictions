@@ -8,7 +8,9 @@
 --                             gap, the day's p95/max/peak-window companions,
 --                             and both day baselines (trailing, same weekday)
 --   3. residual footer     -- SUM(resid) ~ 0 and resid_se = sqrt(SSE/(n-2)),
---                             the number the M9.1 prediction bands are built on
+--                             the number the M9.1 prediction bands are built on;
+--                             residuals are against the deseasoned fit input
+--                             when cpu_deseason = 1, as the view fits it
 --   4. anomaly arithmetic  -- one spelled-out line per flagged (day, mode),
 --                             then the flagged hours vs the hour-of-week baseline
 --
@@ -132,8 +134,10 @@ END;
 PROMPT
 PROMPT == 1. FIT HEADER (CAPF_CPU_TREND + CAPR_CONTAINER) ==
 PROMPT    FIT(day_n) = ICEPT + SLOPE/DAY * day_n (CAPF_CPU_TREND.icept, the fitted
-PROMPT    intercept). Projections start from today instead: +h days = CURRENT +
-PROMPT    SLOPE/DAY * h, and DAYS_SAT counts from CURRENT too.
+PROMPT    intercept, on the deseasoned input when cpu_deseason = 1). Projections
+PROMPT    start from ANCHOR instead (CAPF_CPU_TREND.anchor_value, the median of the
+PROMPT    last shift_days complete days): +h days = ANCHOR + SLOPE/DAY * h, and
+PROMPT    DAYS_SAT counts from ANCHOR too.
 PROMPT    R2/QUALITY grade the fit (INSUFFICIENT_HISTORY = TRAIN_N < &k_min).
 PROMPT    +-CI = 95% half-width on the slope; WORST/BEST = days-to-saturation at
 PROMPT    the fast/slow edge of that CI (BEST empty = might never saturate).
@@ -152,6 +156,7 @@ COLUMN dts       FORMAT 9999990        HEADING 'DAYS_SAT'
 COLUMN dts_lo    FORMAT 9999990        HEADING 'WORST'
 COLUMN dts_hi    FORMAT 9999990        HEADING 'BEST'
 COLUMN quality   FORMAT A20            HEADING 'QUALITY'
+COLUMN anchor    FORMAT 99999990.000   HEADING 'ANCHOR'
 
 SELECT NVL(c.db_pdb, TO_CHAR(f.con_dbid))                       AS db_pdb,
        f.metric                                                 AS metric,
@@ -166,7 +171,8 @@ SELECT NVL(c.db_pdb, TO_CHAR(f.con_dbid))                       AS db_pdb,
        f.days_to_sat                                            AS dts,
        f.days_to_sat_lo                                         AS dts_lo,
        f.days_to_sat_hi                                         AS dts_hi,
-       f.quality                                                AS quality
+       f.quality                                                AS quality,
+       f.anchor_value                                           AS anchor
 FROM   capf_cpu_trend f
 LEFT   JOIN capr_container c
   ON   c.dbid = f.dbid AND c.con_dbid = f.con_dbid
@@ -176,8 +182,11 @@ ORDER  BY f.con_dbid;
 
 PROMPT
 PROMPT == 2. DAILY SERIES OVER THE FIT WINDOW (CAPD_CPU_DAILY / CAPD_DBTIME_DAILY) ==
-PROMPT    FIT = ICEPT + SLOPE/DAY * DAY_N ; RESID = VALUE - FIT ; DELTA = change
+PROMPT    FIT = ICEPT + SLOPE/DAY * DAY_N ; RESID = FIT_IN - FIT ; DELTA = change
 PROMPT    since the previous sampled day, GAP = calendar days since it.
+PROMPT    FIT_IN = the value the fit saw: VALUE when cpu_deseason = 0, else VALUE
+PROMPT    - AVG(same day type) + AVG(all) over the fit window (day type = weekday
+PROMPT    or Saturday / Sunday), exactly as CAPF_CPU_TREND deseasons it.
 PROMPT    P95/MAX/PEAK are the same day's companions (busy_p95/busy_max/
 PROMPT    busy_peak_pct for BUSY_*, db_cpu_p95/max/peak_pct for DB_CPU_*).
 PROMPT    N_IVL = snapshot intervals that survived the restart/reset guard.
@@ -193,6 +202,7 @@ COLUMN val     FORMAT 99999990.000  HEADING 'VALUE'
 COLUMN v_p95   FORMAT 9999990.00    HEADING 'P95'
 COLUMN v_max   FORMAT 9999990.00    HEADING 'MAX'
 COLUMN v_peak  FORMAT 9999990.00    HEADING 'PEAK'
+COLUMN fit_in  FORMAT 99999990.000  HEADING 'FIT_IN'
 COLUMN fit     FORMAT 99999990.000  HEADING 'FIT'
 COLUMN resid   FORMAT 9999990.000   HEADING 'RESID'
 COLUMN delta   FORMAT 9999990.000   HEADING 'DELTA'
@@ -244,6 +254,23 @@ WITH src AS (
         FROM   capf_cpu_trend
         WHERE  metric = '&drill_metric'
           AND  ('&drill_con' = '0' OR TO_CHAR(con_dbid) = '&drill_con')
+     ),
+     -- The fit window with the fit input. The AVGs run after the WHERE, so
+     -- they cover the window only, as in the view.
+     wv AS (
+        SELECT s.*, f.icept, f.slope_per_day,
+               CASE WHEN cfg.cpu_deseason = 1
+                    THEN s.val
+                         - AVG(s.val) OVER (PARTITION BY s.dbid, s.con_dbid,
+                                            CASE WHEN MOD(TRUNC(s.day_dt) - DATE '1900-01-01', 7) >= 5
+                                                 THEN 1 ELSE 0 END)
+                         + AVG(s.val) OVER (PARTITION BY s.dbid, s.con_dbid)
+                    ELSE s.val
+               END AS fval
+        FROM   f
+        JOIN   s ON s.dbid = f.dbid AND s.con_dbid = f.con_dbid
+        CROSS  JOIN cap_cfg cfg
+        WHERE  s.day_dt BETWEEN f.train_start AND f.last_day
      )
 SELECT TO_CHAR(s.day_dt, 'YYYY-MM-DD')                          AS day_dt,
        s.day_n                                                  AS day_n,
@@ -251,8 +278,9 @@ SELECT TO_CHAR(s.day_dt, 'YYYY-MM-DD')                          AS day_dt,
        s.busy_p95                                               AS v_p95,
        s.busy_max                                               AS v_max,
        s.busy_peak_pct                                          AS v_peak,
-       f.icept + f.slope_per_day * s.day_n                      AS fit,
-       s.val - (f.icept + f.slope_per_day * s.day_n)            AS resid,
+       s.fval                                                   AS fit_in,
+       s.icept + s.slope_per_day * s.day_n                      AS fit,
+       s.fval - (s.icept + s.slope_per_day * s.day_n)           AS resid,
        s.d_val                                                  AS delta,
        s.day_gap                                                AS gap,
        s.n_intervals                                            AS n_ivl,
@@ -265,8 +293,7 @@ SELECT TO_CHAR(s.day_dt, 'YYYY-MM-DD')                          AS day_dt,
        CAST(w.expected     AS NUMBER)                           AS dow_med,
        CAST(w.robust_z     AS NUMBER)                           AS dow_z,
        CAST(w.anomaly_flag AS VARCHAR2(5))                      AS dow_flag
-FROM   f
-JOIN   s   ON s.dbid = f.dbid AND s.con_dbid = f.con_dbid
+FROM   wv s
 LEFT   JOIN capa_anom t
   ON   t.dbid = s.dbid AND t.con_dbid = s.con_dbid AND t.kind = 'CPU'
  AND   t.series = '&drill_metric' AND t.ts = s.day_dt
@@ -275,11 +302,12 @@ LEFT   JOIN capa_anom w
   ON   w.dbid = s.dbid AND w.con_dbid = s.con_dbid AND w.kind = 'CPU'
  AND   w.series = '&drill_metric' AND w.ts = s.day_dt
  AND   w.baseline_mode = 'SAME_DOW'
-WHERE  s.day_dt BETWEEN f.train_start AND f.last_day
 ORDER  BY s.con_dbid, s.day_dt;
 
 PROMPT
 PROMPT == 2b. RESIDUAL FOOTER -- the basis of the M9.1 prediction bands ==
+PROMPT    Residuals are against FIT_IN (section 2), so under cpu_deseason = 1 they
+PROMPT    are those of the deseasoned fit the view made (DESEASON = Y).
 PROMPT    OLS guarantees SUM_RESID = 0 (rounding aside). SSE = SUM(RESID^2),
 PROMPT    RESID_SE = sqrt(SSE/(n-2)), TVAL = 1.96 + 2.4/(n-2), and
 PROMPT    CI_CALC = TVAL * RESID_SE / sqrt(SXX) must equal the view's CI_VIEW.
@@ -292,6 +320,7 @@ COLUMN tval      FORMAT 90.0000        HEADING 'TVAL'
 COLUMN sxx       FORMAT 999999999990   HEADING 'SXX'
 COLUMN ci_calc   FORMAT 99990.00000    HEADING 'CI_CALC'
 COLUMN ci_view   FORMAT 99990.00000    HEADING 'CI_VIEW'
+COLUMN deseason  FORMAT A8             HEADING 'DESEASON'
 
 WITH src AS (
         SELECT dbid, con_dbid, day_dt,
@@ -316,18 +345,34 @@ WITH src AS (
         WHERE  metric = '&drill_metric'
           AND  ('&drill_con' = '0' OR TO_CHAR(con_dbid) = '&drill_con')
      ),
-     r AS (
+     wv AS (
         SELECT s.con_dbid,
                s.day_dt - DATE '2020-01-01' AS day_n,
                s.val,
-               s.val - (f.icept + f.slope_per_day * (s.day_dt - DATE '2020-01-01')) AS resid,
-               f.slope_ci_per_day
+               CASE WHEN cfg.cpu_deseason = 1
+                    THEN s.val
+                         - AVG(s.val) OVER (PARTITION BY s.dbid, s.con_dbid,
+                                            CASE WHEN MOD(TRUNC(s.day_dt) - DATE '1900-01-01', 7) >= 5
+                                                 THEN 1 ELSE 0 END)
+                         + AVG(s.val) OVER (PARTITION BY s.dbid, s.con_dbid)
+                    ELSE s.val
+               END AS fval,
+               CASE WHEN cfg.cpu_deseason = 1 THEN 'Y' ELSE 'N' END AS deseason,
+               f.icept, f.slope_per_day, f.slope_ci_per_day
         FROM   f
         JOIN   src s ON s.dbid = f.dbid AND s.con_dbid = f.con_dbid
+        CROSS  JOIN cap_cfg cfg
         WHERE  s.val IS NOT NULL
           AND  s.day_dt BETWEEN f.train_start AND f.last_day
+     ),
+     r AS (
+        SELECT con_dbid, day_n, val, deseason,
+               fval - (icept + slope_per_day * day_n) AS resid,
+               slope_ci_per_day
+        FROM   wv
      )
-SELECT COUNT(*)                                                     AS n,
+SELECT MAX(deseason)                                                AS deseason,
+       COUNT(*)                                                     AS n,
        SUM(resid)                                                   AS sum_resid,
        SUM(resid * resid)                                           AS sse,
        SQRT(SUM(resid * resid) / NULLIF(COUNT(*) - 2, 0))           AS resid_se,
