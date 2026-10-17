@@ -4,7 +4,7 @@
 -- Linear fits computed two ways -- ordinary least squares via Oracle's built-in
 -- REGR_* aggregates, and (M9.2) a robust Theil-Sen median-of-pairwise-slopes --
 -- so every projection is reproducible by hand from slope + intercept. All
--- tuning comes from CAP_CONFIG through a one-row `cfg` CTE.
+-- tuning comes from CAP_CONFIG through the one-row view CAP_CFG.
 --
 --   CAPF_TBSPC_FORECAST -- per tablespace: bytes/day slope, R^2, +30/90/180/365
 --                          day projections with 95% prediction bands
@@ -86,20 +86,7 @@ SET DEFINE OFF
 -- CAPF_TBSPC_FORECAST
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capf_tbspc_forecast AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'train_days'     THEN cfg_value END) AS train_days,
-               MAX(CASE WHEN cfg_name = 'recent_days'    THEN cfg_value END) AS recent_days,
-               MAX(CASE WHEN cfg_name = 'min_train_days' THEN cfg_value END) AS min_train_days,
-               MAX(CASE WHEN cfg_name = 'r2_gate'        THEN cfg_value END) AS r2_gate,
-               MAX(CASE WHEN cfg_name = 'accel_slope_floor_bpd' THEN cfg_value END) AS accel_floor,
-               -- M9.2 / M9.3 knobs
-               MAX(CASE WHEN cfg_name = 'slope_method'    THEN cfg_value END) AS slope_method,
-               MAX(CASE WHEN cfg_name = 'reset_on_shrink' THEN cfg_value END) AS reset_on_shrink,
-               MAX(CASE WHEN cfg_name = 'shrink_mad_k'    THEN cfg_value END) AS shrink_mad_k,
-               MAX(CASE WHEN cfg_name = 'abs_floor_bytes' THEN cfg_value END) AS abs_floor
-        FROM   cap_config
-     ),
-     d AS (
+WITH d AS (
         -- used_delta is the raw day-over-day step, computed over the FULL
         -- series (so the first day of the training window still has one) and
         -- used only by the M9.3 change-point test below. 19c: the OVER clause
@@ -127,7 +114,7 @@ WITH cfg AS (
      ),
      -- tw = the nominal training window (the last train_days days).
      tw AS (
-        SELECT dd.* FROM dd CROSS JOIN cfg
+        SELECT dd.* FROM dd CROSS JOIN cap_cfg cfg
         WHERE  dd.day_dt > dd.last_day - cfg.train_days
      ),
      -- ---- M9.3 change-point detection, two passes over tw's deltas ----
@@ -156,9 +143,9 @@ WITH cfg AS (
         FROM   tw t
         JOIN   dmad m ON m.dbid = t.dbid AND m.con_dbid = t.con_dbid
                      AND m.tablespace_name = t.tablespace_name
-        CROSS  JOIN cfg
+        CROSS  JOIN cap_cfg cfg
         WHERE  cfg.reset_on_shrink = 1
-          AND  t.used_delta < -GREATEST(cfg.shrink_mad_k * m.dsig, cfg.abs_floor)
+          AND  t.used_delta < -GREATEST(cfg.shrink_mad_k * m.dsig, cfg.abs_floor_bytes)
         GROUP  BY t.dbid, t.con_dbid, t.tablespace_name
      ),
      -- w = the EFFECTIVE training window: tw, restarted at reset_day when one
@@ -274,12 +261,12 @@ WITH cfg AS (
                            AND t.tablespace_name = b.tablespace_name
         LEFT   JOIN rst r   ON r.dbid = b.dbid AND r.con_dbid = b.con_dbid
                            AND r.tablespace_name = b.tablespace_name
-        CROSS  JOIN cfg
+        CROSS  JOIN cap_cfg cfg
      ),
      -- The "recent" (accel_ratio) fit, over the same effective window so a
      -- post-purge series compares post-purge growth against post-purge growth.
      rw AS (
-        SELECT t.* FROM w t CROSS JOIN cfg
+        SELECT t.* FROM w t CROSS JOIN cap_cfg cfg
         WHERE  t.day_dt > t.last_day - cfg.recent_days
      ),
      rfit AS (
@@ -312,7 +299,7 @@ WITH cfg AS (
         FROM   rfit r
         LEFT   JOIN rtsslp rt ON rt.dbid = r.dbid AND rt.con_dbid = r.con_dbid
                              AND rt.tablespace_name = r.tablespace_name
-        CROSS  JOIN cfg
+        CROSS  JOIN cap_cfg cfg
      ),
      cur AS (
         SELECT dbid, con_dbid, tablespace_name,
@@ -387,7 +374,7 @@ SELECT f.dbid,
        -- accel_slope_floor_bpd (default 1 MiB/day) a near-flat series divides
        -- by ~0 and reports an absurd 500x "acceleration", so the ratio is NULL
        -- instead. slope = 0 (FLAT) was already NULL and still is.
-       CASE WHEN ABS(f.use_slope) >= cfg.accel_floor
+       CASE WHEN ABS(f.use_slope) >= cfg.accel_slope_floor_bpd
             THEN r.recent_slope / f.use_slope
        END                                                AS accel_ratio,
        CASE WHEN f.n  < cfg.min_train_days       THEN 'INSUFFICIENT_HISTORY'
@@ -400,7 +387,7 @@ JOIN   cur  c ON c.dbid = f.dbid AND c.con_dbid = f.con_dbid
              AND c.tablespace_name = f.tablespace_name
 LEFT   JOIN rcomb r ON r.dbid = f.dbid AND r.con_dbid = f.con_dbid
                    AND r.tablespace_name = f.tablespace_name
-CROSS  JOIN cfg;
+CROSS  JOIN cap_cfg cfg;
 
 -- --------------------------------------------------------------------
 -- CAPF_CPU_TREND -- one row per (dbid, con_dbid, metric):
@@ -421,15 +408,7 @@ CROSS  JOIN cfg;
 -- CPU level shift is M10.3's job, not this one.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capf_cpu_trend AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'train_days'     THEN cfg_value END) AS train_days,
-               MAX(CASE WHEN cfg_name = 'min_train_days' THEN cfg_value END) AS min_train_days,
-               MAX(CASE WHEN cfg_name = 'r2_gate'        THEN cfg_value END) AS r2_gate,
-               MAX(CASE WHEN cfg_name = 'cpu_sat_pct'    THEN cfg_value END) AS cpu_sat_pct,
-               MAX(CASE WHEN cfg_name = 'slope_method'   THEN cfg_value END) AS slope_method
-        FROM   cap_config
-     ),
-     src AS (
+WITH src AS (
         SELECT dbid, con_dbid, 'BUSY_PCT'   AS metric, day_dt, busy_pct      AS val
         FROM   capd_cpu_daily    WHERE busy_pct      IS NOT NULL
         UNION ALL
@@ -461,7 +440,7 @@ WITH cfg AS (
         FROM   d JOIN b ON b.dbid = d.dbid AND b.con_dbid = d.con_dbid AND b.metric = d.metric
      ),
      w AS (
-        SELECT dd.* FROM dd CROSS JOIN cfg
+        SELECT dd.* FROM dd CROSS JOIN cap_cfg cfg
         WHERE  dd.day_dt > dd.last_day - cfg.train_days
      ),
      fit AS (
@@ -534,7 +513,7 @@ WITH cfg AS (
         FROM   band b
         LEFT   JOIN tsfit t ON t.dbid = b.dbid AND t.con_dbid = b.con_dbid
                            AND t.metric = b.metric
-        CROSS  JOIN cfg
+        CROSS  JOIN cap_cfg cfg
      ),
      cur AS (
         SELECT dbid, con_dbid, metric,
@@ -585,4 +564,4 @@ SELECT f.dbid,
        END                                          AS quality
 FROM   pick f
 JOIN   cur c ON c.dbid = f.dbid AND c.con_dbid = f.con_dbid AND c.metric = f.metric
-CROSS  JOIN cfg;
+CROSS  JOIN cap_cfg cfg;

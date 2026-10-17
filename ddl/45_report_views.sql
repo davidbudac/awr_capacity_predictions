@@ -76,23 +76,7 @@ FROM   capv_container c;
 -- raw con_dbid string.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_alerts AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'dtf_warn'            THEN cfg_value END) AS dtf_warn,
-               MAX(CASE WHEN cfg_name = 'dtf_crit'            THEN cfg_value END) AS dtf_crit,
-               MAX(CASE WHEN cfg_name = 'nearfull_warn_pct'   THEN cfg_value END) AS nf_warn,
-               MAX(CASE WHEN cfg_name = 'nearfull_crit_pct'   THEN cfg_value END) AS nf_crit,
-               MAX(CASE WHEN cfg_name = 'cpu_sat_pct'         THEN cfg_value END) AS cpu_sat,
-               MAX(CASE WHEN cfg_name = 'anomaly_report_days' THEN cfg_value END) AS anom_days,
-               MAX(CASE WHEN cfg_name = 'train_days'          THEN cfg_value END) AS train_days,
-               -- which host-busy trend drives CPU_SAT (M10.1): p95 of the
-               -- day's snapshot intervals (default) or the daily average
-               CASE WHEN MAX(CASE WHEN cfg_name = 'cpu_sat_on_p95' THEN cfg_value END) = 0
-                    THEN 'BUSY_PCT' ELSE 'BUSY_P95' END                       AS cpu_sat_metric,
-               -- M11: the "call it full here" fraction for a fixed-ceiling series
-               MAX(CASE WHEN cfg_name = 'series_sat_pct'      THEN cfg_value END) AS series_sat
-        FROM   cap_config
-     ),
-     alerts AS (
+WITH alerts AS (
         -- ---- TBSPC_FULL: confident forecast inside the warning window ----
         SELECT CASE WHEN f.days_to_full <= cfg.dtf_crit THEN 'CRIT' ELSE 'WARN' END AS severity,
                'TBSPC_FULL'            AS kind,
@@ -107,27 +91,27 @@ WITH cfg AS (
                  || TO_CHAR(f.days_to_full, 'FM9999990') || ' days ('
                  || TO_CHAR(f.pct_used, 'FM990.0') || '% used, '
                  || TO_CHAR(f.slope_bpd / 1048576, 'FM99999990.0') || ' MiB/day)' AS message
-        FROM   capf_tbspc_forecast f CROSS JOIN cfg
+        FROM   capf_tbspc_forecast f CROSS JOIN cap_cfg cfg
         WHERE  f.quality = 'OK'
           AND  f.days_to_full IS NOT NULL
           AND  f.days_to_full <= cfg.dtf_warn
         UNION ALL
         -- ---- TBSPC_NEARFULL: nearly full RIGHT NOW, any fit quality ----
-        SELECT CASE WHEN f.pct_used >= cfg.nf_crit THEN 'CRIT' ELSE 'WARN' END,
+        SELECT CASE WHEN f.pct_used >= cfg.nearfull_crit_pct THEN 'CRIT' ELSE 'WARN' END,
                'TBSPC_NEARFULL',
                f.dbid, f.con_dbid,
                f.tablespace_name,
                f.last_day,
                f.pct_used,
-               CASE WHEN f.pct_used >= cfg.nf_crit THEN cfg.nf_crit ELSE cfg.nf_warn END,
+               CASE WHEN f.pct_used >= cfg.nearfull_crit_pct THEN cfg.nearfull_crit_pct ELSE cfg.nearfull_warn_pct END,
                'PCT',
                'Tablespace ' || f.tablespace_name || ' is '
                  || TO_CHAR(f.pct_used, 'FM990.0') || '% full now ('
                  || TO_CHAR(f.cur_used / 1073741824, 'FM99999990.00') || ' of '
                  || TO_CHAR(f.limit_bytes / 1073741824, 'FM99999990.00')
                  || ' GiB; forecast quality ' || f.quality || ')'
-        FROM   capf_tbspc_forecast f CROSS JOIN cfg
-        WHERE  f.pct_used >= cfg.nf_warn
+        FROM   capf_tbspc_forecast f CROSS JOIN cap_cfg cfg
+        WHERE  f.pct_used >= cfg.nearfull_warn_pct
         UNION ALL
         -- ---- CPU_SAT: host CPU forecast to reach saturation ----
         SELECT CASE WHEN t.days_to_sat <= cfg.dtf_crit THEN 'CRIT' ELSE 'WARN' END,
@@ -139,11 +123,13 @@ WITH cfg AS (
                CASE WHEN t.days_to_sat <= cfg.dtf_crit THEN cfg.dtf_crit ELSE cfg.dtf_warn END,
                'DAYS',
                'Host CPU ' || CASE t.metric WHEN 'BUSY_P95' THEN '(busy-hour p95) ' ELSE '(daily avg) ' END
-                 || 'forecast to reach ' || TO_CHAR(cfg.cpu_sat, 'FM990')
+                 || 'forecast to reach ' || TO_CHAR(cfg.cpu_sat_pct, 'FM990')
                  || '% busy in ' || TO_CHAR(t.days_to_sat, 'FM9999990')
                  || ' days (now ' || TO_CHAR(t.cur_val, 'FM990.0') || '% busy)'
-        FROM   capf_cpu_trend t CROSS JOIN cfg
-        WHERE  t.metric = cfg.cpu_sat_metric
+        FROM   capf_cpu_trend t CROSS JOIN cap_cfg cfg
+        -- which host-busy trend drives CPU_SAT (M10.1): p95 of the day's
+        -- snapshot intervals (default) or the daily average
+        WHERE  t.metric = CASE WHEN cfg.cpu_sat_on_p95 = 0 THEN 'BUSY_PCT' ELSE 'BUSY_P95' END
           AND  t.quality = 'OK'
           AND  t.days_to_sat IS NOT NULL
           AND  t.days_to_sat <= cfg.dtf_warn
@@ -158,10 +144,10 @@ WITH cfg AS (
                t.days_to_sat,
                CASE WHEN t.days_to_sat <= cfg.dtf_crit THEN cfg.dtf_crit ELSE cfg.dtf_warn END,
                'DAYS',
-               'DB CPU forecast to reach ' || TO_CHAR(cfg.cpu_sat, 'FM990')
+               'DB CPU forecast to reach ' || TO_CHAR(cfg.cpu_sat_pct, 'FM990')
                  || '% of host core capacity in ' || TO_CHAR(t.days_to_sat, 'FM9999990')
                  || ' days (now ' || TO_CHAR(t.cur_val, 'FM990.0') || '%)'
-        FROM   capf_cpu_trend t CROSS JOIN cfg
+        FROM   capf_cpu_trend t CROSS JOIN cap_cfg cfg
         WHERE  t.metric = 'DB_CPU_PCT'
           AND  t.quality = 'OK'
           AND  t.days_to_sat IS NOT NULL
@@ -187,7 +173,7 @@ WITH cfg AS (
                  || TO_CHAR(s.recent_med, 'FM99999990.0') || '% vs prior '
                  || TO_CHAR(s.base_days, 'FM9999990') || ' days '
                  || TO_CHAR(s.base_med, 'FM99999990.0') || '%'
-        FROM   capa_cpu_shift s CROSS JOIN cfg
+        FROM   capa_cpu_shift s CROSS JOIN cap_cfg cfg
         WHERE  s.shift_flag IS NOT NULL
         UNION ALL
         -- ---- TBSPC_ANOM: flagged growth-rate days in the alert window ----
@@ -211,9 +197,9 @@ WITH cfg AS (
                  || CASE WHEN a.pct_vs_avg IS NOT NULL
                          THEN ', ' || TO_CHAR(a.pct_vs_avg, 'FMS999999999990') || '% vs '
                               || TO_CHAR(cfg.train_days, 'FM9990') || '-day avg rate' END
-        FROM   capa_tbspc_anom a CROSS JOIN cfg
+        FROM   capa_tbspc_anom a CROSS JOIN cap_cfg cfg
         WHERE  a.anomaly_flag IS NOT NULL
-          AND  a.day_dt > (SELECT MAX(day_dt) FROM capd_tbspc_daily) - cfg.anom_days
+          AND  a.day_dt > (SELECT MAX(day_dt) FROM capd_tbspc_daily) - cfg.anomaly_report_days
         UNION ALL
         -- ---- CPU_ANOM: flagged busy% days in the alert window ----
         SELECT CASE WHEN a.anomaly_flag = 'HIGH' THEN 'WARN' ELSE 'INFO' END,
@@ -230,9 +216,9 @@ WITH cfg AS (
                  || TO_CHAR(a.median_pct, 'FM990.0') || '% for that weekday'
                  || CASE WHEN a.pct_vs_median IS NOT NULL
                          THEN ' (' || TO_CHAR(a.pct_vs_median, 'FMS999999999990') || '% vs median)' END
-        FROM   capa_cpu_anom a CROSS JOIN cfg
+        FROM   capa_cpu_anom a CROSS JOIN cap_cfg cfg
         WHERE  a.anomaly_flag IS NOT NULL
-          AND  a.day_dt > (SELECT MAX(day_dt) FROM capd_cpu_daily) - cfg.anom_days
+          AND  a.day_dt > (SELECT MAX(day_dt) FROM capd_cpu_daily) - cfg.anomaly_report_days
         UNION ALL
         -- ---- SERIES_LIMIT (M11): a fixed-ceiling series (PROCESSES /
         -- SESSIONS / DB_SIZE_GB) is forecast to reach series_sat_pct% of its
@@ -248,12 +234,12 @@ WITH cfg AS (
                s.days_to_limit,
                CASE WHEN s.days_to_limit <= cfg.dtf_crit THEN cfg.dtf_crit ELSE cfg.dtf_warn END,
                'DAYS',
-               s.series || ' forecast to reach ' || TO_CHAR(cfg.series_sat, 'FM990')
+               s.series || ' forecast to reach ' || TO_CHAR(cfg.series_sat_pct, 'FM990')
                  || '% of its limit (' || RTRIM(TO_CHAR(s.cur_limit, 'FM99999999990.99'), '.')
                  || ' ' || s.unit || ') in ' || TO_CHAR(s.days_to_limit, 'FM9999990')
                  || ' days (now ' || RTRIM(TO_CHAR(s.cur_val, 'FM99999999990.99'), '.')
                  || ', ' || TO_CHAR(s.pct_of_limit, 'FM990.0') || '% of limit)'
-        FROM   capf_series_forecast s CROSS JOIN cfg
+        FROM   capf_series_forecast s CROSS JOIN cap_cfg cfg
         WHERE  s.quality = 'OK'
           AND  s.days_to_limit IS NOT NULL
           AND  s.days_to_limit <= cfg.dtf_warn
@@ -262,20 +248,20 @@ WITH cfg AS (
         -- at ANY fit quality -- the M7.1 rule applied to the new series. A
         -- session count sitting at 95% of `sessions` is an outage waiting for
         -- a busy Monday whether or not its trend is fittable.
-        SELECT CASE WHEN s.pct_of_limit >= cfg.nf_crit THEN 'CRIT' ELSE 'WARN' END,
+        SELECT CASE WHEN s.pct_of_limit >= cfg.nearfull_crit_pct THEN 'CRIT' ELSE 'WARN' END,
                'SERIES_NEARLIMIT',
                s.dbid, s.con_dbid,
                s.series,
                s.last_day,
                s.pct_of_limit,
-               CASE WHEN s.pct_of_limit >= cfg.nf_crit THEN cfg.nf_crit ELSE cfg.nf_warn END,
+               CASE WHEN s.pct_of_limit >= cfg.nearfull_crit_pct THEN cfg.nearfull_crit_pct ELSE cfg.nearfull_warn_pct END,
                'PCT',
                s.series || ' is at ' || TO_CHAR(s.pct_of_limit, 'FM990.0')
                  || '% of its limit now (' || RTRIM(TO_CHAR(s.cur_val, 'FM99999999990.99'), '.')
                  || ' of ' || RTRIM(TO_CHAR(s.cur_limit, 'FM99999999990.99'), '.') || ' ' || s.unit
                  || '; forecast quality ' || s.quality || ')'
-        FROM   capf_series_forecast s CROSS JOIN cfg
-        WHERE  s.pct_of_limit >= cfg.nf_warn
+        FROM   capf_series_forecast s CROSS JOIN cap_cfg cfg
+        WHERE  s.pct_of_limit >= cfg.nearfull_warn_pct
      )
 SELECT a.severity,
        CASE a.severity WHEN 'CRIT' THEN 1 WHEN 'WARN' THEN 2 ELSE 3 END AS sev_rank,
@@ -326,13 +312,6 @@ LEFT   JOIN capr_container c
 -- consumer can still compare and threshold them.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_tbspc_days_to_full AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'dtf_warn'          THEN cfg_value END) AS dtf_warn,
-               MAX(CASE WHEN cfg_name = 'dtf_crit'          THEN cfg_value END) AS dtf_crit,
-               MAX(CASE WHEN cfg_name = 'nearfull_warn_pct' THEN cfg_value END) AS nf_warn,
-               MAX(CASE WHEN cfg_name = 'nearfull_crit_pct' THEN cfg_value END) AS nf_crit
-        FROM   cap_config
-     )
 SELECT f.dbid,
        f.con_dbid,
        NVL(c.db_pdb, TO_CHAR(f.con_dbid))  AS db_pdb,
@@ -348,8 +327,8 @@ SELECT f.dbid,
        CASE WHEN f.days_to_full <= cfg.dtf_crit THEN 'CRIT'
             WHEN f.days_to_full <= cfg.dtf_warn THEN 'WARN'
             ELSE 'ok'  END                 AS sev_dtf,
-       CASE WHEN f.pct_used >= cfg.nf_crit THEN 'CRIT'
-            WHEN f.pct_used >= cfg.nf_warn THEN 'WARN'
+       CASE WHEN f.pct_used >= cfg.nearfull_crit_pct THEN 'CRIT'
+            WHEN f.pct_used >= cfg.nearfull_warn_pct THEN 'WARN'
             ELSE 'ok'  END                 AS sev_nearfull,
        f.quality,
        f.r2,
@@ -359,7 +338,7 @@ SELECT f.dbid,
        ROW_NUMBER() OVER (ORDER BY f.pct_used DESC NULLS LAST,
                                    f.con_dbid, f.tablespace_name)  AS rank_nearfull
 FROM   capf_tbspc_forecast f
-CROSS  JOIN cfg
+CROSS  JOIN cap_cfg cfg
 LEFT   JOIN capr_container c
   ON   c.dbid = f.dbid AND c.con_dbid = f.con_dbid;
 
@@ -492,13 +471,6 @@ WHERE  s.shift_flag IS NOT NULL;
 -- an 'ok' severity: they are a trend, not a countdown.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_series AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'dtf_warn'          THEN cfg_value END) AS dtf_warn,
-               MAX(CASE WHEN cfg_name = 'dtf_crit'          THEN cfg_value END) AS dtf_crit,
-               MAX(CASE WHEN cfg_name = 'nearfull_warn_pct' THEN cfg_value END) AS nf_warn,
-               MAX(CASE WHEN cfg_name = 'nearfull_crit_pct' THEN cfg_value END) AS nf_crit
-        FROM   cap_config
-     )
 SELECT s.dbid,
        s.con_dbid,
        NVL(c.db_pdb, TO_CHAR(s.con_dbid))  AS db_pdb,
@@ -519,8 +491,8 @@ SELECT s.dbid,
        s.days_to_limit_hi                  AS limit_best,
        CASE WHEN s.quality = 'OK' AND s.days_to_limit <= cfg.dtf_crit THEN 'CRIT'
             WHEN s.quality = 'OK' AND s.days_to_limit <= cfg.dtf_warn THEN 'WARN'
-            WHEN s.pct_of_limit >= cfg.nf_crit                        THEN 'CRIT'
-            WHEN s.pct_of_limit >= cfg.nf_warn                        THEN 'WARN'
+            WHEN s.pct_of_limit >= cfg.nearfull_crit_pct              THEN 'CRIT'
+            WHEN s.pct_of_limit >= cfg.nearfull_warn_pct              THEN 'WARN'
             ELSE 'ok'
        END                                 AS sev,
        s.quality,
@@ -529,7 +501,7 @@ SELECT s.dbid,
                                    s.pct_of_limit DESC NULLS LAST,
                                    s.con_dbid, s.series) AS rank_series
 FROM   capf_series_forecast s
-CROSS  JOIN cfg
+CROSS  JOIN cap_cfg cfg
 LEFT   JOIN capr_container c
   ON   c.dbid = s.dbid AND c.con_dbid = s.con_dbid;
 
@@ -683,10 +655,6 @@ LEFT   JOIN capr_container c
 -- limit_value is the saturation threshold (cpu_sat_pct), not 100.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_fit AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'cpu_sat_pct' THEN cfg_value END) AS cpu_sat
-        FROM   cap_config
-     )
 SELECT f.dbid,
        f.con_dbid,
        NVL(c.db_pdb, TO_CHAR(f.con_dbid))  AS db,
@@ -730,7 +698,7 @@ FROM  (
         SELECT t.dbid, t.con_dbid, 'CPU', t.metric,
                CASE t.metric WHEN 'DB_CPU_SEC' THEN 'sec' ELSE 'pct' END, t.slope_method,
                t.cur_val,
-               CASE WHEN t.metric <> 'DB_CPU_SEC' THEN cfg.cpu_sat END,
+               CASE WHEN t.metric <> 'DB_CPU_SEC' THEN cfg.cpu_sat_pct END,
                CASE WHEN t.metric <> 'DB_CPU_SEC' THEN t.cur_val END,
                t.slope_per_day, t.r2, t.quality,
                t.days_to_sat, t.days_to_sat_lo, t.days_to_sat_hi,
@@ -738,7 +706,7 @@ FROM  (
                CASE al.sev_rank WHEN 1 THEN 'CRIT' WHEN 2 THEN 'WARN' ELSE 'OK' END,
                NULL, t.last_day
         FROM   capf_cpu_trend t
-        CROSS  JOIN cfg
+        CROSS  JOIN cap_cfg cfg
         LEFT   JOIN (SELECT dbid, con_dbid, series_key, MIN(sev_rank) AS sev_rank
                      FROM   capr_alerts
                      WHERE  kind IN ('CPU_SAT', 'DBCPU_SAT')

@@ -298,12 +298,7 @@ WHERE  e.actual IS NULL
 -- EXSM_HOLT, so the section-6c verdict is never arbitrary.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capf_backtest AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'train_days'            THEN cfg_value END) AS train_days,
-               MAX(CASE WHEN cfg_name = 'backtest_holdout_days' THEN cfg_value END) AS holdout_days
-        FROM   cap_config
-     ),
-     act AS (
+WITH act AS (
         SELECT dbid, con_dbid, 'TBSPC' AS series_kind, tablespace_name AS series_key,
                day_dt, used_bytes AS val
         FROM   capd_tbspc_daily
@@ -323,15 +318,15 @@ WITH cfg AS (
      ),
      fit AS (
         SELECT b.dbid, b.con_dbid, b.series_kind, b.series_key,
-               MAX(b.last_day) - cfg.holdout_days   AS cutoff_day,
-               cfg.holdout_days                     AS holdout_days,
-               REGR_SLOPE(b.val, b.day_n)           AS slope,
-               REGR_INTERCEPT(b.val, b.day_n)       AS icept,
-               REGR_COUNT(b.val, b.day_n)           AS n_train
-        FROM   b CROSS JOIN cfg
-        WHERE  b.day_dt <= b.last_day - cfg.holdout_days
-          AND  b.day_dt >  b.last_day - cfg.holdout_days - cfg.train_days
-        GROUP  BY b.dbid, b.con_dbid, b.series_kind, b.series_key, cfg.holdout_days
+               MAX(b.last_day) - cfg.backtest_holdout_days AS cutoff_day,
+               cfg.backtest_holdout_days                   AS holdout_days,
+               REGR_SLOPE(b.val, b.day_n)                  AS slope,
+               REGR_INTERCEPT(b.val, b.day_n)              AS icept,
+               REGR_COUNT(b.val, b.day_n)                  AS n_train
+        FROM   b CROSS JOIN cap_cfg cfg
+        WHERE  b.day_dt <= b.last_day - cfg.backtest_holdout_days
+          AND  b.day_dt >  b.last_day - cfg.backtest_holdout_days - cfg.train_days
+        GROUP  BY b.dbid, b.con_dbid, b.series_kind, b.series_key, cfg.backtest_holdout_days
      )
 -- ---- REGR: score the truncated linear fit over the holdout actuals ----
 SELECT h.dbid, h.con_dbid, h.series_kind, h.series_key,
@@ -361,7 +356,7 @@ UNION ALL
 SELECT c.dbid, c.con_dbid, c.series_kind, c.series_key,
        'ESM'                                         AS engine,
        c.cutoff_day,
-       (SELECT holdout_days FROM cfg)                AS holdout_days,
+       (SELECT backtest_holdout_days FROM cap_cfg)   AS holdout_days,
        CAST(NULL AS NUMBER)                          AS n_train,
        c.n_days,
        c.mape_pct,

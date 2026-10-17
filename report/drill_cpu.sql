@@ -77,15 +77,15 @@ COLUMN k_dow   NEW_VALUE k_dow   NOPRINT
 COLUMN k_mmad  NEW_VALUE k_mmad  NOPRINT
 COLUMN k_hist  NEW_VALUE k_hist  NOPRINT
 COLUMN k_sat   NEW_VALUE k_sat   NOPRINT
-SELECT TO_CHAR(MAX(CASE WHEN cfg_name = 'train_days'       THEN cfg_value END), 'FM9999990')   AS k_train,
-       TO_CHAR(MAX(CASE WHEN cfg_name = 'min_train_days'   THEN cfg_value END), 'FM9999990')   AS k_min,
+SELECT TO_CHAR(c.train_days,                 'FM9999990')         AS k_train,
+       TO_CHAR(c.min_train_days,             'FM9999990')         AS k_min,
        -- RTRIM '.': FM strips the trailing zero of a whole number and leaves "3."
-       RTRIM(TO_CHAR(MAX(CASE WHEN cfg_name = 'mad_k'      THEN cfg_value END), 'FM9999990.9'), '.') AS k_madk,
-       TO_CHAR(MAX(CASE WHEN cfg_name = 'dow_weeks'        THEN cfg_value END), 'FM9999990')   AS k_dow,
-       RTRIM(TO_CHAR(MAX(CASE WHEN cfg_name = 'cpu_min_mad_pct' THEN cfg_value END), 'FM9999990.9'), '.') AS k_mmad,
-       TO_CHAR(MAX(CASE WHEN cfg_name = 'cpu_min_dow_hist' THEN cfg_value END), 'FM9999990')   AS k_hist,
-       TO_CHAR(MAX(CASE WHEN cfg_name = 'cpu_sat_pct'      THEN cfg_value END), 'FM9999990')   AS k_sat
-FROM   cap_config;
+       RTRIM(TO_CHAR(c.mad_k,                'FM9999990.9'), '.') AS k_madk,
+       TO_CHAR(c.dow_weeks,                  'FM9999990')         AS k_dow,
+       RTRIM(TO_CHAR(c.cpu_min_mad_pct,      'FM9999990.9'), '.') AS k_mmad,
+       TO_CHAR(c.cpu_min_dow_hist,           'FM9999990')         AS k_hist,
+       TO_CHAR(c.cpu_sat_pct,                'FM9999990')         AS k_sat
+FROM   cap_cfg c;
 SET TERMOUT ON
 
 UNDEFINE 1
@@ -189,13 +189,9 @@ COLUMN thr     FORMAT 99990.00      HEADING 'THR'    NULL 'n/a'
 COLUMN z       FORMAT 99990.0       HEADING 'Z'      NULL 'n/a'
 COLUMN flag    FORMAT A4            HEADING 'FLAG'   NULL 'n/a'
 
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'train_days' THEN cfg_value END) AS train_days
-        FROM   cap_config
-     ),
-     -- Metric -> source column, mirroring the `src` CTE of CAPF_CPU_TREND.
-     -- Only the branch owning the requested metric contributes rows.
-     src AS (
+-- Metric -> source column, mirroring the `src` CTE of CAPF_CPU_TREND.
+-- Only the branch owning the requested metric contributes rows.
+WITH src AS (
         SELECT dbid, con_dbid, day_dt, n_intervals,
                CASE '&drill_metric' WHEN 'BUSY_PCT'  THEN busy_pct
                                     WHEN 'BUSY_P95'  THEN busy_p95
@@ -254,7 +250,7 @@ SELECT TO_CHAR(s.day_dt, 'YYYY-MM-DD')                          AS day_dt,
        CAST(a.anomaly_flag AS VARCHAR2(5))                      AS flag
 FROM   f
 JOIN   s   ON s.dbid = f.dbid AND s.con_dbid = f.con_dbid
-CROSS  JOIN cfg
+CROSS  JOIN cap_cfg cfg
 LEFT   JOIN capa_cpu_anom a
   ON   a.dbid = s.dbid AND a.con_dbid = s.con_dbid AND a.day_dt = s.day_dt
  AND   '&drill_metric' = 'BUSY_PCT'
@@ -276,11 +272,7 @@ COLUMN sxx       FORMAT 999999999990   HEADING 'SXX'
 COLUMN ci_calc   FORMAT 99990.00000    HEADING 'CI_CALC'
 COLUMN ci_view   FORMAT 99990.00000    HEADING 'CI_VIEW'
 
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'train_days' THEN cfg_value END) AS train_days
-        FROM   cap_config
-     ),
-     src AS (
+WITH src AS (
         SELECT dbid, con_dbid, day_dt,
                CASE '&drill_metric' WHEN 'BUSY_PCT'  THEN busy_pct
                                     WHEN 'BUSY_P95'  THEN busy_p95
@@ -310,7 +302,7 @@ WITH cfg AS (
                f.slope_ci_per_day
         FROM   f
         JOIN   src s ON s.dbid = f.dbid AND s.con_dbid = f.con_dbid
-        CROSS  JOIN cfg
+        CROSS  JOIN cap_cfg cfg
         WHERE  s.val IS NOT NULL
           AND  s.day_dt > f.last_day - cfg.train_days
      )
@@ -336,13 +328,7 @@ PROMPT    cpu_min_dow_hist=&k_hist (min prior same-weekdays). Values in percent 
 
 COLUMN arith FORMAT A190 HEADING 'FLAGGED DAY'
 
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'train_days'      THEN cfg_value END) AS train_days,
-               MAX(CASE WHEN cfg_name = 'mad_k'           THEN cfg_value END) AS mad_k,
-               MAX(CASE WHEN cfg_name = 'cpu_min_mad_pct' THEN cfg_value END) AS min_mad
-        FROM   cap_config
-     ),
-     f AS (
+WITH f AS (
         SELECT dbid, con_dbid, last_day
         FROM   capf_cpu_trend
         WHERE  metric = '&drill_metric'
@@ -351,12 +337,12 @@ WITH cfg AS (
      hits AS (
         SELECT a.con_dbid, a.day_dt, a.anomaly_flag, a.n_hist, a.robust_z,
                a.busy_pct, a.median_pct, a.dev_pct, a.mad_sigma, a.threshold_pct,
-               cfg.mad_k, cfg.min_mad,
-               GREATEST(a.mad_sigma, cfg.min_mad) AS eff_sigma
+               cfg.mad_k, cfg.cpu_min_mad_pct AS min_mad,
+               GREATEST(a.mad_sigma, cfg.cpu_min_mad_pct) AS eff_sigma
         FROM   f
         JOIN   capa_cpu_anom a
           ON   a.dbid = f.dbid AND a.con_dbid = f.con_dbid
-        CROSS  JOIN cfg
+        CROSS  JOIN cap_cfg cfg
         WHERE  a.day_dt > f.last_day - cfg.train_days
           AND  a.anomaly_flag IS NOT NULL
           AND  '&drill_metric' = 'BUSY_PCT'

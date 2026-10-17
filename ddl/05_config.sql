@@ -3,14 +3,19 @@
 -- =====================================================================
 -- One of only three persisted tables in the suite (the others are
 -- CAP_TBSPC_OVERRIDE, created at the bottom of this file, and CAP_ML_MODEL).
--- Every analytic view reads its knobs from here via a one-row `cfg` CTE, so
--- tuning the toolkit never requires editing SQL -- just UPDATE a value.
+-- Every analytic view reads its knobs through the one-row view CAP_CFG
+-- (below), so tuning the toolkit never requires editing SQL -- just UPDATE a
+-- value.
 --
 -- All values are numeric (NUMBER). Byte thresholds are in bytes, day windows
 -- in days, percentages in whole percent. The MERGE below is re-runnable: it
--- inserts any missing key and leaves existing values untouched, so a
--- re-install never clobbers an operator's tuning. To reset a key to its
--- shipped default, DELETE it and re-run this script (or UPDATE it directly).
+-- inserts any missing key, refreshes cfg_default and cfg_desc, and never
+-- touches cfg_value, so a re-install never clobbers an operator's tuning.
+-- To reset a key to its shipped default:
+--   UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = '...'
+-- Do not DELETE a key: every view that reads it then returns no rows or NULLs.
+-- SELECT * FROM cap_cfg_check WHERE status <> 'OK' lists missing knobs and
+-- values that break a range rule.
 --
 SET DEFINE OFF
 
@@ -22,23 +27,35 @@ BEGIN
     EXECUTE IMMEDIATE 'CREATE TABLE cap_config (
         cfg_name   VARCHAR2(40)  CONSTRAINT cap_config_pk PRIMARY KEY,
         cfg_value  NUMBER        NOT NULL,
-        cfg_desc   VARCHAR2(200)
+        cfg_desc   VARCHAR2(200),
+        cfg_default NUMBER
     )';
 EXCEPTION
     WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF;
 END;
 /
 
-COMMENT ON TABLE  cap_config            IS 'AWR capacity toolkit tuning knobs (name/value). Read by CAPF_*/CAPA_* views via a one-row cfg CTE.';
-COMMENT ON COLUMN cap_config.cfg_name   IS 'Knob name (primary key).';
-COMMENT ON COLUMN cap_config.cfg_value  IS 'Numeric value. Units per cfg_desc (bytes / days / whole percent / ratio).';
-COMMENT ON COLUMN cap_config.cfg_desc   IS 'Human description incl. units.';
+-- Installs that predate cfg_default get the column here. ORA-01430 = the
+-- column already exists (fresh install, or a re-install).
+BEGIN
+    EXECUTE IMMEDIATE 'ALTER TABLE cap_config ADD (cfg_default NUMBER)';
+EXCEPTION
+    WHEN OTHERS THEN IF SQLCODE != -1430 THEN RAISE; END IF;
+END;
+/
 
--- Idempotent seed. INSERT-only: WHEN MATCHED does nothing, preserving any
--- operator override across re-installs.
+COMMENT ON TABLE  cap_config             IS 'AWR capacity toolkit tuning knobs (name/value). Views read them through the one-row view CAP_CFG.';
+COMMENT ON COLUMN cap_config.cfg_name    IS 'Knob name (primary key).';
+COMMENT ON COLUMN cap_config.cfg_value   IS 'Numeric value. Units per cfg_desc (bytes / days / whole percent / ratio).';
+COMMENT ON COLUMN cap_config.cfg_desc    IS 'Human description incl. units.';
+COMMENT ON COLUMN cap_config.cfg_default IS 'Shipped default, refreshed on every install. Reset a knob with UPDATE cap_config SET cfg_value = cfg_default.';
+
+-- Idempotent seed. A missing key is inserted with cfg_value = cfg_default =
+-- the shipped value. An existing key gets only cfg_default and cfg_desc
+-- refreshed, so an operator's cfg_value survives every re-install.
 MERGE INTO cap_config c
 USING (
-    SELECT 'train_days'          AS cfg_name, 90        AS cfg_value, 'Length of the primary linear-fit training window (days).'                              AS cfg_desc FROM dual
+    SELECT 'train_days'          AS cfg_name, 90        AS cfg_default, 'Length of the primary linear-fit training window (days).'                              AS cfg_desc FROM dual
     UNION ALL SELECT 'recent_days',          28,        'Length of the secondary "recent" fit window for acceleration detection (days).'                       FROM dual
     UNION ALL SELECT 'min_train_days',       14,        'Minimum REGR_COUNT before a forecast is trusted; below this quality=INSUFFICIENT_HISTORY.'            FROM dual
     UNION ALL SELECT 'r2_gate',              0.60,      'REGR_R2 below this marks a forecast LOW_CONFIDENCE.'                                                   FROM dual
@@ -74,11 +91,118 @@ USING (
     UNION ALL SELECT 'series_sat_pct',         90,        'M11: percent of a fixed-ceiling series'' limit (processes/sessions, DB size) treated as saturated for days_to_limit.' FROM dual
 ) s
 ON (c.cfg_name = s.cfg_name)
+WHEN MATCHED THEN
+    UPDATE SET c.cfg_default = s.cfg_default,
+               c.cfg_desc    = s.cfg_desc
 WHEN NOT MATCHED THEN
-    INSERT (cfg_name, cfg_value, cfg_desc)
-    VALUES (s.cfg_name, s.cfg_value, s.cfg_desc);
+    INSERT (cfg_name, cfg_value, cfg_default, cfg_desc)
+    VALUES (s.cfg_name, s.cfg_default, s.cfg_default, s.cfg_desc);
 
 COMMIT;
+
+-- =====================================================================
+-- CAP_CFG -- the one config access path: one row, one column per knob.
+-- =====================================================================
+-- Every analytic view CROSS JOINs this view (alias cfg) instead of pivoting
+-- cap_config itself. A deleted key reads NULL here, and a NULL knob makes
+-- predicates such as day_dt > last_day - cfg.train_days silently false, so
+-- CAP_CFG_CHECK below reports it as MISSING. No defaults are inlined: the
+-- shipped values live only in the MERGE above. A new knob needs a MERGE row,
+-- a column here and an entry in CAP_CFG_CHECK's UNPIVOT list.
+CREATE OR REPLACE VIEW cap_cfg AS
+SELECT MAX(CASE WHEN cfg_name = 'train_days'             THEN cfg_value END) AS train_days,
+       MAX(CASE WHEN cfg_name = 'recent_days'            THEN cfg_value END) AS recent_days,
+       MAX(CASE WHEN cfg_name = 'min_train_days'         THEN cfg_value END) AS min_train_days,
+       MAX(CASE WHEN cfg_name = 'r2_gate'                THEN cfg_value END) AS r2_gate,
+       MAX(CASE WHEN cfg_name = 'mad_k'                  THEN cfg_value END) AS mad_k,
+       MAX(CASE WHEN cfg_name = 'mad_window_days'        THEN cfg_value END) AS mad_window_days,
+       MAX(CASE WHEN cfg_name = 'anomaly_report_days'    THEN cfg_value END) AS anomaly_report_days,
+       MAX(CASE WHEN cfg_name = 'cpu_sat_pct'            THEN cfg_value END) AS cpu_sat_pct,
+       MAX(CASE WHEN cfg_name = 'abs_floor_bytes'        THEN cfg_value END) AS abs_floor_bytes,
+       MAX(CASE WHEN cfg_name = 'dow_weeks'              THEN cfg_value END) AS dow_weeks,
+       MAX(CASE WHEN cfg_name = 'dtf_warn'               THEN cfg_value END) AS dtf_warn,
+       MAX(CASE WHEN cfg_name = 'dtf_crit'               THEN cfg_value END) AS dtf_crit,
+       MAX(CASE WHEN cfg_name = 'tbspc_min_hist'         THEN cfg_value END) AS tbspc_min_hist,
+       MAX(CASE WHEN cfg_name = 'cpu_min_mad_pct'        THEN cfg_value END) AS cpu_min_mad_pct,
+       MAX(CASE WHEN cfg_name = 'cpu_min_dow_hist'       THEN cfg_value END) AS cpu_min_dow_hist,
+       MAX(CASE WHEN cfg_name = 'esm_prediction_step'    THEN cfg_value END) AS esm_prediction_step,
+       MAX(CASE WHEN cfg_name = 'esm_tbspc_model'        THEN cfg_value END) AS esm_tbspc_model,
+       MAX(CASE WHEN cfg_name = 'esm_select_by_backtest' THEN cfg_value END) AS esm_select_by_backtest,
+       MAX(CASE WHEN cfg_name = 'nearfull_warn_pct'      THEN cfg_value END) AS nearfull_warn_pct,
+       MAX(CASE WHEN cfg_name = 'nearfull_crit_pct'      THEN cfg_value END) AS nearfull_crit_pct,
+       MAX(CASE WHEN cfg_name = 'peak_hour_from'         THEN cfg_value END) AS peak_hour_from,
+       MAX(CASE WHEN cfg_name = 'peak_hour_to'           THEN cfg_value END) AS peak_hour_to,
+       MAX(CASE WHEN cfg_name = 'cpu_sat_on_p95'         THEN cfg_value END) AS cpu_sat_on_p95,
+       MAX(CASE WHEN cfg_name = 'backtest_holdout_days'  THEN cfg_value END) AS backtest_holdout_days,
+       MAX(CASE WHEN cfg_name = 'report_min_gb'          THEN cfg_value END) AS report_min_gb,
+       MAX(CASE WHEN cfg_name = 'accel_slope_floor_bpd'  THEN cfg_value END) AS accel_slope_floor_bpd,
+       MAX(CASE WHEN cfg_name = 'slope_method'           THEN cfg_value END) AS slope_method,
+       MAX(CASE WHEN cfg_name = 'reset_on_shrink'        THEN cfg_value END) AS reset_on_shrink,
+       MAX(CASE WHEN cfg_name = 'shrink_mad_k'           THEN cfg_value END) AS shrink_mad_k,
+       MAX(CASE WHEN cfg_name = 'cpu_gap_hours'          THEN cfg_value END) AS cpu_gap_hours,
+       MAX(CASE WHEN cfg_name = 'shift_days'             THEN cfg_value END) AS shift_days,
+       MAX(CASE WHEN cfg_name = 'shift_baseline_days'    THEN cfg_value END) AS shift_baseline_days,
+       MAX(CASE WHEN cfg_name = 'shift_min_pct'          THEN cfg_value END) AS shift_min_pct,
+       MAX(CASE WHEN cfg_name = 'series_sat_pct'         THEN cfg_value END) AS series_sat_pct
+FROM   cap_config;
+
+COMMENT ON TABLE cap_cfg IS 'One row, one NUMBER column per CAP_CONFIG knob (column name = knob name). NULL = the knob row is missing.';
+
+-- =====================================================================
+-- CAP_CFG_CHECK -- one row per knob: value, OK / MISSING / BAD, reason.
+-- =====================================================================
+-- A cross-knob rule is reported on the knob named first in it.
+CREATE OR REPLACE VIEW cap_cfg_check AS
+WITH u AS (
+        SELECT CAST(LOWER(knob) AS VARCHAR2(40)) AS knob, value
+        FROM   cap_cfg
+        UNPIVOT INCLUDE NULLS (value FOR knob IN (
+               train_days, recent_days, min_train_days, r2_gate, mad_k,
+               mad_window_days, anomaly_report_days, cpu_sat_pct, abs_floor_bytes,
+               dow_weeks, dtf_warn, dtf_crit, tbspc_min_hist, cpu_min_mad_pct,
+               cpu_min_dow_hist, esm_prediction_step, esm_tbspc_model,
+               esm_select_by_backtest, nearfull_warn_pct, nearfull_crit_pct,
+               peak_hour_from, peak_hour_to, cpu_sat_on_p95, backtest_holdout_days,
+               report_min_gb, accel_slope_floor_bpd, slope_method, reset_on_shrink,
+               shrink_mad_k, cpu_gap_hours, shift_days, shift_baseline_days,
+               shift_min_pct, series_sat_pct))
+     ),
+     r AS (
+        SELECT u.knob, u.value,
+               CASE
+                   WHEN u.value IS NULL
+                        THEN 'no CAP_CONFIG row: views that read it return no rows or NULLs. Re-run ddl/05_config.sql to re-seed it.'
+                   WHEN u.knob = 'recent_days'         AND u.value > c.train_days
+                        THEN 'must be <= train_days (' || c.train_days || ')'
+                   WHEN u.knob = 'min_train_days'      AND u.value < 14
+                        THEN 'must be >= 14: the interval t approximation needs df >= 12'
+                   WHEN u.knob = 'dtf_crit'            AND u.value > c.dtf_warn
+                        THEN 'must be <= dtf_warn (' || c.dtf_warn || ')'
+                   WHEN u.knob = 'nearfull_warn_pct'   AND u.value > c.nearfull_crit_pct
+                        THEN 'must be <= nearfull_crit_pct (' || c.nearfull_crit_pct || ')'
+                   WHEN u.knob = 'mad_window_days'     AND u.value < c.tbspc_min_hist
+                        THEN 'must be >= tbspc_min_hist (' || c.tbspc_min_hist || ')'
+                   WHEN u.knob = 'shift_days'          AND u.value > c.shift_baseline_days
+                        THEN 'must be <= shift_baseline_days (' || c.shift_baseline_days || ')'
+                   WHEN u.knob = 'esm_prediction_step' AND u.value NOT BETWEEN 1 AND 30
+                        THEN 'must be between 1 and 30: Oracle 19c caps the ESM horizon at 30'
+                   WHEN u.knob = 'slope_method'        AND u.value NOT IN (0, 1)
+                        THEN 'must be 0 (OLS) or 1 (THEILSEN)'
+                   WHEN u.knob = 'esm_tbspc_model'     AND u.value NOT IN (0, 1, 2)
+                        THEN 'must be 0 (HOLT), 1 (ADDWINTERS) or 2 (AUTO)'
+               END AS reason
+        FROM   u CROSS JOIN cap_cfg c
+     )
+SELECT knob,
+       value,
+       CASE WHEN value IS NULL      THEN 'MISSING'
+            WHEN reason IS NOT NULL THEN 'BAD'
+            ELSE 'OK'
+       END AS status,
+       reason
+FROM   r;
+
+COMMENT ON TABLE cap_cfg_check IS 'One row per knob: value, status OK / MISSING (no CAP_CONFIG row) / BAD (breaks a range rule), reason.';
 
 -- =====================================================================
 -- CAP_TBSPC_OVERRIDE (M9.5) -- per-tablespace limit overrides / exclusions.

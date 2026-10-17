@@ -38,32 +38,24 @@ SET DEFINE OFF
 -- CAPA_TBSPC_ANOM -- tablespace daily-growth anomalies.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capa_tbspc_anom AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'mad_k'           THEN cfg_value END) AS mad_k,
-               MAX(CASE WHEN cfg_name = 'mad_window_days' THEN cfg_value END) AS mad_window_days,
-               MAX(CASE WHEN cfg_name = 'abs_floor_bytes' THEN cfg_value END) AS abs_floor_bytes,
-               MAX(CASE WHEN cfg_name = 'tbspc_min_hist'  THEN cfg_value END) AS min_hist,
-               MAX(CASE WHEN cfg_name = 'train_days'      THEN cfg_value END) AS train_days
-        FROM   cap_config
-     ),
-     -- val is the per-day growth RATE (gap-normalized), so a multi-day AWR gap
-     -- is not mistaken for a one-day spike. raw_delta + day_gap are carried
-     -- through for the report's audit trail.
-     -- avg_rate_bpd is the long-term MEAN rate over the trailing train_days
-     -- (current day excluded, like the median), as SUM(delta)/SUM(gap) so an
-     -- AWR gap weighs by the days it spans. avg_days is that denominator.
-     base AS (
+-- val is the per-day growth RATE (gap-normalized), so a multi-day AWR gap
+-- is not mistaken for a one-day spike. raw_delta + day_gap are carried
+-- through for the report's audit trail.
+-- avg_rate_bpd is the long-term MEAN rate over the trailing train_days
+-- (current day excluded, like the median), as SUM(delta)/SUM(gap) so an
+-- AWR gap weighs by the days it spans. avg_days is that denominator.
+WITH base AS (
         SELECT dbid, con_dbid, tablespace_name, day_dt,
                used_rate_bpd    AS val,
                used_delta_bytes AS raw_delta,
                day_gap,
                SUM(used_delta_bytes) OVER (PARTITION BY dbid, con_dbid, tablespace_name ORDER BY day_dt
-                                           RANGE BETWEEN (SELECT train_days FROM cfg) PRECEDING AND 1 PRECEDING)
+                                           RANGE BETWEEN (SELECT train_days FROM cap_cfg) PRECEDING AND 1 PRECEDING)
                  / NULLIF(SUM(day_gap) OVER (PARTITION BY dbid, con_dbid, tablespace_name ORDER BY day_dt
-                                             RANGE BETWEEN (SELECT train_days FROM cfg) PRECEDING AND 1 PRECEDING), 0)
+                                             RANGE BETWEEN (SELECT train_days FROM cap_cfg) PRECEDING AND 1 PRECEDING), 0)
                                 AS avg_rate_bpd,
                SUM(day_gap) OVER (PARTITION BY dbid, con_dbid, tablespace_name ORDER BY day_dt
-                                  RANGE BETWEEN (SELECT train_days FROM cfg) PRECEDING AND 1 PRECEDING)
+                                  RANGE BETWEEN (SELECT train_days FROM cap_cfg) PRECEDING AND 1 PRECEDING)
                                 AS avg_days
         FROM   capd_tbspc_delta
         WHERE  used_rate_bpd IS NOT NULL
@@ -76,7 +68,7 @@ WITH cfg AS (
         JOIN   base h
           ON   h.dbid = c.dbid AND h.con_dbid = c.con_dbid
          AND   h.tablespace_name = c.tablespace_name
-         AND   h.day_dt BETWEEN c.day_dt - (SELECT mad_window_days FROM cfg)
+         AND   h.day_dt BETWEEN c.day_dt - (SELECT mad_window_days FROM cap_cfg)
                             AND c.day_dt - 1
         GROUP  BY c.dbid, c.con_dbid, c.tablespace_name, c.day_dt,
                   c.val, c.raw_delta, c.day_gap, c.avg_rate_bpd, c.avg_days
@@ -89,7 +81,7 @@ WITH cfg AS (
         JOIN   base h
           ON   h.dbid = m.dbid AND h.con_dbid = m.con_dbid
          AND   h.tablespace_name = m.tablespace_name
-         AND   h.day_dt BETWEEN m.day_dt - (SELECT mad_window_days FROM cfg)
+         AND   h.day_dt BETWEEN m.day_dt - (SELECT mad_window_days FROM cap_cfg)
                             AND m.day_dt - 1
         GROUP  BY m.dbid, m.con_dbid, m.tablespace_name, m.day_dt,
                   m.val, m.raw_delta, m.day_gap, m.avg_rate_bpd, m.avg_days, m.med, m.n_hist
@@ -113,13 +105,13 @@ SELECT a.dbid,
        CASE WHEN a.avg_rate_bpd > 0
             THEN 100 * (a.val - a.avg_rate_bpd) / a.avg_rate_bpd END AS pct_vs_avg,
        CASE
-           WHEN a.n_hist >= cfg.min_hist
+           WHEN a.n_hist >= cfg.tbspc_min_hist
             AND (a.val - a.med) >  GREATEST(cfg.mad_k * a.mad_sigma, cfg.abs_floor_bytes) THEN 'HIGH'
-           WHEN a.n_hist >= cfg.min_hist
+           WHEN a.n_hist >= cfg.tbspc_min_hist
             AND (a.med - a.val) >  GREATEST(cfg.mad_k * a.mad_sigma, cfg.abs_floor_bytes) THEN 'LOW'
            ELSE NULL
        END                                                         AS anomaly_flag
-FROM   madc a CROSS JOIN cfg;
+FROM   madc a CROSS JOIN cap_cfg cfg;
 
 -- --------------------------------------------------------------------
 -- CAPA_CPU_ANOM -- host CPU busy% anomalies vs a same-weekday baseline.
@@ -140,20 +132,13 @@ FROM   madc a CROSS JOIN cfg;
 -- day is unflagged.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capa_cpu_anom AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'mad_k'            THEN cfg_value END) AS mad_k,
-               MAX(CASE WHEN cfg_name = 'dow_weeks'        THEN cfg_value END) AS dow_weeks,
-               MAX(CASE WHEN cfg_name = 'cpu_min_mad_pct'  THEN cfg_value END) AS min_mad,
-               MAX(CASE WHEN cfg_name = 'cpu_min_dow_hist' THEN cfg_value END) AS min_hist
-        FROM   cap_config
-     ),
-     base AS (
+WITH base AS (
         SELECT dbid, con_dbid, day_dt, busy_pct AS val, gap_flag, day_gap
         FROM   capd_cpu_daily
         WHERE  busy_pct IS NOT NULL
      ),
      gen AS (
-        SELECT LEVEL AS lv FROM dual CONNECT BY LEVEL <= (SELECT dow_weeks FROM cfg)
+        SELECT LEVEL AS lv FROM dual CONNECT BY LEVEL <= (SELECT dow_weeks FROM cap_cfg)
      ),
      hist AS (
         SELECT c.dbid, c.con_dbid, c.day_dt, c.val, c.gap_flag, c.day_gap,
@@ -192,18 +177,18 @@ SELECT a.dbid,
        a.gap_flag,
        a.day_gap,
        a.val - a.med                                                AS dev_pct,
-       cfg.mad_k * GREATEST(a.mad_sigma, cfg.min_mad)               AS threshold_pct,
-       (a.val - a.med) / NULLIF(GREATEST(a.mad_sigma, cfg.min_mad), 0) AS robust_z,
+       cfg.mad_k * GREATEST(a.mad_sigma, cfg.cpu_min_mad_pct)       AS threshold_pct,
+       (a.val - a.med) / NULLIF(GREATEST(a.mad_sigma, cfg.cpu_min_mad_pct), 0) AS robust_z,
        CASE WHEN a.med > 0 THEN 100 * (a.val - a.med) / a.med END   AS pct_vs_median,
        CASE
            WHEN a.gap_flag = 'Y' THEN NULL          -- M10.5: never flag a gap day
-           WHEN a.n_hist >= cfg.min_hist
-            AND (a.val - a.med) >  cfg.mad_k * GREATEST(a.mad_sigma, cfg.min_mad) THEN 'HIGH'
-           WHEN a.n_hist >= cfg.min_hist
-            AND (a.med - a.val) >  cfg.mad_k * GREATEST(a.mad_sigma, cfg.min_mad) THEN 'LOW'
+           WHEN a.n_hist >= cfg.cpu_min_dow_hist
+            AND (a.val - a.med) >  cfg.mad_k * GREATEST(a.mad_sigma, cfg.cpu_min_mad_pct) THEN 'HIGH'
+           WHEN a.n_hist >= cfg.cpu_min_dow_hist
+            AND (a.med - a.val) >  cfg.mad_k * GREATEST(a.mad_sigma, cfg.cpu_min_mad_pct) THEN 'LOW'
            ELSE NULL
        END                                                          AS anomaly_flag
-FROM   madc a CROSS JOIN cfg;
+FROM   madc a CROSS JOIN cap_cfg cfg;
 
 -- --------------------------------------------------------------------
 -- CAPA_CPU_SHIFT (M10.3) -- sustained LEVEL SHIFTS in the CPU series.
@@ -252,14 +237,7 @@ FROM   madc a CROSS JOIN cfg;
 -- shifts with them and would only duplicate the alert.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capa_cpu_shift AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'shift_days'          THEN cfg_value END) AS shift_days,
-               MAX(CASE WHEN cfg_name = 'shift_baseline_days' THEN cfg_value END) AS base_days,
-               MAX(CASE WHEN cfg_name = 'shift_min_pct'       THEN cfg_value END) AS min_pct,
-               MAX(CASE WHEN cfg_name = 'cpu_min_mad_pct'     THEN cfg_value END) AS min_mad
-        FROM   cap_config
-     ),
-     src AS (
+WITH src AS (
         SELECT dbid, con_dbid, 'BUSY_PCT' AS metric, day_dt, busy_pct AS val
         FROM   capd_cpu_daily
         WHERE  busy_pct IS NOT NULL AND gap_flag = 'N'
@@ -282,12 +260,12 @@ WITH cfg AS (
      w AS (
         SELECT s.dbid, s.con_dbid, s.metric, s.day_dt, s.val, l.last_day,
                CASE WHEN s.day_dt > l.last_day - cfg.shift_days THEN 'R'
-                    WHEN s.day_dt > l.last_day - cfg.shift_days - cfg.base_days THEN 'B'
+                    WHEN s.day_dt > l.last_day - cfg.shift_days - cfg.shift_baseline_days THEN 'B'
                END AS win
         FROM   src s
         JOIN   lastd l
           ON   l.dbid = s.dbid AND l.con_dbid = s.con_dbid AND l.metric = s.metric
-        CROSS  JOIN cfg
+        CROSS  JOIN cap_cfg cfg
      ),
      -- Pass 1: the two medians + window sizes.
      m1 AS (
@@ -320,13 +298,13 @@ WITH cfg AS (
         SELECT m.dbid, m.con_dbid, m.metric, m.last_day,
                m.recent_med, m.base_med, m.n_recent, m.n_base, m.base_mad_sigma,
                COUNT(CASE WHEN r.val > m.base_med
-                                     + GREATEST(NVL(m.base_mad_sigma, 0), cfg.min_mad)
+                                     + GREATEST(NVL(m.base_mad_sigma, 0), cfg.cpu_min_mad_pct)
                           THEN 1 END) AS n_above,
                COUNT(CASE WHEN r.val < m.base_med
-                                     - GREATEST(NVL(m.base_mad_sigma, 0), cfg.min_mad)
+                                     - GREATEST(NVL(m.base_mad_sigma, 0), cfg.cpu_min_mad_pct)
                           THEN 1 END) AS n_below
         FROM   m2 m
-        CROSS  JOIN cfg
+        CROSS  JOIN cap_cfg cfg
         LEFT   JOIN w r
           ON   r.dbid = m.dbid AND r.con_dbid = m.con_dbid AND r.metric = m.metric
          AND   r.win = 'R'
@@ -338,7 +316,7 @@ SELECT a.dbid,
        a.metric,
        a.last_day,
        cfg.shift_days                                              AS recent_days,
-       cfg.base_days                                               AS base_days,
+       cfg.shift_baseline_days                                     AS base_days,
        a.recent_med,
        a.base_med,
        a.recent_med - a.base_med                                   AS shift_pct,
@@ -347,17 +325,17 @@ SELECT a.dbid,
        a.n_base,
        a.n_above,
        a.n_below,
-       cfg.min_pct                                                 AS threshold_pct,
-       a.base_med + GREATEST(NVL(a.base_mad_sigma, 0), cfg.min_mad) AS day_thresh_hi,
-       a.base_med - GREATEST(NVL(a.base_mad_sigma, 0), cfg.min_mad) AS day_thresh_lo,
+       cfg.shift_min_pct                                           AS threshold_pct,
+       a.base_med + GREATEST(NVL(a.base_mad_sigma, 0), cfg.cpu_min_mad_pct) AS day_thresh_hi,
+       a.base_med - GREATEST(NVL(a.base_mad_sigma, 0), cfg.cpu_min_mad_pct) AS day_thresh_lo,
        'PCT'                                                       AS unit,
        CASE
            WHEN a.n_recent >= cfg.shift_days AND a.n_base >= cfg.shift_days
-            AND (a.recent_med - a.base_med) >  cfg.min_pct
+            AND (a.recent_med - a.base_med) >  cfg.shift_min_pct
             AND a.n_above >= cfg.shift_days                        THEN 'UP'
            WHEN a.n_recent >= cfg.shift_days AND a.n_base >= cfg.shift_days
-            AND (a.base_med - a.recent_med) >  cfg.min_pct
+            AND (a.base_med - a.recent_med) >  cfg.shift_min_pct
             AND a.n_below >= cfg.shift_days                        THEN 'DOWN'
            ELSE NULL
        END                                                         AS shift_flag
-FROM   m3 a CROSS JOIN cfg;
+FROM   m3 a CROSS JOIN cap_cfg cfg;

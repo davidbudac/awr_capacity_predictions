@@ -40,14 +40,7 @@
 SET DEFINE OFF
 
 CREATE OR REPLACE VIEW capf_series_forecast AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'train_days'     THEN cfg_value END) AS train_days,
-               MAX(CASE WHEN cfg_name = 'min_train_days' THEN cfg_value END) AS min_train_days,
-               MAX(CASE WHEN cfg_name = 'r2_gate'        THEN cfg_value END) AS r2_gate,
-               MAX(CASE WHEN cfg_name = 'series_sat_pct' THEN cfg_value END) AS sat_pct
-        FROM   cap_config
-     ),
-     d AS (
+WITH d AS (
         SELECT dbid, con_dbid, series, unit, day_dt,
                day_dt - DATE '2020-01-01' AS day_n,
                value AS val, limit_value
@@ -77,7 +70,7 @@ WITH cfg AS (
                REGR_SYY(dd.val, dd.day_n)       AS syy,
                REGR_SXY(dd.val, dd.day_n)       AS sxy,
                REGR_AVGX(dd.val, dd.day_n)      AS xbar
-        FROM   dd CROSS JOIN cfg
+        FROM   dd CROSS JOIN cap_cfg cfg
         WHERE  dd.day_dt > dd.last_day - cfg.train_days
         GROUP  BY dd.dbid, dd.con_dbid, dd.series
      ),
@@ -145,18 +138,18 @@ SELECT f.dbid,
        -- The saturation target itself, so a reader can check the arithmetic
        -- without re-reading the knob.
        CASE WHEN c.cur_limit > 0
-            THEN c.cur_limit * cfg.sat_pct / 100
+            THEN c.cur_limit * cfg.series_sat_pct / 100
        END                                          AS sat_value,
        CASE WHEN c.cur_limit > 0 AND f.slope > 0
-            THEN GREATEST(0, FLOOR((c.cur_limit * cfg.sat_pct / 100 - c.cur_val) / f.slope))
+            THEN GREATEST(0, FLOOR((c.cur_limit * cfg.series_sat_pct / 100 - c.cur_val) / f.slope))
        END                                          AS days_to_limit,
        CASE WHEN c.cur_limit > 0 AND f.slope > 0 AND f.slope_ci IS NOT NULL
-            THEN GREATEST(0, FLOOR((c.cur_limit * cfg.sat_pct / 100 - c.cur_val)
+            THEN GREATEST(0, FLOOR((c.cur_limit * cfg.series_sat_pct / 100 - c.cur_val)
                                    / (f.slope + f.slope_ci)))
        END                                          AS days_to_limit_lo,
        CASE WHEN c.cur_limit > 0 AND f.slope > 0 AND f.slope_ci IS NOT NULL
                  AND f.slope - f.slope_ci > 0
-            THEN GREATEST(0, FLOOR((c.cur_limit * cfg.sat_pct / 100 - c.cur_val)
+            THEN GREATEST(0, FLOOR((c.cur_limit * cfg.series_sat_pct / 100 - c.cur_val)
                                    / (f.slope - f.slope_ci)))
        END                                          AS days_to_limit_hi,
        CASE WHEN f.n  < cfg.min_train_days     THEN 'INSUFFICIENT_HISTORY'
@@ -166,4 +159,4 @@ SELECT f.dbid,
        END                                          AS quality
 FROM   band f
 JOIN   cur c ON c.dbid = f.dbid AND c.con_dbid = f.con_dbid AND c.series = f.series
-CROSS  JOIN cfg;
+CROSS  JOIN cap_cfg cfg;

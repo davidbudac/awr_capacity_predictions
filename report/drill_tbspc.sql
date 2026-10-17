@@ -74,14 +74,13 @@ COLUMN k_floor NEW_VALUE k_floor NOPRINT
 COLUMN k_hist  NEW_VALUE k_hist  NOPRINT
 -- FM/RTRIM: a raw NUMBER NEW_VALUE keeps SQL*Plus's right-justified width
 -- ("WARN<=        90"), and FM on a whole number leaves a trailing "3." behind.
-SELECT TO_CHAR(MAX(CASE WHEN cfg_name = 'train_days'      THEN cfg_value END), 'FM9999990') AS k_train,
-       TO_CHAR(MAX(CASE WHEN cfg_name = 'min_train_days'  THEN cfg_value END), 'FM9999990') AS k_min,
-       RTRIM(TO_CHAR(MAX(CASE WHEN cfg_name = 'mad_k'     THEN cfg_value END), 'FM9999990.9'), '.') AS k_madk,
-       TO_CHAR(MAX(CASE WHEN cfg_name = 'mad_window_days' THEN cfg_value END), 'FM9999990') AS k_madw,
-       TO_CHAR(MAX(CASE WHEN cfg_name = 'abs_floor_bytes' THEN cfg_value END)
-               / 1048576, 'FM99999990.0')                                                   AS k_floor,
-       TO_CHAR(MAX(CASE WHEN cfg_name = 'tbspc_min_hist'  THEN cfg_value END), 'FM9999990') AS k_hist
-FROM   cap_config;
+SELECT TO_CHAR(c.train_days,                'FM9999990')         AS k_train,
+       TO_CHAR(c.min_train_days,            'FM9999990')         AS k_min,
+       RTRIM(TO_CHAR(c.mad_k,               'FM9999990.9'), '.') AS k_madk,
+       TO_CHAR(c.mad_window_days,           'FM9999990')         AS k_madw,
+       TO_CHAR(c.abs_floor_bytes / 1048576, 'FM99999990.0')      AS k_floor,
+       TO_CHAR(c.tbspc_min_hist,            'FM9999990')         AS k_hist
+FROM   cap_cfg c;
 SET TERMOUT ON
 
 UNDEFINE 1
@@ -179,11 +178,7 @@ COLUMN thr_mib   FORMAT 99999990.00    HEADING 'THR_MIB/D'
 COLUMN z         FORMAT 99990.0        HEADING 'Z'
 COLUMN flag      FORMAT A4             HEADING 'FLAG'
 
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'train_days' THEN cfg_value END) AS train_days
-        FROM   cap_config
-     ),
-     f AS (
+WITH f AS (
         SELECT dbid, con_dbid, tablespace_name, last_day, slope_bpd, icept
         FROM   capf_tbspc_forecast
         WHERE  tablespace_name = '&drill_ts'
@@ -208,7 +203,7 @@ FROM   f
 JOIN   capd_tbspc_delta d
   ON   d.dbid = f.dbid AND d.con_dbid = f.con_dbid
  AND   d.tablespace_name = f.tablespace_name
-CROSS  JOIN cfg
+CROSS  JOIN cap_cfg cfg
 LEFT   JOIN capa_tbspc_anom a
   ON   a.dbid = d.dbid AND a.con_dbid = d.con_dbid
  AND   a.tablespace_name = d.tablespace_name AND a.day_dt = d.day_dt
@@ -230,11 +225,7 @@ COLUMN sxx        FORMAT 999999999990    HEADING 'SXX'
 COLUMN ci_calc    FORMAT 999990.000000   HEADING 'CI_CALC_MIB'
 COLUMN ci_view    FORMAT 999990.000000   HEADING 'CI_VIEW_MIB'
 
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'train_days' THEN cfg_value END) AS train_days
-        FROM   cap_config
-     ),
-     f AS (
+WITH f AS (
         SELECT dbid, con_dbid, tablespace_name, last_day, slope_bpd, icept, slope_ci_bpd
         FROM   capf_tbspc_forecast
         WHERE  tablespace_name = '&drill_ts'
@@ -250,7 +241,7 @@ WITH cfg AS (
         JOIN   capd_tbspc_daily d
           ON   d.dbid = f.dbid AND d.con_dbid = f.con_dbid
          AND   d.tablespace_name = f.tablespace_name
-        CROSS  JOIN cfg
+        CROSS  JOIN cap_cfg cfg
         WHERE  d.day_dt > f.last_day - cfg.train_days
      )
 SELECT COUNT(*)                                                          AS n,
@@ -275,12 +266,7 @@ PROMPT    can never inflate its own threshold. All values in MiB/day.
 
 COLUMN arith FORMAT A190 HEADING 'FLAGGED DAY'
 
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'train_days' THEN cfg_value END) AS train_days,
-               MAX(CASE WHEN cfg_name = 'mad_k'      THEN cfg_value END) AS mad_k
-        FROM   cap_config
-     ),
-     f AS (
+WITH f AS (
         SELECT dbid, con_dbid, tablespace_name, last_day
         FROM   capf_tbspc_forecast
         WHERE  tablespace_name = '&drill_ts'
@@ -299,7 +285,7 @@ WITH cfg AS (
         JOIN   capa_tbspc_anom a
           ON   a.dbid = f.dbid AND a.con_dbid = f.con_dbid
          AND   a.tablespace_name = f.tablespace_name
-        CROSS  JOIN cfg
+        CROSS  JOIN cap_cfg cfg
         WHERE  a.day_dt > f.last_day - cfg.train_days
           AND  a.anomaly_flag IS NOT NULL
      )

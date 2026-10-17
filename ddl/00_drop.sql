@@ -60,7 +60,9 @@ DECLARE
         'CAPV_TBSPC_USAGE',
         'CAPV_RESOURCE_LIMIT',
         'CAPV_SYSSTAT',
-        'CAPV_SNAPSHOT'
+        'CAPV_SNAPSHOT',
+        'CAP_CFG_CHECK',
+        'CAP_CFG'
     );
 BEGIN
     FOR i IN 1 .. v_views.COUNT LOOP

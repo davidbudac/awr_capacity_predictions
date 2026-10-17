@@ -20,6 +20,18 @@ This document explains *why* each layer is shaped the way it is. For usage see
   *not* drop them — so an operator's config overrides, hand-set tablespace
   limits and trained-model registry survive `@install.sql`.
   Full teardown is `@uninstall.sql`.
+- **One config access path.** Every threshold is a `CAP_CONFIG` row, and views
+  read knobs only through the one-row view `CAP_CFG` (one NUMBER column per
+  knob, named after it), joined as `CROSS JOIN cap_cfg cfg`. No view pivots
+  `CAP_CONFIG` itself, and no default is inlined in `CAP_CFG`: the shipped
+  values live only in the MERGE in `ddl/05_config.sql`. A deleted key reads
+  NULL, and a NULL knob makes a predicate such as
+  `day_dt > last_day - cfg.train_days` silently false. So `CAP_CFG_CHECK`
+  reports each knob as `OK`, `MISSING` or `BAD` (a broken range rule such as
+  `recent_days > train_days`). `cfg_default` holds the shipped value: the MERGE
+  inserts a missing key with `cfg_value = cfg_default`, and on a re-install
+  refreshes only `cfg_default` and `cfg_desc`. The reset is
+  `UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = '...'`.
 - **19c floor.** No 21c+ syntax (notably: no standalone `WINDOW` clause).
 
 ## Layer 1 — the seam (`CAPV_*`)

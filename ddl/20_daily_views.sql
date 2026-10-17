@@ -206,13 +206,7 @@ FROM (
 -- average stays honest about the counters that were actually recorded.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capd_cpu_daily AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'peak_hour_from' THEN cfg_value END) AS peak_from,
-               MAX(CASE WHEN cfg_name = 'peak_hour_to'   THEN cfg_value END) AS peak_to,
-               MAX(CASE WHEN cfg_name = 'cpu_gap_hours'  THEN cfg_value END) AS gap_hours
-        FROM   cap_config
-     ),
-     pivoted AS (
+WITH pivoted AS (
         SELECT o.dbid, o.con_dbid, o.instance_number, o.snap_id,
                MAX(CASE WHEN o.stat_name = 'BUSY_TIME'     THEN o.value END) AS busy_time,
                MAX(CASE WHEN o.stat_name = 'IDLE_TIME'     THEN o.value END) AS idle_time,
@@ -251,21 +245,21 @@ WITH cfg AS (
                TRUNC(d.end_interval_time) AS day_dt,
                d.busy_d, d.idle_d, d.num_cpus, d.num_cpu_cores,
                d.ivl_hours,
-               CASE WHEN d.ivl_hours > cfg.gap_hours THEN 1 ELSE 0 END AS is_long,
+               CASE WHEN d.ivl_hours > cfg.cpu_gap_hours THEN 1 ELSE 0 END AS is_long,
                -- M10.5: per-interval busy% is only meaningful for an interval
                -- of normal length; a gap-spanning one is NULLed so it drops out
                -- of PERCENTILE_CONT / MAX (both ignore NULLs) instead of
                -- diluting the day's peak.
-               CASE WHEN NVL(d.ivl_hours, 0) <= cfg.gap_hours
+               CASE WHEN NVL(d.ivl_hours, 0) <= cfg.cpu_gap_hours
                     THEN 100 * d.busy_d / NULLIF(d.busy_d + d.idle_d, 0)
                END AS ivl_busy_pct,
-               -- peak-window membership: end hour in (peak_from, peak_to],
+               -- peak-window membership: end hour in (peak_hour_from, peak_hour_to],
                -- and (M10.5) not a gap-spanning interval
-               CASE WHEN EXTRACT(HOUR FROM CAST(d.end_interval_time AS TIMESTAMP)) >  cfg.peak_from
-                     AND EXTRACT(HOUR FROM CAST(d.end_interval_time AS TIMESTAMP)) <= cfg.peak_to
-                     AND NVL(d.ivl_hours, 0) <= cfg.gap_hours
+               CASE WHEN EXTRACT(HOUR FROM CAST(d.end_interval_time AS TIMESTAMP)) >  cfg.peak_hour_from
+                     AND EXTRACT(HOUR FROM CAST(d.end_interval_time AS TIMESTAMP)) <= cfg.peak_hour_to
+                     AND NVL(d.ivl_hours, 0) <= cfg.cpu_gap_hours
                     THEN 1 ELSE 0 END AS in_peak
-        FROM   deltas d CROSS JOIN cfg
+        FROM   deltas d CROSS JOIN cap_cfg cfg
         WHERE  d.busy_d IS NOT NULL AND d.idle_d IS NOT NULL    -- drop first snap of each partition
           AND  d.busy_d >= 0 AND d.idle_d >= 0                  -- drop counter resets
           AND  d.startup_time = d.prev_startup                  -- drop restart-spanning intervals
@@ -341,13 +335,7 @@ FROM   agg a;
 --                     flag that says "this day carries more than a day".
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capd_dbtime_daily AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'peak_hour_from' THEN cfg_value END) AS peak_from,
-               MAX(CASE WHEN cfg_name = 'peak_hour_to'   THEN cfg_value END) AS peak_to,
-               MAX(CASE WHEN cfg_name = 'cpu_gap_hours'  THEN cfg_value END) AS gap_hours
-        FROM   cap_config
-     ),
-     pivoted AS (
+WITH pivoted AS (
         SELECT m.dbid, m.con_dbid, m.instance_number, m.snap_id,
                MAX(CASE WHEN m.stat_name = 'DB CPU'             THEN m.value END) AS db_cpu,
                MAX(CASE WHEN m.stat_name = 'DB time'            THEN m.value END) AS db_time,
@@ -396,17 +384,17 @@ WITH cfg AS (
                c.total_cores,
                -- M10.5: same interval length, expressed in hours.
                d.elapsed_sec / 3600 AS ivl_hours,
-               CASE WHEN d.elapsed_sec / 3600 > cfg.gap_hours THEN 1 ELSE 0 END AS is_long,
+               CASE WHEN d.elapsed_sec / 3600 > cfg.cpu_gap_hours THEN 1 ELSE 0 END AS is_long,
                CASE WHEN c.total_cores > 0 AND d.elapsed_sec > 0
-                     AND d.elapsed_sec / 3600 <= cfg.gap_hours
+                     AND d.elapsed_sec / 3600 <= cfg.cpu_gap_hours
                     THEN 100 * (d.db_cpu_d / 1e6) / (c.total_cores * d.elapsed_sec)
                END AS ivl_cpu_pct,
-               CASE WHEN EXTRACT(HOUR FROM CAST(d.end_interval_time AS TIMESTAMP)) >  cfg.peak_from
-                     AND EXTRACT(HOUR FROM CAST(d.end_interval_time AS TIMESTAMP)) <= cfg.peak_to
-                     AND d.elapsed_sec / 3600 <= cfg.gap_hours
+               CASE WHEN EXTRACT(HOUR FROM CAST(d.end_interval_time AS TIMESTAMP)) >  cfg.peak_hour_from
+                     AND EXTRACT(HOUR FROM CAST(d.end_interval_time AS TIMESTAMP)) <= cfg.peak_hour_to
+                     AND d.elapsed_sec / 3600 <= cfg.cpu_gap_hours
                     THEN 1 ELSE 0 END AS in_peak
         FROM   deltas d
-        CROSS  JOIN cfg
+        CROSS  JOIN cap_cfg cfg
         LEFT   JOIN cores c ON c.dbid = d.dbid
         WHERE  d.db_cpu_d IS NOT NULL AND d.db_time_d IS NOT NULL
           AND  d.db_cpu_d >= 0 AND d.db_time_d >= 0 AND NVL(d.bg_cpu_d,0) >= 0

@@ -79,15 +79,26 @@
       <div class="section-head" id="config">
         <span class="eyebrow">Tuning</span>
         <h2>Configuration knobs</h2>
-        <p>Every threshold lives in <span class="inline">CAP_CONFIG</span>, read by the views through a
-          one-row <span class="inline">cfg</span> CTE. Tuning never means editing SQL.</p>
+        <p>Every threshold lives in <span class="inline">CAP_CONFIG</span>. The views read it only through
+          the one-row view <span class="inline">CAP_CFG</span>, which has one column per knob, named after the knob.
+          Tuning never means editing SQL.</p>
       </div>
       <div class="term in">
         <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
           <span class="term__title">SQL*Plus</span><span class="term__tag in">example</span></div>
 <pre><span class="c-prompt">SQL&gt;</span> UPDATE cap_config SET cfg_value = 0.70 WHERE cfg_name = 'r2_gate';
-<span class="c-prompt">SQL&gt;</span> SELECT * FROM cap_config ORDER BY cfg_name;   <span class="c-cmt">-- the full annotated list</span></pre>
+<span class="c-prompt">SQL&gt;</span> SELECT * FROM cap_config ORDER BY cfg_name;   <span class="c-cmt">-- the full annotated list</span>
+<span class="c-prompt">SQL&gt;</span> SELECT * FROM cap_cfg_check WHERE status &lt;&gt; 'OK';   <span class="c-cmt">-- missing or out-of-range knobs</span>
+<span class="c-prompt">SQL&gt;</span> UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'r2_gate';   <span class="c-cmt">-- back to the shipped value</span></pre>
       </div>
+      <div class="callout warn"><span class="ico">!</span><p><strong>Reset a knob, never delete it.</strong> A deleted row reads as NULL in <span class="inline">CAP_CFG</span>, and a NULL knob makes the views return no rows or no flags without an error. <span class="inline">cfg_default</span> holds the shipped value and is refreshed on every install, so <code>UPDATE cap_config SET cfg_value = cfg_default</code> is the reset. Re-running <span class="inline">@install.sql</span> never touches <span class="inline">cfg_value</span>; it re-inserts a deleted key with its shipped value.</p></div>
+      <p><span class="inline">CAP_CFG_CHECK</span> returns one row per knob with its value and a <span class="inline">status</span>:
+        <code>OK</code>, <code>MISSING</code> (no <span class="inline">CAP_CONFIG</span> row) or <code>BAD</code> (a broken rule:
+        <code>recent_days</code> &le; <code>train_days</code>, <code>min_train_days</code> &ge; 14,
+        <code>dtf_crit</code> &le; <code>dtf_warn</code>, <code>nearfull_warn_pct</code> &le; <code>nearfull_crit_pct</code>,
+        <code>mad_window_days</code> &ge; <code>tbspc_min_hist</code>, <code>shift_days</code> &le; <code>shift_baseline_days</code>,
+        <code>esm_prediction_step</code> between 1 and 30, <code>slope_method</code> in 0/1, <code>esm_tbspc_model</code> in 0/1/2).
+        A rule between two knobs is reported on the first one. The <span class="inline">reason</span> column says what to fix.</p>
       <div class="tablewrap">
         <table>
           <caption>All shipped knobs and their defaults</caption>
@@ -129,7 +140,8 @@
       </div>
       <p>That's the complete shipped set. <span class="inline">SELECT * FROM cap_config ORDER BY cfg_name</span>
         prints the same knobs with their annotations straight from the database, including any values you've
-        since overridden.</p>
+        since overridden. Where <span class="inline">cfg_value</span> differs from <span class="inline">cfg_default</span>,
+        the knob has been tuned.</p>
 
       <!-- ===================== OBJECT INDEX ===================== -->
       <div class="section-head" id="objects">

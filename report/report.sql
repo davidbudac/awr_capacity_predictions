@@ -99,23 +99,22 @@ FROM   dual;
 -- M7.7: TO_CHAR(...,'FM...') every knob. A NUMBER column's NEW_VALUE keeps
 -- SQL*Plus's right-justified display width, so a raw cfg_value would print as
 -- "WARN<=        90" wherever a PROMPT interpolates it.
-SELECT TO_CHAR((SELECT cfg_value FROM cap_config WHERE cfg_name='dtf_warn'),         'FM9999990') AS dtf_warn,
-       TO_CHAR((SELECT cfg_value FROM cap_config WHERE cfg_name='dtf_crit'),         'FM9999990') AS dtf_crit,
-       TO_CHAR((SELECT cfg_value FROM cap_config WHERE cfg_name='cpu_sat_pct'),      'FM9999990') AS cpu_sat,
-       TO_CHAR((SELECT cfg_value FROM cap_config WHERE cfg_name='nearfull_warn_pct'),'FM9999990') AS nf_warn,
-       TO_CHAR((SELECT cfg_value FROM cap_config WHERE cfg_name='nearfull_crit_pct'),'FM9999990') AS nf_crit,
+SELECT TO_CHAR(c.dtf_warn,                                                    'FM9999990') AS dtf_warn,
+       TO_CHAR(c.dtf_crit,                                                    'FM9999990') AS dtf_crit,
+       TO_CHAR(c.cpu_sat_pct,                                                 'FM9999990') AS cpu_sat,
+       TO_CHAR(c.nearfull_warn_pct,                                           'FM9999990') AS nf_warn,
+       TO_CHAR(c.nearfull_crit_pct,                                           'FM9999990') AS nf_crit,
        TO_CHAR((SELECT COUNT(*)  FROM cap_ml_model WHERE status='OK'),               'FM9999990') AS esm_ok,
        -- report_min_gb may be fractional, so keep the decimals and strip the
        -- trailing point FM leaves behind on a whole number (1. -> 1).
-       RTRIM(TO_CHAR((SELECT cfg_value FROM cap_config WHERE cfg_name='report_min_gb'),
-                     'FM9999990.999'), '.')                                                       AS min_gb,
+       RTRIM(TO_CHAR(c.report_min_gb, 'FM9999990.999'), '.')                                    AS min_gb,
        TO_CHAR((SELECT COUNT(*)  FROM capr_tbspc_forecast),                          'FM9999990') AS ts_total,
        -- M7.4: how many of them sections 2 / 6a will actually print, i.e. the
        -- exact WHERE those sections apply -- so the header states the truth
        -- even when top_n is larger than the number of tablespaces.
        TO_CHAR((SELECT COUNT(*)  FROM capr_tbspc_forecast
                 WHERE is_reportable = 'Y' AND rank_report <= &top_n),               'FM9999990') AS ts_shown
-FROM   dual;
+FROM   cap_cfg c;
 
 -- Section 6 dispatch:
 --   show_esm='N'                    -> skip stub (note only)

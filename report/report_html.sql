@@ -105,20 +105,20 @@ SELECT SYS_CONTEXT('USERENV','DB_NAME')
 FROM   dual;
 
 -- Forecast knobs (train_days / min_train_days / r2_gate) are read here from
--- CAP_CONFIG -- the SAME knobs CAPF_TBSPC_FORECAST uses -- so the whole-database
+-- CAP_CFG -- the SAME knobs CAPF_TBSPC_FORECAST uses -- so the whole-database
 -- hero in section 0 mirrors the per-tablespace training window and quality gates
 -- exactly (never hard-coded, never able to drift from the per-tablespace method).
-SELECT (SELECT cfg_value FROM cap_config WHERE cfg_name='dtf_warn')       AS dtf_warn,
-       (SELECT cfg_value FROM cap_config WHERE cfg_name='dtf_crit')       AS dtf_crit,
-       (SELECT cfg_value FROM cap_config WHERE cfg_name='cpu_sat_pct')    AS cpu_sat,
-       (SELECT cfg_value FROM cap_config WHERE cfg_name='nearfull_warn_pct') AS nf_warn,
-       (SELECT cfg_value FROM cap_config WHERE cfg_name='nearfull_crit_pct') AS nf_crit,
-       (SELECT COUNT(*)  FROM cap_ml_model WHERE status='OK')             AS esm_ok,
-       (SELECT cfg_value FROM cap_config WHERE cfg_name='train_days')     AS train_days,
-       (SELECT cfg_value FROM cap_config WHERE cfg_name='min_train_days') AS min_train_days,
-       (SELECT cfg_value FROM cap_config WHERE cfg_name='r2_gate')        AS r2_gate,
-       (SELECT cfg_value FROM cap_config WHERE cfg_name='report_min_gb')  AS min_gb
-FROM   dual;
+SELECT c.dtf_warn                                         AS dtf_warn,
+       c.dtf_crit                                         AS dtf_crit,
+       c.cpu_sat_pct                                      AS cpu_sat,
+       c.nearfull_warn_pct                                AS nf_warn,
+       c.nearfull_crit_pct                                AS nf_crit,
+       (SELECT COUNT(*) FROM cap_ml_model WHERE status='OK') AS esm_ok,
+       c.train_days                                       AS train_days,
+       c.min_train_days                                   AS min_train_days,
+       c.r2_gate                                          AS r2_gate,
+       c.report_min_gb                                    AS min_gb
+FROM   cap_cfg c;
 
 -- --------------------------------------------------------------------
 -- Bind the substitution-variable knobs into SQL*Plus bind variables while

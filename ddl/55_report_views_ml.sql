@@ -44,12 +44,7 @@ SET DEFINE OFF
 -- a plain WHERE.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_tbspc_forecast AS
-WITH cfg AS (
-        SELECT MAX(CASE WHEN cfg_name = 'report_min_gb'     THEN cfg_value END) AS report_min_gb,
-               MAX(CASE WHEN cfg_name = 'nearfull_warn_pct' THEN cfg_value END) AS nf_warn
-        FROM   cap_config
-     ),
-     f AS (
+WITH f AS (
         -- M7.4 reportability, decided once here so section 2 (this view) and
         -- section 6a (CAPR_ESM_COMPARE, which joins this one) bound the same
         -- set of tablespaces. A row is worth printing when it is GROWING, or
@@ -61,10 +56,10 @@ WITH cfg AS (
                CASE WHEN t.cur_used IS NULL                           THEN 'Y'
                     WHEN NVL(t.slope_bpd, 0) > 0                      THEN 'Y'
                     WHEN t.cur_used >= cfg.report_min_gb * 1073741824 THEN 'Y'
-                    WHEN NVL(t.pct_used, 0) >= cfg.nf_warn            THEN 'Y'
+                    WHEN NVL(t.pct_used, 0) >= cfg.nearfull_warn_pct  THEN 'Y'
                     ELSE 'N'
                END                                                    AS is_reportable
-        FROM   capf_tbspc_forecast t CROSS JOIN cfg
+        FROM   capf_tbspc_forecast t CROSS JOIN cap_cfg cfg
      )
 SELECT f.dbid,
        f.con_dbid,

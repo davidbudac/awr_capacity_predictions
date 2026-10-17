@@ -862,6 +862,74 @@ BEGIN
             fail('CAPR point-feed block raised ' || SQLERRM);
     END;
 
+    DBMS_OUTPUT.PUT_LINE('=== CAP_CFG: the one config access path ===');
+    SELECT COUNT(*) INTO v_n FROM cap_cfg;
+    chk_int('CAP_CFG row count', v_n, 1);
+    SELECT c.train_days, k.cfg_value INTO v_num, v_num2
+      FROM cap_cfg c CROSS JOIN cap_config k WHERE k.cfg_name = 'train_days';
+    chk_int('CAP_CFG.train_days = CAP_CONFIG train_days', v_num, v_num2);
+    SELECT c.mad_k, k.cfg_value INTO v_num, v_num2
+      FROM cap_cfg c CROSS JOIN cap_config k WHERE k.cfg_name = 'mad_k';
+    chk_int('CAP_CFG.mad_k = CAP_CONFIG mad_k', v_num, v_num2);
+    SELECT c.slope_method, k.cfg_value INTO v_num, v_num2
+      FROM cap_cfg c CROSS JOIN cap_config k WHERE k.cfg_name = 'slope_method';
+    chk_int('CAP_CFG.slope_method = CAP_CONFIG slope_method', v_num, v_num2);
+    SELECT COUNT(*) INTO v_n FROM cap_config k
+      WHERE NOT EXISTS (SELECT 1 FROM cap_cfg_check c WHERE c.knob = k.cfg_name);
+    chk_int('CAP_CONFIG keys without a CAP_CFG column', v_n, 0);
+    SELECT COUNT(*) INTO v_n FROM cap_cfg_check WHERE status <> 'OK';
+    chk_int('CAP_CFG_CHECK rows not OK', v_n, 0);
+    SELECT COUNT(*) INTO v_n FROM cap_config WHERE cfg_default IS NULL;
+    chk_int('CAP_CONFIG rows with no cfg_default', v_n, 0);
+    SELECT cfg_value, cfg_default INTO v_num, v_num2
+      FROM cap_config WHERE cfg_name = 'mad_k';
+    chk_int('mad_k cfg_value (shipped)', v_num, 3);
+    chk_int('mad_k cfg_default = cfg_value', v_num2, v_num);
+
+    -- A range rule, then the documented reset (cfg_value = cfg_default).
+    UPDATE cap_config SET cfg_value = 1000 WHERE cfg_name = 'recent_days';
+    SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'recent_days';
+    chk_str('CAP_CFG_CHECK recent_days=1000 > train_days', v_str, 'BAD');
+    UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'recent_days';
+    COMMIT;
+    SELECT status, value INTO v_str, v_num FROM cap_cfg_check WHERE knob = 'recent_days';
+    chk_str('CAP_CFG_CHECK recent_days after reset', v_str, 'OK');
+    chk_int('recent_days after reset to cfg_default', v_num, 28);
+
+    -- A deleted key is the silent failure mode: the pivot yields NULL, the
+    -- SPIKE threshold goes NULL and the flag disappears without an error.
+    DECLARE
+        s_val  cap_config.cfg_value%TYPE;
+        s_def  cap_config.cfg_default%TYPE;
+        s_desc cap_config.cfg_desc%TYPE;
+    BEGIN
+        SELECT cfg_value, cfg_default, cfg_desc INTO s_val, s_def, s_desc
+          FROM cap_config WHERE cfg_name = 'mad_k';
+        DELETE FROM cap_config WHERE cfg_name = 'mad_k';
+        BEGIN
+            SELECT status, value INTO v_str, v_num FROM cap_cfg_check WHERE knob = 'mad_k';
+            chk_str ('CAP_CFG_CHECK mad_k after DELETE', v_str, 'MISSING');
+            chk_true('CAP_CFG.mad_k is NULL after DELETE', v_num IS NULL);
+            SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
+              WHERE tablespace_name = 'FIX_SPIKE' AND anomaly_flag IS NOT NULL;
+            chk_int('SPIKE flagged rows with mad_k deleted', v_n, 0);
+        EXCEPTION
+            WHEN OTHERS THEN
+                INSERT INTO cap_config (cfg_name, cfg_value, cfg_default, cfg_desc)
+                VALUES ('mad_k', s_val, s_def, s_desc);
+                COMMIT;
+                RAISE;
+        END;
+        INSERT INTO cap_config (cfg_name, cfg_value, cfg_default, cfg_desc)
+        VALUES ('mad_k', s_val, s_def, s_desc);
+        COMMIT;
+    END;
+    SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'mad_k';
+    chk_str('CAP_CFG_CHECK mad_k after re-INSERT', v_str, 'OK');
+    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
+      WHERE tablespace_name = 'FIX_SPIKE' AND anomaly_flag = 'HIGH' AND day_dt = d_spike;
+    chk_int('SPIKE HIGH on spike day after mad_k re-INSERT', v_n, 1);
+
     DBMS_OUTPUT.PUT_LINE('----------------------------------------');
     DBMS_OUTPUT.PUT_LINE('RESULT: ' || g_pass || ' passed, ' || g_fail || ' failed');
     IF g_fail > 0 THEN
