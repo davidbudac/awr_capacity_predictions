@@ -52,6 +52,8 @@ ES index `awrcap-capacity` (mapping = `elk/elasticsearch/index-template.json`,
 the `.ndjson`); `setup.sh` applies the template and imports them. Nothing on
 the DB host talks to Elasticsearch directly.
 See `elk/README.md`.
+`LAB.md` is the workstation runbook (Tailscale URLs, start order, VM facts)
+for both visual paths; read it before touching the lab.
 `grafana/` is the second optional path (no Elastic): the ORDS module
 `grafana/ords/awrcap_module.sql` publishes the CAPR point-feed views
 (`CAPR_SERIES_POINTS` / `CAPR_FIT` / `CAPR_ANOMALIES` in ddl/45,

@@ -128,12 +128,12 @@
       "id": 1,
       "gridPos": {
         "x": 0,
-        "y": 20,
-        "w": 24,
-        "h": 12
+        "y": 0,
+        "w": 6,
+        "h": 4
       },
-      "type": "table",
-      "title": "Anomalies, newest first (click a database or series to drill in)",
+      "type": "stat",
+      "title": "Anomalies in range",
       "description": "",
       "datasource": {
         "type": "yesoreyeram-infinity-datasource",
@@ -206,6 +206,71 @@
           "filters": [],
           "computed_columns": [],
           "filterExpression": "db IN (${db:singlequote}) && anomaly_kind IN (${kind:singlequote}) && sev IN (${sev:singlequote})"
+        }
+      ],
+      "transformations": [],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "0",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#24c292",
+                "value": null
+              },
+              {
+                "color": "#e7664c",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "count"
+          ],
+          "fields": "/^sev_rank$/",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 2,
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 12
+      },
+      "type": "table",
+      "title": "Anomalies, newest first (click a database or series to drill in)",
+      "description": "",
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Dashboard --"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "datasource",
+            "uid": "-- Dashboard --"
+          },
+          "panelId": 1,
+          "withTransforms": false
         }
       ],
       "transformations": [
@@ -460,71 +525,6 @@
         "footer": {
           "show": false
         }
-      }
-    },
-    {
-      "id": 2,
-      "gridPos": {
-        "x": 0,
-        "y": 0,
-        "w": 6,
-        "h": 4
-      },
-      "type": "stat",
-      "title": "Anomalies in range",
-      "description": "",
-      "datasource": {
-        "type": "datasource",
-        "uid": "-- Dashboard --"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "datasource",
-            "uid": "-- Dashboard --"
-          },
-          "panelId": 1,
-          "withTransforms": false
-        }
-      ],
-      "transformations": [],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "noValue": "0",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#24c292",
-                "value": null
-              },
-              {
-                "color": "#e7664c",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "count"
-          ],
-          "fields": "/^sev_rank$/",
-          "values": false
-        },
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "value",
-        "justifyMode": "center"
       }
     },
     {

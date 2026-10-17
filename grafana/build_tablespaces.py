@@ -29,8 +29,23 @@ fit = q("A", "fit?kind=TBSPC", [
     "r2", "quality"], filt=FILT, computed=[SOONEST])
 DTF_STEPS = ((RED, None), (AMBER, 31), (GREEN, 91))
 
-fit_table = b.add(table(
-    "Days to full (latest fit per tablespace, soonest first)", fit, [
+# Queries live on the y=0 stats (Grafana renders panels lazily; a panel that
+# reuses another's data loads only after that panel is in view), the tables
+# and the other stats reuse them.
+fit_table = b.add(stat("Tablespaces CRIT", fit, transformations=[keep("sev", "CRIT")],
+           field="sev_rank", calc="count", color_steps=((GREEN, None), (RED, 1)),
+           description="Latest fit says full in 30 days or less (or already past the near-full line)."),
+      0, 0, 6, 4)
+anomaly_table = b.add(stat("Growth anomalies in range",
+    q("A", f"anomalies?{RANGE}", ["ts", "db", "series", "anomaly_kind", "value",
+                                   "expected", "z", "anomaly_flag", "sev", "sev_rank",
+                                   "message"],
+      filt=GROWTH),
+           field="sev_rank", calc="count", color_steps=((GREEN, None), (RED, 1)),
+           description="Days whose growth was far outside the tablespace's own median rate (robust z-score)."),
+      12, 0, 6, 4)
+b.add(table(
+    "Days to full (latest fit per tablespace, soonest first)", fit_table, [
         ("db", "Database", [width(190)]), ("series", "Tablespace", [width(190)]),
         ("sev", "Sev", sev_cell()),
         ("pct", "Used %", cell_bg(((GREEN, None), (AMBER, 90), (RED, 97)),
@@ -97,12 +112,8 @@ growth = b.add(timeseries(
                 "daily growth, which the anomaly test measures against."),
     0, 25, 24, 8)
 
-anomaly_table = b.add(table(
-    "Growth anomalies (newest first)",
-    q("A", f"anomalies?{RANGE}", ["ts", "db", "series", "anomaly_kind", "value",
-                                   "expected", "z", "anomaly_flag", "sev", "sev_rank",
-                                   "message"],
-      filt=GROWTH), [
+b.add(table(
+    "Growth anomalies (newest first)", anomaly_table, [
         ("ts", "Day", [width(110), prop("unit", "time:YYYY-MM-DD")]),
         ("db", "Database", [width(190)]), ("series", "Tablespace", [width(170)]),
         ("value", "Growth", [width(100), prop("unit", "bytes"), prop("decimals", 1)]),
@@ -115,17 +126,9 @@ anomaly_table = b.add(table(
     sort="ts", desc=True, hidden=("anomaly_kind", "sev_rank"), time_from=PAST_120D),
     0, 33, 24, 9)
 
-b.add(stat("Tablespaces CRIT", fit_table, transformations=[keep("sev", "CRIT")],
-           field="sev_rank", calc="count", color_steps=((GREEN, None), (RED, 1)),
-           description="Latest fit says full in 30 days or less (or already past the near-full line)."),
-      0, 0, 6, 4)
 b.add(stat("Tablespaces WARN", fit_table, transformations=[keep("sev", "WARN")],
            field="sev_rank", calc="count", color_steps=((GREEN, None), (AMBER, 1))),
       6, 0, 6, 4)
-b.add(stat("Growth anomalies in range", anomaly_table,
-           field="sev_rank", calc="count", color_steps=((GREEN, None), (RED, 1)),
-           description="Days whose growth was far outside the tablespace's own median rate (robust z-score)."),
-      12, 0, 6, 4)
 b.add(stat("Worst days to full", fit_table, field="days_to_full", calc="min",
            color_steps=DTF_STEPS, unit="suffix: d"),
       18, 0, 6, 4)

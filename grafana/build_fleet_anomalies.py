@@ -37,10 +37,16 @@ LINKS = [
     {"title": "Open CPU and series dashboard",
      "url": "/d/awrcap-cpu-series?var-db=${__data.fields.db}"},
 ]
-anomalies = b.add(table(
-    "Anomalies, newest first (click a database or series to drill in)",
+# The query lives on the first panel: Grafana renders panels lazily, so a
+# panel that reuses another's data only loads once that panel has scrolled
+# into view. A y=0 stat is always visible.
+anomalies = b.add(stat(
+    "Anomalies in range",
     q("A", f"anomalies?{RANGE}", ["ts", "db", "series", "anomaly_kind", "sev", "sev_rank",
-                                   "z", "anomaly_flag", "message"], filt=FILT), [
+                                   "z", "anomaly_flag", "message"], filt=FILT),
+    field="sev_rank", calc="count", color_steps=ALARM), 0, 0, 6, 4)
+b.add(table(
+    "Anomalies, newest first (click a database or series to drill in)", anomalies, [
         ("ts", "Day", [width(110), prop("unit", "time:YYYY-MM-DD")]),
         ("db", "Database", [width(190), prop("links", LINKS)]),
         ("series", "Series", [width(170), prop("links", LINKS)]),
@@ -53,8 +59,6 @@ anomalies = b.add(table(
     sort="ts", desc=True, hidden=("sev_rank",)),
     0, 20, 24, 12)
 
-b.add(stat("Anomalies in range", anomalies, field="sev_rank", calc="count",
-           color_steps=ALARM), 0, 0, 6, 4)
 b.add(stat("Databases affected", anomalies, transformations=[count_by("db")],
            field=COUNT, calc="count", color_steps=WATCH), 6, 0, 6, 4)
 b.add(stat("Series affected", anomalies, transformations=[count_by("series")],

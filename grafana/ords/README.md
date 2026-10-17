@@ -127,11 +127,11 @@ complaint.
 7. Check the endpoints:
 
    ```
-   curl -s 'http://localhost:8181/ords/capdemo/awrcap/containers'
-   curl -s 'http://localhost:8181/ords/capdemo/awrcap/series?kind=TBSPC&from=2026-06-01T00:00:00.000Z&to=2026-10-17T00:00:00.000Z'
+   curl -s 'http://100.108.246.57:8181/ords/capdemo/awrcap/containers'
+   curl -s 'http://100.108.246.57:8181/ords/capdemo/awrcap/series?kind=TBSPC&from=2026-06-01T00:00:00.000Z&to=2026-10-17T00:00:00.000Z'
    ```
 
-Base URL: `http://localhost:8181/ords/capdemo/awrcap/`.
+Base URL: `http://100.108.246.57:8181/ords/capdemo/awrcap/` (the Tailscale address; `grafana/.env` pins `BIND_ADDR`, see `LAB.md`).
 
 To remove everything, run `@grafana/ords/awrcap_module_drop.sql CAPDEMO` and
 `docker rm -f awrcap-ords`. To remove ORDS from the PDB, run `ords uninstall`

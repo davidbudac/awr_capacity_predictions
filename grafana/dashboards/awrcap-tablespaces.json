@@ -225,8 +225,8 @@
         "filter": {
           "exclude": false,
           "ids": [
-            2,
-            3
+            4,
+            5
           ]
         }
       }
@@ -237,13 +237,13 @@
       "id": 1,
       "gridPos": {
         "x": 0,
-        "y": 4,
-        "w": 24,
-        "h": 9
+        "y": 0,
+        "w": 6,
+        "h": 4
       },
-      "type": "table",
-      "title": "Days to full (latest fit per tablespace, soonest first)",
-      "description": "Days to full is the linear fit projected at today's slope; low/high come from the forecast band. CRIT at 30 days or less, WARN at 90.",
+      "type": "stat",
+      "title": "Tablespaces CRIT",
+      "description": "Latest fit says full in 30 days or less (or already past the near-full line).",
       "datasource": {
         "type": "yesoreyeram-infinity-datasource",
         "uid": "awrcap-ords"
@@ -341,6 +341,223 @@
             }
           ],
           "filterExpression": "db IN (${db:singlequote}) && series IN (${series:singlequote})"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "filterByValue",
+          "options": {
+            "type": "include",
+            "match": "any",
+            "filters": [
+              {
+                "fieldName": "sev",
+                "config": {
+                  "id": "equal",
+                  "options": {
+                    "value": "CRIT"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "0",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#24c292",
+                "value": null
+              },
+              {
+                "color": "#e7664c",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "count"
+          ],
+          "fields": "/^sev_rank$/",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 2,
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "type": "stat",
+      "title": "Growth anomalies in range",
+      "description": "Days whose growth was far outside the tablespace's own median rate (robust z-score).",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "awrcap-ords"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "awrcap-ords"
+          },
+          "type": "json",
+          "source": "url",
+          "parser": "backend",
+          "format": "table",
+          "url": "/anomalies?from=${__from:date:iso}&to=${__to:date:iso}",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "items",
+          "columns": [
+            {
+              "selector": "ts",
+              "text": "ts",
+              "type": "timestamp"
+            },
+            {
+              "selector": "db",
+              "text": "db",
+              "type": "string"
+            },
+            {
+              "selector": "series",
+              "text": "series",
+              "type": "string"
+            },
+            {
+              "selector": "anomaly_kind",
+              "text": "anomaly_kind",
+              "type": "string"
+            },
+            {
+              "selector": "value",
+              "text": "value",
+              "type": "number"
+            },
+            {
+              "selector": "expected",
+              "text": "expected",
+              "type": "number"
+            },
+            {
+              "selector": "z",
+              "text": "z",
+              "type": "number"
+            },
+            {
+              "selector": "anomaly_flag",
+              "text": "anomaly_flag",
+              "type": "string"
+            },
+            {
+              "selector": "sev",
+              "text": "sev",
+              "type": "string"
+            },
+            {
+              "selector": "sev_rank",
+              "text": "sev_rank",
+              "type": "number"
+            },
+            {
+              "selector": "message",
+              "text": "message",
+              "type": "string"
+            }
+          ],
+          "filters": [],
+          "computed_columns": [],
+          "filterExpression": "anomaly_kind == 'TBSPC_GROWTH' && db IN (${db:singlequote}) && series IN (${series:singlequote})"
+        }
+      ],
+      "transformations": [],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "noValue": "0",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#24c292",
+                "value": null
+              },
+              {
+                "color": "#e7664c",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "count"
+          ],
+          "fields": "/^sev_rank$/",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      }
+    },
+    {
+      "id": 3,
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 9
+      },
+      "type": "table",
+      "title": "Days to full (latest fit per tablespace, soonest first)",
+      "description": "Days to full is the linear fit projected at today's slope; low/high come from the forecast band. CRIT at 30 days or less, WARN at 90.",
+      "datasource": {
+        "type": "datasource",
+        "uid": "-- Dashboard --"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "datasource",
+            "uid": "-- Dashboard --"
+          },
+          "panelId": 1,
+          "withTransforms": false
         }
       ],
       "transformations": [
@@ -682,7 +899,7 @@
       }
     },
     {
-      "id": 2,
+      "id": 4,
       "gridPos": {
         "x": 0,
         "y": 13,
@@ -1017,7 +1234,7 @@
       }
     },
     {
-      "id": 3,
+      "id": 5,
       "gridPos": {
         "x": 0,
         "y": 25,
@@ -1291,7 +1508,7 @@
       "timeFrom": "120d"
     },
     {
-      "id": 4,
+      "id": 6,
       "gridPos": {
         "x": 0,
         "y": 33,
@@ -1302,86 +1519,18 @@
       "title": "Growth anomalies (newest first)",
       "description": "",
       "datasource": {
-        "type": "yesoreyeram-infinity-datasource",
-        "uid": "awrcap-ords"
+        "type": "datasource",
+        "uid": "-- Dashboard --"
       },
       "targets": [
         {
           "refId": "A",
           "datasource": {
-            "type": "yesoreyeram-infinity-datasource",
-            "uid": "awrcap-ords"
+            "type": "datasource",
+            "uid": "-- Dashboard --"
           },
-          "type": "json",
-          "source": "url",
-          "parser": "backend",
-          "format": "table",
-          "url": "/anomalies?from=${__from:date:iso}&to=${__to:date:iso}",
-          "url_options": {
-            "method": "GET",
-            "data": ""
-          },
-          "root_selector": "items",
-          "columns": [
-            {
-              "selector": "ts",
-              "text": "ts",
-              "type": "timestamp"
-            },
-            {
-              "selector": "db",
-              "text": "db",
-              "type": "string"
-            },
-            {
-              "selector": "series",
-              "text": "series",
-              "type": "string"
-            },
-            {
-              "selector": "anomaly_kind",
-              "text": "anomaly_kind",
-              "type": "string"
-            },
-            {
-              "selector": "value",
-              "text": "value",
-              "type": "number"
-            },
-            {
-              "selector": "expected",
-              "text": "expected",
-              "type": "number"
-            },
-            {
-              "selector": "z",
-              "text": "z",
-              "type": "number"
-            },
-            {
-              "selector": "anomaly_flag",
-              "text": "anomaly_flag",
-              "type": "string"
-            },
-            {
-              "selector": "sev",
-              "text": "sev",
-              "type": "string"
-            },
-            {
-              "selector": "sev_rank",
-              "text": "sev_rank",
-              "type": "number"
-            },
-            {
-              "selector": "message",
-              "text": "message",
-              "type": "string"
-            }
-          ],
-          "filters": [],
-          "computed_columns": [],
-          "filterExpression": "anomaly_kind == 'TBSPC_GROWTH' && db IN (${db:singlequote}) && series IN (${series:singlequote})"
+          "panelId": 2,
+          "withTransforms": false
         }
       ],
       "transformations": [
@@ -1646,91 +1795,7 @@
       "timeFrom": "120d"
     },
     {
-      "id": 5,
-      "gridPos": {
-        "x": 0,
-        "y": 0,
-        "w": 6,
-        "h": 4
-      },
-      "type": "stat",
-      "title": "Tablespaces CRIT",
-      "description": "Latest fit says full in 30 days or less (or already past the near-full line).",
-      "datasource": {
-        "type": "datasource",
-        "uid": "-- Dashboard --"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "datasource",
-            "uid": "-- Dashboard --"
-          },
-          "panelId": 1,
-          "withTransforms": false
-        }
-      ],
-      "transformations": [
-        {
-          "id": "filterByValue",
-          "options": {
-            "type": "include",
-            "match": "any",
-            "filters": [
-              {
-                "fieldName": "sev",
-                "config": {
-                  "id": "equal",
-                  "options": {
-                    "value": "CRIT"
-                  }
-                }
-              }
-            ]
-          }
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "noValue": "0",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#24c292",
-                "value": null
-              },
-              {
-                "color": "#e7664c",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "count"
-          ],
-          "fields": "/^sev_rank$/",
-          "values": false
-        },
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "value",
-        "justifyMode": "center"
-      }
-    },
-    {
-      "id": 6,
+      "id": 7,
       "gridPos": {
         "x": 6,
         "y": 0,
@@ -1792,71 +1857,6 @@
               },
               {
                 "color": "#f5a700",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "count"
-          ],
-          "fields": "/^sev_rank$/",
-          "values": false
-        },
-        "colorMode": "background",
-        "graphMode": "none",
-        "textMode": "value",
-        "justifyMode": "center"
-      }
-    },
-    {
-      "id": 7,
-      "gridPos": {
-        "x": 12,
-        "y": 0,
-        "w": 6,
-        "h": 4
-      },
-      "type": "stat",
-      "title": "Growth anomalies in range",
-      "description": "Days whose growth was far outside the tablespace's own median rate (robust z-score).",
-      "datasource": {
-        "type": "datasource",
-        "uid": "-- Dashboard --"
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "datasource": {
-            "type": "datasource",
-            "uid": "-- Dashboard --"
-          },
-          "panelId": 4,
-          "withTransforms": false
-        }
-      ],
-      "transformations": [],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "noValue": "0",
-          "decimals": 0,
-          "color": {
-            "mode": "thresholds"
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "#24c292",
-                "value": null
-              },
-              {
-                "color": "#e7664c",
                 "value": 1
               }
             ]

@@ -1,21 +1,21 @@
 # Grafana over the suite's ORDS REST module (route B, no Elasticsearch).
 #   docker compose -f grafana/docker-compose.yml up -d
-#   Grafana http://localhost:3001  (admin/admin, the image default, kept for the lab;
+#   Grafana http://<BIND_ADDR>:3001  (admin/admin, the image default, kept for the lab;
 #   anonymous users get read-only Viewer access)
-#   ORDS    http://localhost:8181/ords/capdemo/awrcap/  (install once: grafana/ords/README.md)
-# ORDS publishes on host port 8181 (8080 is taken on the lab host); ORDS_HOST_PORT overrides it.
-# ORDS_URL points Grafana at another ORDS; the default reaches the ords service
-# through the host's published port.
+#   ORDS    http://<BIND_ADDR>:8181/ords/capdemo/awrcap/  (install once: grafana/ords/README.md)
+# BIND_ADDR is the host interface both ports are published on (default 0.0.0.0;
+# a gitignored grafana/.env pins it, e.g. to a Tailscale address). ORDS_HOST_PORT
+# overrides 8181 (8080 is taken on the lab host). Grafana reaches ORDS over the
+# compose network (http://ords:8080), so the host binding never matters to it;
+# set ORDS_URL only to point Grafana at an ORDS running elsewhere.
 services:
   grafana:
     image: grafana/grafana-oss:latest
     container_name: awrcap-grafana
     ports:
-      - "3001:3000"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "${BIND_ADDR:-0.0.0.0}:3001:3000"
     environment:
-      ORDS_URL: ${ORDS_URL:-http://host.docker.internal:${ORDS_HOST_PORT:-8181}/ords/capdemo/awrcap}
+      ORDS_URL: ${ORDS_URL:-http://ords:8080/ords/capdemo/awrcap}
       GF_PLUGINS_PREINSTALL: yesoreyeram-infinity-datasource
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
@@ -30,7 +30,7 @@ services:
     image: container-registry.oracle.com/database/ords:latest
     container_name: awrcap-ords
     ports:
-      - "${ORDS_HOST_PORT:-8181}:8080"
+      - "${BIND_ADDR:-0.0.0.0}:${ORDS_HOST_PORT:-8181}:8080"
     volumes:
       - ./ords/config:/etc/ords/config
     entrypoint: ["ords"]
