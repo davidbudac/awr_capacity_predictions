@@ -232,9 +232,11 @@ GROUP  BY f.dbid, f.con_dbid, f.series_kind, f.series_key;
 
 -- --------------------------------------------------------------------
 -- CAPR_FORECAST_POINTS -- the projected points to chart after the observed
--- series (grafana/API.md, elk/export_capacity.sql): the REGR anchors at
--- horizon 0 (the fitted current value) and +30/+90 (+180/+365 for TBSPC)
--- with their M9.1 bands, plus the ESM point. ts = last observed day +
+-- series (grafana/API.md, elk/export_capacity.sql): the REGR points at
+-- horizon 0 (the actual current value) and +30/+90 (+180/+365 for TBSPC)
+-- with their M9.1 bands, plus the ESM point. The CAPF_ projections are
+-- anchored on that current value, so horizon 0 and the REGR horizons sit on
+-- one straight line. ts = last observed day +
 -- horizon on every row. CAPF_COMPARE folds DB CPU into kind CPU under
 -- DB_CPU_SEC. The ESM value sits at trained_through + esm_horizon_days, so
 -- its horizon here is esm_horizon_days - model_age_days (22 for a fresh

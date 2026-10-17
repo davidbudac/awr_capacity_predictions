@@ -266,7 +266,7 @@ BEGIN
     SELECT COUNT(*) INTO v_n  FROM capf_esm_health;
     SELECT COUNT(*) INTO v_n2 FROM cap_ml_model;
     chk_num('CAPF_ESM_HEALTH lists every registry model', v_n, v_n2);
-    -- eligible = the train_tablespaces gate (7 on the fixture: 9 minus FLAT, NEARFULL)
+    -- eligible = the train_tablespaces gate (8 on the fixture: 11 minus FLAT, NEARFULL, OVERFULL)
     SELECT COUNT(*) INTO v_n2 FROM capf_tbspc_forecast
     WHERE  quality IN ('OK', 'LOW_CONFIDENCE') AND train_n >= v_min;
     SELECT NVL(SUM(n_ok), 0), NVL(SUM(n_failed), 0), NVL(SUM(n_stale), 0)

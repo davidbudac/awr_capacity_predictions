@@ -93,6 +93,7 @@ USING (
     UNION ALL SELECT 'esm_max_age_days',        7,        'Tier 2: an ESM model trained more than this many days before its series'' last day is stale; CAPF_COMPARE drops it.' FROM dual
     UNION ALL SELECT 'esm_auto_tie_pct',        0.25,     'Tier 2 AUTO: candidate MAPEs closer than this many percentage points tie and EXSM_HOLT is kept (chosen_by AUTO_TIE).' FROM dual
     UNION ALL SELECT 'complete_day_pct',       80,        'Percent of a day (86400 s) of valid counter intervals a CPU / DB time / redo day needs for is_complete = Y. Partial, restart and outage days fall below it.' FROM dual
+    UNION ALL SELECT 'stale_days',              3,        'A CAPF_* series whose last_day is more than this many days before the newest day of its daily source (same dbid) reads is_current = N: dropped tablespace, retired DBID, stopped collection.' FROM dual
     UNION ALL SELECT 'suite_version',          13,        'Suite release that built these objects (latest PLAN.md milestone). Set by every install; not a tuning knob.' FROM dual
 ) s
 ON (c.cfg_name = s.cfg_name)
@@ -155,6 +156,7 @@ SELECT MAX(CASE WHEN cfg_name = 'train_days'             THEN cfg_value END) AS 
        MAX(CASE WHEN cfg_name = 'esm_max_age_days'       THEN cfg_value END) AS esm_max_age_days,
        MAX(CASE WHEN cfg_name = 'esm_auto_tie_pct'       THEN cfg_value END) AS esm_auto_tie_pct,
        MAX(CASE WHEN cfg_name = 'complete_day_pct'       THEN cfg_value END) AS complete_day_pct,
+       MAX(CASE WHEN cfg_name = 'stale_days'             THEN cfg_value END) AS stale_days,
        MAX(CASE WHEN cfg_name = 'suite_version'          THEN cfg_value END) AS suite_version
 FROM   cap_config;
 
@@ -178,7 +180,7 @@ WITH u AS (
                report_min_gb, accel_slope_floor_bpd, slope_method, reset_on_shrink,
                shrink_mad_k, cpu_gap_hours, shift_days, shift_baseline_days,
                shift_min_pct, series_sat_pct, esm_max_age_days, esm_auto_tie_pct,
-               complete_day_pct, suite_version))
+               complete_day_pct, stale_days, suite_version))
      ),
      r AS (
         SELECT u.knob, u.value,
@@ -211,6 +213,8 @@ WITH u AS (
                         THEN 'must be >= 0'
                    WHEN u.knob = 'complete_day_pct'    AND u.value NOT BETWEEN 1 AND 100
                         THEN 'must be between 1 and 100 (percent of a day)'
+                   WHEN u.knob = 'stale_days'          AND u.value < 0
+                        THEN 'must be >= 0'
                    WHEN u.knob = 'suite_version'       AND u.value < 13
                         THEN 'older than this release (13): re-run install.sql'
                END AS reason

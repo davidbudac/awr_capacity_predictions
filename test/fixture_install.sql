@@ -28,6 +28,13 @@
 --                  again -- the M9.3 change-point reset (fit must restart at
 --                  the cliff and read 10 MiB/day, not the across-the-cliff
 --                  slope).
+--   FIX_OVERFULL : flat 1.5 GiB used of ~1.6 GiB allocated, with a
+--                  CAP_TBSPC_OVERRIDE ceiling of 1 GiB: the limit is under the
+--                  usage (limit_below_used = Y, pct_used 150, FLAT so
+--                  days_to_full NULL, TBSPC_NEARFULL CRIT).
+--   FIX_DROPPED  : FIX_LINEAR's 10 MiB/day, but its usage rows stop 30 days
+--                  before the end of the spine (a dropped tablespace): it
+--                  still fits (OK) and reads is_current = N.
 --   CPU          : two snapshots per day (06:00 = the overnight interval,
 --                  18:00 = the daytime/peak interval) on an SMT host:
 --                  NUM_CPUS 8, NUM_CPU_CORES 4. Weekday 20% night /
@@ -122,6 +129,15 @@ DECLARE
     -- day, i.e. OUTSIDE the 14-day anomaly_report_days alert window.
     c_purge  CONSTANT PLS_INTEGER := 90;
     c_purgeb CONSTANT NUMBER      := 76800;       -- 600 MiB in 8 KiB blocks
+    -- FIX_DROPPED's usage rows stop this many days before the last day, so
+    -- its last_day is c_drop days behind the newest day of the dbid: stale
+    -- under the default stale_days (3), current once stale_days >= c_drop.
+    c_drop   CONSTANT PLS_INTEGER := 30;
+    -- FIX_OVERFULL: 1.5 GiB used (196608 blocks) of 209715 blocks (~1.6 GiB)
+    -- allocated, no autoextend. Its override ceiling is 1 GiB (131072 blocks).
+    c_ofused CONSTANT NUMBER      := 196608;
+    c_ofsize CONSTANT NUMBER      := 209715;
+    c_oflim  CONSTANT NUMBER      := 1073741824;
     -- BUSY_TIME + IDLE_TIME are summed over NUM_CPUS (logical CPUs), so a day
     -- holds 8 * 86400 * 100 cs. NUM_CPU_CORES = 4: a 2-way SMT host.
     c_ncpu   CONSTANT NUMBER := 8;
@@ -277,6 +293,8 @@ BEGIN
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 17, 'FIX_OVERRIDE', 'PERMANENT', c_bs);
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 18, 'FIX_EXCLUDED', 'PERMANENT', c_bs);
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 19, 'FIX_PURGE',    'PERMANENT', c_bs);
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 20, 'FIX_OVERFULL', 'PERMANENT', c_bs);
+    INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 21, 'FIX_DROPPED',  'PERMANENT', c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 10, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 11, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 12, c_bs);
@@ -287,6 +305,8 @@ BEGIN
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 17, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 18, c_bs);
     INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 19, c_bs);
+    INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 20, c_bs);
+    INSERT INTO cap_fixture_datafile   VALUES (c_dbid, c_con, 21, c_bs);
 
     -- Container naming (M7.2): the row every fixture series resolves through
     -- (con_dbid = dbid -> label is the db_name alone), plus one synthetic PDB
@@ -394,6 +414,21 @@ BEGIN
         v_used := 1280 * i + 12800 - CASE WHEN i >= c_purge THEN c_purgeb ELSE 0 END;
         INSERT INTO cap_fixture_tbspc_usage
         VALUES (c_dbid, c_con, 2001 + 2 * i, 19, v_used, v_max50g, v_used);
+
+        -- FIX_OVERFULL : constant, so FLAT (slope 0, days_to_full NULL). Its
+        -- 1 GiB override ceiling (inserted after this block) sits under the
+        -- 1.5 GiB it uses: pct_used 150, limit_below_used = 'Y'.
+        INSERT INTO cap_fixture_tbspc_usage
+        VALUES (c_dbid, c_con, 2001 + 2 * i, 20, c_ofsize, 0, c_ofused);
+
+        -- FIX_DROPPED : FIX_LINEAR's growth, but nothing after day c_nd -
+        -- c_drop. The fit window is its own last train_days days, so it still
+        -- grades OK. The dbid's newest day stays c_nd (every other series).
+        IF i <= c_nd - c_drop THEN
+            v_used := 1280 * i + 12800;
+            INSERT INTO cap_fixture_tbspc_usage
+            VALUES (c_dbid, c_con, 2001 + 2 * i, 21, v_used, v_max50g, v_used);
+        END IF;
 
         -- FIX_GAP : 60 MiB/day = 7680 blocks/day, but with a 3-day AWR gap
         -- (days 100-102 have NO usage sample). The post-gap day (103) sees a
@@ -595,6 +630,19 @@ BEGIN
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PURGE_DTF',
         FLOOR((c_50g - (1280 * c_nd + 12800 - c_purgeb) * c_bs) / 10485760));                    -- 5050
 
+    -- ---- clamp / staleness expectations ---------------------------------
+    -- FIX_OVERFULL: limit 1 GiB under 1.5 GiB used.
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('OVERFULL_CUR',   c_ofused * c_bs);             -- 1,610,612,736
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('OVERFULL_LIMIT', c_oflim);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('OVERFULL_PCT',
+        ROUND(100 * c_ofused * c_bs / c_oflim, 1));                                              -- 150
+    -- FIX_DROPPED: last row at day c_nd - c_drop, a full train_days window
+    -- (days 1..90) behind it, and c_drop days between it and the newest day.
+    INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('DROPPED_LAST_DAY', v_base + c_nd - c_drop, c_nd - c_drop);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DROPPED_TRAIN_N', 90);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DROPPED_STALE_GAP', c_drop);
+    INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('DROPPED_CUR', (1280 * (c_nd - c_drop) + 12800) * c_bs);
+
     -- ---- M9.1/M9.4 expectations for FIX_ZIGZAG, computed from first
     -- principles in exact NUMBER arithmetic over the SAME windows the views
     -- use: forecast fit = the last train_days (90) days (i 31..120); backtest
@@ -612,6 +660,7 @@ BEGIN
         slope NUMBER; icept NUMBER; sse NUMBER; rse NUMBER; tv NUMBER;
         sci   NUMBER; x0 NUMBER; half NUMBER; y NUMBER; hr NUMBER;
         mape  NUMBER; bias NUMBER; pred NUMBER;
+        zcur  NUMBER;                                -- zz(c_nd): local functions are not callable in SQL
         FUNCTION zz(p_i PLS_INTEGER) RETURN NUMBER IS
         BEGIN
             RETURN (12800 + 1280 * p_i
@@ -635,17 +684,24 @@ BEGIN
         sci   := tv * rse / SQRT(bxx);
         x0    := c_nd + 30;
         half  := tv * rse * SQRT(1 + 1 / n + POWER(x0 - sx / n, 2) / bxx);
-        hr    := c_50g - zz(c_nd);
+        zcur  := zz(c_nd);
+        hr    := c_50g - zcur;
+        -- Projections are anchored at today: cur + slope * 30, with the
+        -- unchanged half-width around it. ZZ_P30_FIT keeps the fitted-line
+        -- value (icept + slope * x0), which the view's icept still yields.
         INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_SLOPE',  slope);
-        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_P30',    icept + slope * x0);
-        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_P30_LO', icept + slope * x0 - half);
-        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_P30_HI', icept + slope * x0 + half);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_CUR',    zcur);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_P30_FIT', icept + slope * x0);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_P30',    zcur + slope * 30);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_P30_LO', zcur + slope * 30 - half);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_P30_HI', zcur + slope * 30 + half);
         INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_DTF',    FLOOR(hr / slope));
         INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_DTF_LO', FLOOR(hr / (slope + sci)));
         INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_DTF_HI',
             CASE WHEN slope - sci > 0 THEN FLOOR(hr / (slope - sci)) END);
 
-        -- backtest REGR fit (i = 3..92), scored on the holdout (i = 93..120)
+        -- backtest REGR fit (i = 3..92), scored on the holdout (i = 93..120),
+        -- anchored at the cutoff day's actual value: pred = zz(92) + slope * (i - 92)
         n := 0; sx := 0; sy := 0; sxx := 0; sxy := 0;
         FOR i IN 3 .. 92 LOOP
             y := zz(i);
@@ -655,11 +711,10 @@ BEGIN
         bxx   := sxx - sx * sx / n;
         bxy   := sxy - sx * sy / n;
         slope := bxy / bxx;
-        icept := sy / n - slope * (sx / n);
         mape := 0; bias := 0;
         FOR i IN 93 .. 120 LOOP
             y    := zz(i);
-            pred := icept + slope * i;
+            pred := zz(92) + slope * (i - 92);
             mape := mape + ABS(pred - y) / y;
             bias := bias + (pred - y) / y;
         END LOOP;
@@ -704,6 +759,63 @@ BEGIN
         v_cnt := v_ps.COUNT;
         INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_TS_SLOPE', v_med);
         INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('ZZ_TS_PAIRS', v_cnt);
+    END;
+
+    -- ---- complete-day fits: expected train_n from the construction ------
+    -- The CPU and redo fits read is_complete = 'Y' days only. Which days of
+    -- a window carry a complete row:
+    --   CPU (root)  : not day 0 (first, 12 h), not the restart day and not
+    --                 the gap day (no row), not the partial day (12 h).
+    --   REDO_GB_DAY : not day 0, not the restart day, not the partial day.
+    --                 The gap day keeps its redo rows, so it stays.
+    --   SESSIONS    : a level series, every day counts.
+    -- With the shipped train_days (90) the window is days 31..120 and holds
+    -- no partial day, so the run_test flip to train_days = 120 (days 1..120)
+    -- is what proves the partial day is left out.
+    DECLARE
+        PROCEDURE put_counts(p_win PLS_INTEGER, p_suffix VARCHAR2) IS
+            n_cpu PLS_INTEGER := 0; n_redo PLS_INTEGER := 0; n_sess PLS_INTEGER := 0;
+        BEGIN
+            FOR i IN c_nd - p_win + 1 .. c_nd LOOP
+                IF i > 0 AND i NOT IN (c_restart, v_cpugap, v_partial) THEN n_cpu := n_cpu + 1; END IF;
+                IF i > 0 AND i NOT IN (c_restart, v_partial)          THEN n_redo := n_redo + 1; END IF;
+                n_sess := n_sess + 1;
+            END LOOP;
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_TRAIN_N'  || p_suffix, n_cpu);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('REDO_TRAIN_N' || p_suffix, n_redo);
+            INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('SESS_TRAIN_N' || p_suffix, n_sess);
+        END;
+    BEGIN
+        put_counts(90,  NULL);         -- 88 / 89 / 90
+        put_counts(120, '_120');       -- 117 / 118 / 120
+    END;
+
+    -- ---- anchoring on a CPU series: FIXPDB1 DB_CPU_PCT ------------------
+    -- Its daily value is exactly pdb_pct(i) on every day but the restart day
+    -- (no row) and the partial day (outside the window). The +18 step over
+    -- the last 7 days puts the last point well above the fitted line, so the
+    -- anchored +30 (pdb_pct(c_nd) + slope * 30) and the old fitted-line +30
+    -- differ by several points. OLS in i-space over days 31..120 minus the
+    -- restart day.
+    DECLARE
+        n PLS_INTEGER := 0;
+        sx NUMBER := 0; sy NUMBER := 0; sxx NUMBER := 0; sxy NUMBER := 0;
+        slope NUMBER; icept NUMBER;
+        v_cur NUMBER := pdb_pct(c_nd);
+    BEGIN
+        FOR i IN c_nd - 89 .. c_nd LOOP
+            IF i <> c_restart THEN
+                n := n + 1; sx := sx + i; sy := sy + pdb_pct(i);
+                sxx := sxx + i * i; sxy := sxy + i * pdb_pct(i);
+            END IF;
+        END LOOP;
+        slope := (sxy - sx * sy / n) / (sxx - sx * sx / n);
+        icept := sy / n - slope * (sx / n);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_DBCPU_TRAIN_N', n);           -- 89
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_DBCPU_CUR',     v_cur);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_DBCPU_SLOPE',   slope);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_DBCPU_P30',     v_cur + slope * 30);
+        INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_DBCPU_P30_FIT', icept + slope * (c_nd + 30));
     END;
     COMMIT;
 
@@ -863,6 +975,11 @@ VALUES (42424242, 42424242, 'FIX_OVERRIDE', 2147483648, 'N',
 INSERT INTO cap_tbspc_override (dbid, con_dbid, tablespace_name, limit_bytes, exclude_flag, note)
 VALUES (0, 0, 'FIX_OVERRIDE', 1073741824, 'N',
         'M9.5: wildcard decoy -- the exact-key row must outrank this.');
+
+-- FIX_OVERFULL: a ceiling UNDER the current usage (1 GiB vs 1.5 GiB used).
+INSERT INTO cap_tbspc_override (dbid, con_dbid, tablespace_name, limit_bytes, exclude_flag, note)
+VALUES (42424242, 42424242, 'FIX_OVERFULL', 1073741824, 'N',
+        'Clamp fixture: ceiling below the used size.');
 
 -- Pure WILDCARD row (any dbid, any con_dbid): exercises the "fleet-wide rule"
 -- matching path as well as exclude_flag.

@@ -16,10 +16,34 @@
 --   CAPF_CPU_TREND      -- per CPU metric (host busy% avg/p95/peak-window,
 --                          DB CPU sec, DB CPU % of cores avg/p95): slope, R^2,
 --                          projections (+95% bands), days_to_saturation
---                          (+lo/hi range), quality.
+--                          (+lo/hi range), quality. Complete days only.
 --
 -- day_n is an integer day index off a fixed epoch (DATE '2020-01-01') rather
 -- than a raw date number, so slopes are in "per day" and are stable/auditable.
+--
+-- ---------------------------------------------------------------------
+-- Anchoring at today
+-- ---------------------------------------------------------------------
+-- Every projection starts from the CURRENT value, not from the fitted line:
+--
+--     proj_h = cur + slope * h        band = proj_h -/+ half_h
+--
+-- days_to_full / days_to_sat already counted from the current value, so the
+-- +30 column and the countdown now describe the same line. The fitted line
+-- only supplies the slope. The half-widths are unchanged OLS new-observation
+-- quantities (centred on x0 = last_day_n + h), drawn around the anchored
+-- projection. A series whose last point sits on its fitted line (FIX_LINEAR)
+-- projects exactly as before. icept stays the fitted intercept, so residuals
+-- (report/drill_*.sql) are still y - (icept + slope * day_n).
+--
+-- ---------------------------------------------------------------------
+-- Staleness (knob `stale_days`)
+-- ---------------------------------------------------------------------
+-- newest_day = the newest day of the view's daily source for the same dbid,
+-- whatever the series. is_current = 'Y' when last_day >= newest_day -
+-- stale_days. A dropped tablespace or a series that stopped arriving keeps
+-- its last forecast until AWR purges it, and is_current = 'N' says so. No
+-- SYSDATE: the answer depends on the data only.
 --
 -- ---------------------------------------------------------------------
 -- M9.2 -- robust slope (knob `slope_method`: 0 = OLS default, 1 = THEILSEN)
@@ -32,15 +56,16 @@
 -- minority of stepped pairs cannot move it. Cost is O(n^2): ~4k pairs per
 -- series at the shipped 90-day window, computed with a self-join on `w`.
 --
--- BOTH slopes are always exposed (`ols_slope_bpd` and `ts_slope_bpd`), and
--- `slope_method` says which one the row actually used. When the knob selects
--- THEILSEN, the CHOSEN line drives `slope_bpd`, `icept`, every `proj_*` point
+-- Theil-Sen is computed ONLY when the knob asks for it (slope_method = 1):
+-- the pair self-joins read an input that is empty otherwise, so the default
+-- pays nothing for them, and `ts_slope_bpd` / `ts_icept` are NULL. `slope_method`
+-- says which estimator the row actually used. When the knob selects
+-- THEILSEN, the CHOSEN slope drives `slope_bpd`, `icept`, every `proj_*` point
 -- projection, `days_to_full`, the `accel_ratio` numerator and denominator, and
 -- the `slope = 0` FLAT test. `r2`, `resid_se` and the M9.1 half-widths stay
 -- OLS quantities -- there is no closed-form prediction interval for Theil-Sen
--- in SQL, so the bands are OLS residual bands drawn AROUND the chosen line,
--- and `slope_ci_bpd` / `days_to_full_lo/hi` remain OLS. Acceptable for v1 --
--- with the default slope_method = 0 nothing about the output changes at all.
+-- in SQL, so the bands are OLS residual bands drawn around the anchored
+-- projection, and `slope_ci_bpd` / `days_to_full_lo/hi` remain OLS.
 -- (No comment line here may end in a semicolon: SQL*Plus would take it as the
 -- statement terminator in plain-SQL context.)
 --
@@ -80,6 +105,10 @@
 --   LOW_CONFIDENCE        R^2 < r2_gate
 --   OK                    otherwise
 --
+-- days_to_full / _lo / _hi are clamped at 0: a limit already below the
+-- current usage (an override under the used size) reads 0, not a negative
+-- count, and limit_below_used = 'Y' flags the row.
+--
 SET DEFINE OFF
 
 -- --------------------------------------------------------------------
@@ -97,6 +126,12 @@ WITH d AS (
                used_bytes - LAG(used_bytes) OVER (PARTITION BY dbid, con_dbid, tablespace_name
                                                   ORDER BY day_dt) AS used_delta
         FROM   capd_tbspc_daily
+     ),
+     -- Staleness reference: the newest day any tablespace of the dbid reached.
+     nd AS (
+        SELECT dbid, MAX(day_dt) AS newest_day
+        FROM   d
+        GROUP  BY dbid
      ),
      b AS (
         SELECT dbid, con_dbid, tablespace_name, MAX(day_dt) AS last_day
@@ -175,16 +210,22 @@ WITH d AS (
         GROUP  BY w.dbid, w.con_dbid, w.tablespace_name
      ),
      -- ---- M9.2 Theil-Sen over the SAME effective window ----
+     -- wts is w when slope_method = 1 and empty otherwise, so the O(n^2)
+     -- pair join below runs only when Theil-Sen was asked for.
+     wts AS (
+        SELECT w.* FROM w CROSS JOIN cap_cfg cfg
+        WHERE  cfg.slope_method = 1
+     ),
      -- One row per ordered pair (i before j); the median of these is the
      -- estimate. Empty for a single-day window, which the pick CTE falls back
      -- from.
      tspair AS (
         SELECT i.dbid, i.con_dbid, i.tablespace_name,
                (j.used_bytes - i.used_bytes) / (j.day_n - i.day_n) AS pslope
-        FROM   w i
-        JOIN   w j ON j.dbid = i.dbid AND j.con_dbid = i.con_dbid
-                  AND j.tablespace_name = i.tablespace_name
-                  AND j.day_n > i.day_n
+        FROM   wts i
+        JOIN   wts j ON j.dbid = i.dbid AND j.con_dbid = i.con_dbid
+                    AND j.tablespace_name = i.tablespace_name
+                    AND j.day_n > i.day_n
      ),
      tsslp AS (
         SELECT dbid, con_dbid, tablespace_name, MEDIAN(pslope) AS ts_slope
@@ -197,7 +238,7 @@ WITH d AS (
         SELECT w.dbid, w.con_dbid, w.tablespace_name,
                MAX(s.ts_slope)                                  AS ts_slope,
                MEDIAN(w.used_bytes - s.ts_slope * w.day_n)      AS ts_icept
-        FROM   w
+        FROM   wts w
         JOIN   tsslp s ON s.dbid = w.dbid AND s.con_dbid = w.con_dbid
                       AND s.tablespace_name = w.tablespace_name
         GROUP  BY w.dbid, w.con_dbid, w.tablespace_name
@@ -276,13 +317,18 @@ WITH d AS (
         FROM   rw
         GROUP  BY rw.dbid, rw.con_dbid, rw.tablespace_name
      ),
+     -- Same gate as wts.
+     rwts AS (
+        SELECT rw.* FROM rw CROSS JOIN cap_cfg cfg
+        WHERE  cfg.slope_method = 1
+     ),
      rtspair AS (
         SELECT i.dbid, i.con_dbid, i.tablespace_name,
                (j.used_bytes - i.used_bytes) / (j.day_n - i.day_n) AS pslope
-        FROM   rw i
-        JOIN   rw j ON j.dbid = i.dbid AND j.con_dbid = i.con_dbid
-                   AND j.tablespace_name = i.tablespace_name
-                   AND j.day_n > i.day_n
+        FROM   rwts i
+        JOIN   rwts j ON j.dbid = i.dbid AND j.con_dbid = i.con_dbid
+                     AND j.tablespace_name = i.tablespace_name
+                     AND j.day_n > i.day_n
      ),
      rtsslp AS (
         SELECT dbid, con_dbid, tablespace_name, MEDIAN(pslope) AS rts_slope
@@ -337,37 +383,39 @@ SELECT f.dbid,
        f.ts_icept,
        f.slope_method,
        f.r2,
-       f.use_icept + f.use_slope * (f.last_day_n + 30)    AS proj_30_bytes,
-       f.use_icept + f.use_slope * (f.last_day_n + 90)    AS proj_90_bytes,
-       f.use_icept + f.use_slope * (f.last_day_n + 180)   AS proj_180_bytes,
-       f.use_icept + f.use_slope * (f.last_day_n + 365)   AS proj_365_bytes,
+       -- Anchored at today: cur_used + slope * h (header, "Anchoring").
+       c.cur_used + f.use_slope * 30                      AS proj_30_bytes,
+       c.cur_used + f.use_slope * 90                      AS proj_90_bytes,
+       c.cur_used + f.use_slope * 180                     AS proj_180_bytes,
+       c.cur_used + f.use_slope * 365                     AS proj_365_bytes,
        -- M9.1: 95% prediction bands on each projection. The half-widths are
        -- OLS residual quantities (there is no closed-form Theil-Sen interval
-       -- in SQL), drawn around whichever line the row chose -- see the M9.2
+       -- in SQL), drawn around the anchored projection -- see the M9.2
        -- block in the header.
-       f.use_icept + f.use_slope * (f.last_day_n + 30)  - f.half_30   AS proj_30_lo,
-       f.use_icept + f.use_slope * (f.last_day_n + 30)  + f.half_30   AS proj_30_hi,
-       f.use_icept + f.use_slope * (f.last_day_n + 90)  - f.half_90   AS proj_90_lo,
-       f.use_icept + f.use_slope * (f.last_day_n + 90)  + f.half_90   AS proj_90_hi,
-       f.use_icept + f.use_slope * (f.last_day_n + 180) - f.half_180  AS proj_180_lo,
-       f.use_icept + f.use_slope * (f.last_day_n + 180) + f.half_180  AS proj_180_hi,
-       f.use_icept + f.use_slope * (f.last_day_n + 365) - f.half_365  AS proj_365_lo,
-       f.use_icept + f.use_slope * (f.last_day_n + 365) + f.half_365  AS proj_365_hi,
+       c.cur_used + f.use_slope * 30  - f.half_30         AS proj_30_lo,
+       c.cur_used + f.use_slope * 30  + f.half_30         AS proj_30_hi,
+       c.cur_used + f.use_slope * 90  - f.half_90         AS proj_90_lo,
+       c.cur_used + f.use_slope * 90  + f.half_90         AS proj_90_hi,
+       c.cur_used + f.use_slope * 180 - f.half_180        AS proj_180_lo,
+       c.cur_used + f.use_slope * 180 + f.half_180        AS proj_180_hi,
+       c.cur_used + f.use_slope * 365 - f.half_365        AS proj_365_lo,
+       c.cur_used + f.use_slope * 365 + f.half_365        AS proj_365_hi,
        f.slope_ci                                             AS slope_ci_bpd,
        CASE WHEN f.use_slope > 0
-            THEN FLOOR((c.limit_bytes - c.cur_used) / f.use_slope)
+            THEN GREATEST(0, FLOOR((c.limit_bytes - c.cur_used) / f.use_slope))
        END                                                AS days_to_full,
        -- ... and a range on days_to_full from the OLS slope's 95% CI.
        -- lo = WORST case (fastest plausible growth, fills soonest).
        -- hi = BEST case, NULL when the slow edge of the CI is <= 0
        -- ("might never fill at the low end of plausible growth").
+       -- All three clamp at 0 when the limit is already below cur_used.
        -- NB: no trailing semicolon in these comments -- SQL*Plus would
        -- treat it as the statement terminator mid-view.
        CASE WHEN f.slope > 0 AND f.slope_ci IS NOT NULL
-            THEN FLOOR((c.limit_bytes - c.cur_used) / (f.slope + f.slope_ci))
+            THEN GREATEST(0, FLOOR((c.limit_bytes - c.cur_used) / (f.slope + f.slope_ci)))
        END                                                AS days_to_full_lo,
        CASE WHEN f.slope > 0 AND f.slope_ci IS NOT NULL AND f.slope - f.slope_ci > 0
-            THEN FLOOR((c.limit_bytes - c.cur_used) / (f.slope - f.slope_ci))
+            THEN GREATEST(0, FLOOR((c.limit_bytes - c.cur_used) / (f.slope - f.slope_ci)))
        END                                                AS days_to_full_hi,
        r.recent_slope                                     AS recent_slope_bpd,
        -- M7.7: only meaningful when the baseline slope is real growth. Below
@@ -381,10 +429,17 @@ SELECT f.dbid,
             WHEN f.use_slope = 0 OR f.r2 IS NULL THEN 'FLAT'
             WHEN f.r2 < cfg.r2_gate              THEN 'LOW_CONFIDENCE'
             ELSE 'OK'
-       END                                                AS quality
+       END                                                AS quality,
+       -- The ceiling is already under the current usage: days_to_full reads
+       -- 0 (or NULL when not growing) and pct_used is over 100.
+       CASE WHEN c.limit_bytes < c.cur_used THEN 'Y' ELSE 'N' END AS limit_below_used,
+       n.newest_day,
+       CASE WHEN f.last_day >= n.newest_day - cfg.stale_days
+            THEN 'Y' ELSE 'N' END                         AS is_current
 FROM   pick f
 JOIN   cur  c ON c.dbid = f.dbid AND c.con_dbid = f.con_dbid
              AND c.tablespace_name = f.tablespace_name
+JOIN   nd   n ON n.dbid = f.dbid
 LEFT   JOIN rcomb r ON r.dbid = f.dbid AND r.con_dbid = f.con_dbid
                    AND r.tablespace_name = f.tablespace_name
 CROSS  JOIN cap_cfg cfg;
@@ -399,36 +454,52 @@ CROSS  JOIN cap_cfg cfg;
 --   DB_CPU_PCT  DB CPU as % of the host's core capacity     (M10.2)
 --   DB_CPU_P95  p95 of the per-interval DB CPU %            (M10.2)
 -- Every percent-of-capacity metric (everything but DB_CPU_SEC) gets
--- days_to_sat = days until the fitted line crosses cpu_sat_pct; DB_CPU_SEC
--- has no fixed ceiling so its days_to_sat is NULL.
+-- days_to_sat = days until the anchored line (cur_val + slope * d) crosses
+-- cpu_sat_pct; DB_CPU_SEC has no fixed ceiling so its days_to_sat is NULL.
+--
+-- Only COMPLETE days are fitted (is_complete = 'Y' in the daily views): a
+-- partial, restart or outage day averages over less than complete_day_pct
+-- of the day and would pull the line. last_day, train_start, cur_val and the
+-- anchor all come from complete days. newest_day counts every day that has a
+-- value, complete or not, so today's partial day does not make a series stale.
 --
 -- M9.2 applies here too (same pairwise-median pattern, same slope_method
--- knob, same "bands stay OLS" rule). M9.3 does NOT: a change-point reset is
--- defined on a tablespace SHRINK (a purge), which has no CPU analogue -- a
--- CPU level shift is M10.3's job, not this one.
+-- knob and gate, same "bands stay OLS" rule). M9.3 does NOT: a change-point
+-- reset is defined on a tablespace SHRINK (a purge), which has no CPU
+-- analogue -- a CPU level shift is M10.3's job, not this one.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capf_cpu_trend AS
 WITH src AS (
-        SELECT dbid, con_dbid, 'BUSY_PCT'   AS metric, day_dt, busy_pct      AS val
+        SELECT dbid, con_dbid, 'BUSY_PCT'   AS metric, day_dt, busy_pct      AS val, is_complete
         FROM   capd_cpu_daily    WHERE busy_pct      IS NOT NULL
         UNION ALL
-        SELECT dbid, con_dbid, 'BUSY_P95'   AS metric, day_dt, busy_p95      AS val
+        SELECT dbid, con_dbid, 'BUSY_P95'   AS metric, day_dt, busy_p95      AS val, is_complete
         FROM   capd_cpu_daily    WHERE busy_p95      IS NOT NULL
         UNION ALL
-        SELECT dbid, con_dbid, 'BUSY_PEAK'  AS metric, day_dt, busy_peak_pct AS val
+        SELECT dbid, con_dbid, 'BUSY_PEAK'  AS metric, day_dt, busy_peak_pct AS val, is_complete
         FROM   capd_cpu_daily    WHERE busy_peak_pct IS NOT NULL
         UNION ALL
-        SELECT dbid, con_dbid, 'DB_CPU_SEC' AS metric, day_dt, db_cpu_sec    AS val
+        SELECT dbid, con_dbid, 'DB_CPU_SEC' AS metric, day_dt, db_cpu_sec    AS val, is_complete
         FROM   capd_dbtime_daily WHERE db_cpu_sec    IS NOT NULL
         UNION ALL
-        SELECT dbid, con_dbid, 'DB_CPU_PCT' AS metric, day_dt, db_cpu_pct    AS val
+        SELECT dbid, con_dbid, 'DB_CPU_PCT' AS metric, day_dt, db_cpu_pct    AS val, is_complete
         FROM   capd_dbtime_daily WHERE db_cpu_pct    IS NOT NULL
         UNION ALL
-        SELECT dbid, con_dbid, 'DB_CPU_P95' AS metric, day_dt, db_cpu_p95_pct AS val
+        SELECT dbid, con_dbid, 'DB_CPU_P95' AS metric, day_dt, db_cpu_p95_pct AS val, is_complete
         FROM   capd_dbtime_daily WHERE db_cpu_p95_pct IS NOT NULL
      ),
+     -- Staleness reference: every day with a value, complete or not.
+     nd AS (
+        SELECT dbid, MAX(day_dt) AS newest_day
+        FROM   src
+        GROUP  BY dbid
+     ),
+     -- The fit input: complete days only.
      d AS (
-        SELECT s.*, day_dt - DATE '2020-01-01' AS day_n FROM src s
+        SELECT s.dbid, s.con_dbid, s.metric, s.day_dt, s.val,
+               s.day_dt - DATE '2020-01-01' AS day_n
+        FROM   src s
+        WHERE  s.is_complete = 'Y'
      ),
      b AS (
         SELECT dbid, con_dbid, metric, MAX(day_dt) AS last_day
@@ -459,13 +530,17 @@ WITH src AS (
         FROM   w
         GROUP  BY w.dbid, w.con_dbid, w.metric
      ),
-     -- M9.2 Theil-Sen, identical pattern to CAPF_TBSPC_FORECAST.
+     -- M9.2 Theil-Sen, identical pattern (and gate) to CAPF_TBSPC_FORECAST.
+     wts AS (
+        SELECT w.* FROM w CROSS JOIN cap_cfg cfg
+        WHERE  cfg.slope_method = 1
+     ),
      tspair AS (
         SELECT i.dbid, i.con_dbid, i.metric,
                (j.val - i.val) / (j.day_n - i.day_n) AS pslope
-        FROM   w i
-        JOIN   w j ON j.dbid = i.dbid AND j.con_dbid = i.con_dbid
-                  AND j.metric = i.metric AND j.day_n > i.day_n
+        FROM   wts i
+        JOIN   wts j ON j.dbid = i.dbid AND j.con_dbid = i.con_dbid
+                    AND j.metric = i.metric AND j.day_n > i.day_n
      ),
      tsslp AS (
         SELECT dbid, con_dbid, metric, MEDIAN(pslope) AS ts_slope
@@ -475,7 +550,7 @@ WITH src AS (
         SELECT w.dbid, w.con_dbid, w.metric,
                MAX(s.ts_slope)                        AS ts_slope,
                MEDIAN(w.val - s.ts_slope * w.day_n)   AS ts_icept
-        FROM   w
+        FROM   wts w
         JOIN   tsslp s ON s.dbid = w.dbid AND s.con_dbid = w.con_dbid
                       AND s.metric = w.metric
         GROUP  BY w.dbid, w.con_dbid, w.metric
@@ -534,16 +609,17 @@ SELECT f.dbid,
        f.ts_icept,
        f.slope_method,
        f.r2,
-       f.use_icept + f.use_slope * (f.last_day_n + 30)      AS proj_30,
-       f.use_icept + f.use_slope * (f.last_day_n + 90)      AS proj_90,
+       -- Anchored at today, as in CAPF_TBSPC_FORECAST.
+       c.cur_val + f.use_slope * 30                 AS proj_30,
+       c.cur_val + f.use_slope * 90                 AS proj_90,
        -- M9.1: 95% prediction bands + days_to_sat range (same semantics as
        -- CAPF_TBSPC_FORECAST: lo = worst case / soonest, hi = best case,
        -- hi NULL when the slow edge of the slope CI is <= 0). Band half-widths
        -- and the slope CI are OLS quantities either way (M9.2).
-       f.use_icept + f.use_slope * (f.last_day_n + 30) - f.half_30 AS proj_30_lo,
-       f.use_icept + f.use_slope * (f.last_day_n + 30) + f.half_30 AS proj_30_hi,
-       f.use_icept + f.use_slope * (f.last_day_n + 90) - f.half_90 AS proj_90_lo,
-       f.use_icept + f.use_slope * (f.last_day_n + 90) + f.half_90 AS proj_90_hi,
+       c.cur_val + f.use_slope * 30 - f.half_30     AS proj_30_lo,
+       c.cur_val + f.use_slope * 30 + f.half_30     AS proj_30_hi,
+       c.cur_val + f.use_slope * 90 - f.half_90     AS proj_90_lo,
+       c.cur_val + f.use_slope * 90 + f.half_90     AS proj_90_hi,
        f.slope_ci                                   AS slope_ci_per_day,
        -- GREATEST(0,...): if current busy% already exceeds the saturation
        -- threshold, report 0 (saturated now) rather than a negative "days".
@@ -561,7 +637,11 @@ SELECT f.dbid,
             WHEN f.use_slope = 0 OR f.r2 IS NULL THEN 'FLAT'
             WHEN f.r2 < cfg.r2_gate              THEN 'LOW_CONFIDENCE'
             ELSE 'OK'
-       END                                          AS quality
+       END                                          AS quality,
+       n.newest_day,
+       CASE WHEN f.last_day >= n.newest_day - cfg.stale_days
+            THEN 'Y' ELSE 'N' END                   AS is_current
 FROM   pick f
 JOIN   cur c ON c.dbid = f.dbid AND c.con_dbid = f.con_dbid AND c.metric = f.metric
+JOIN   nd  n ON n.dbid = f.dbid
 CROSS  JOIN cap_cfg cfg;

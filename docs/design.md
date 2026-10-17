@@ -250,8 +250,26 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
 - Two fits per series: the primary over `train_days` (90) and a "recent" fit
   over `recent_days` (28); `accel_ratio = recent_slope / slope` (>1.5 in the
   report highlights accelerating growth).
-- Projections are `intercept + slope·(last_day_n + h)` for h ∈ {30,90,180,365}.
-- `days_to_full = FLOOR((limit − cur_used) / slope)` when `slope > 0`.
+- **Anchored at today.** Projections are `cur_used + slope·h` for
+  h ∈ {30,90,180,365}: the fit supplies the slope, the current value supplies
+  the starting point. `days_to_full = GREATEST(0, FLOOR((limit − cur_used) /
+  slope))` when `slope > 0` starts from the same point, so the +30 column and
+  the countdown describe one line (before this they could disagree by the last
+  day's residual, e.g. a stepped series whose fitted line sat far below its
+  current value). `icept` is still the fitted intercept, so residuals stay
+  `y − (icept + slope·day_n)`. A series whose last point sits on its fitted
+  line projects exactly as before (the `FIX_LINEAR` fixture asserts it).
+- **Clamp and flag.** `days_to_full`, `_lo` and `_hi` are clamped at 0: a
+  ceiling already below the current usage (an override under the used size)
+  reads 0, not a negative count. `limit_below_used = 'Y'` marks those rows
+  (`limit_bytes < cur_used`, so `pct_used` is over 100). A flat series has no
+  countdown at all (`days_to_full` NULL) whatever its ceiling.
+- **Staleness.** `newest_day` is the newest day of the view's daily source for
+  the same dbid, and `is_current = 'Y'` when `last_day >= newest_day −
+  stale_days` (knob, default 3). A dropped tablespace or a series that stopped
+  arriving keeps its last forecast until AWR purges it; `is_current = 'N'` says
+  so. The test uses the data only (no `SYSDATE`). The CAPR_ views pass the flag
+  through; nothing filters on it yet.
 - **Prediction intervals (M9.1)**, classic OLS closed forms so everything stays
   hand-auditable: `SSE = SYY − SXY²/SXX`, `resid_se = √(SSE/(n−2))`, and each
   projection gets a 95% new-observation band `± t·resid_se·√(1 + 1/n +
@@ -262,8 +280,10 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   t-distribution in SQL, so `t ≈ 1.96 + 2.4/df` — within ~1% for df ≥ 10, and
   `min_train_days` guarantees df ≥ 12 before a forecast is trusted. The
   approximation is part of the contract (the fixture installer computes
-  expectations with the same formula). A perfectly linear or flat series has
-  SSE = 0, so its bands collapse onto the point projection.
+  expectations with the same formula). The half-widths are centred on the
+  fit's own x̄ as before, but the band is drawn around the anchored projection:
+  `proj_h ± half_h`. A perfectly linear or flat series has SSE = 0, so its
+  bands collapse onto the point projection.
 - **Robust slope (M9.2)** — knob `slope_method` (`CAP_CONFIG` is numeric:
   **0 = OLS**, the default, **1 = THEILSEN**). OLS minimises *squared* error, so
   a single step — a bulk load, an import, a partition drop — drags the whole
@@ -272,19 +292,21 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   of the pairwise slopes `(y_j − y_i)/(x_j − x_i)` over every `i < j` in the
   training window (a self-join, O(n²) ≈ 4k pairs at 90 days); its 29% breakdown
   point means a minority of stepped pairs cannot move it. The intercept is the
-  companion `MEDIAN(y − slope·x)`. **Both** estimators are always computed and
-  exposed (`ols_slope_bpd` / `ts_slope_bpd`, `ols_slope_per_day` /
-  `ts_slope_per_day`, `ts_icept`), and the `slope_method` column reports which
-  one the row actually used — it falls back to OLS if Theil–Sen could not be
-  computed. When THEILSEN is selected the chosen line drives `slope_bpd`,
-  `icept`, every `proj_*`, `days_to_full` / `days_to_sat`, **both** halves of
-  `accel_ratio` (mixing estimators would manufacture acceleration) and the
-  `slope = 0` FLAT test. `r2`, `resid_se`, `slope_ci_bpd` and the M9.1
-  half-widths stay **OLS** quantities: there is no closed-form Theil–Sen
-  prediction interval in SQL, so the bands are OLS residual bands drawn *around
-  the chosen line*, and `days_to_full_lo/hi` remain the OLS slope-CI range.
-  Acceptable for v1 and explicitly documented; with the default
-  `slope_method = 0` the output is byte-identical to before. Applies to
+  companion `MEDIAN(y − slope·x)`. Theil–Sen is computed **only when asked**:
+  the pair self-joins read an input that is empty unless `slope_method = 1`,
+  so the default pays nothing for them (the fixture's `CAPF_TBSPC_FORECAST`
+  runs in roughly a quarter of the time) and `ts_slope_bpd` / `ts_slope_per_day` /
+  `ts_icept` are NULL. `ols_slope_bpd` / `ols_slope_per_day` are always there,
+  and the `slope_method` column reports which estimator the row actually used:
+  OLS when Theil–Sen was not computed or could not be. When THEILSEN is
+  selected the chosen slope drives `slope_bpd`, `icept`, every `proj_*`,
+  `days_to_full` / `days_to_sat`, **both** halves of `accel_ratio` (mixing
+  estimators would manufacture acceleration) and the `slope = 0` FLAT test.
+  `r2`, `resid_se`, `slope_ci_bpd` and the M9.1 half-widths stay **OLS**
+  quantities: there is no closed-form Theil–Sen prediction interval in SQL, so
+  the bands are OLS residual bands drawn around the anchored projection, and
+  `days_to_full_lo/hi` remain the OLS slope-CI range (so under THEILSEN the
+  point `days_to_full` can fall outside its own range). Applies to
   `CAPF_CPU_TREND` as well.
 - **Change-point reset (M9.3)** — knobs `reset_on_shrink` (1) and
   `shrink_mad_k` (6), tablespaces only. After a purge or archive job the history
@@ -305,7 +327,9 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   answer, because we genuinely do not yet know the post-purge growth rate. Note
   that the purge day still shows up as a `LOW` `CAPA_TBSPC_ANOM`; the reset is
   about the *fit*, not about hiding the event. The M9.4 backtest fits its own
-  window and is deliberately left alone.
+  window and is deliberately left alone. Its REGR replay is anchored like the
+  live projections: `pred = actual(cutoff) + slope·(day_n − cutoff_n)`, the
+  anchor being the last training day's actual value.
 - **Quality** (priority order): `INSUFFICIENT_HISTORY` (`train_n <
   min_train_days`) → `FLAT` (chosen `slope = 0`, or `R² IS NULL`) → `LOW_CONFIDENCE`
   (`R² < r2_gate`) → `OK`. Note the `FLAT` definition: Oracle's `REGR_R2`
@@ -313,7 +337,14 @@ Ordinary least squares via `REGR_*` over `day_n = day_dt − DATE '2020-01-01'`
   zero-variance *x*, so flatness is detected by `slope = 0`, not by a NULL R².
 - `CAPF_CPU_TREND` applies the same fit per `(dbid, con_dbid, metric)` to
   `BUSY_PCT` (daily average), `BUSY_P95`, `BUSY_PEAK` (M10.1), `DB_CPU_SEC`,
-  `DB_CPU_PCT` and `DB_CPU_P95` (M10.2). Every percent-of-capacity metric gets
+  `DB_CPU_PCT` and `DB_CPU_P95` (M10.2). It fits **complete days only**
+  (`is_complete = 'Y'` in `CAPD_CPU_DAILY` / `CAPD_DBTIME_DAILY`): a partial,
+  restart or outage day averages over less than `complete_day_pct` of the day
+  and would pull the line. `last_day`, `train_start`, `cur_val` and the anchor
+  all come from complete days; `newest_day` counts every day with a value, so
+  today's partial day does not make a series stale. Projections are anchored
+  at `cur_val`, which on a weekly-seasonal metric means the last complete day's
+  weekday level. Every percent-of-capacity metric gets
   `days_to_sat` (+ `_lo/_hi`) against `cpu_sat_pct`; `DB_CPU_SEC` has no
   ceiling, so its `days_to_sat` is NULL. `CAPR_ALERTS.CPU_SAT` keys off
   `BUSY_P95` by default (`cpu_sat_on_p95 = 1`; set 0 for the daily average),
@@ -361,10 +392,14 @@ same M9.1 prediction bands (`t ≈ 1.96 + 2.4/df`) and the same quality ladder a
 ```
 sat_value     = limit_value · series_sat_pct/100        (knob, default 90)
 days_to_limit = FLOOR((sat_value − cur_val) / slope)    NULL if no limit or slope <= 0
+proj_h        = cur_val + slope · h                     anchored at today, as in Layer 3
 ```
 
 `days_to_limit_lo/_hi` bound it with the 95% CI on the slope (lo = worst case);
-`pct_of_limit` is the how-close-now number, independent of the fit. The
+`pct_of_limit` is the how-close-now number, independent of the fit. The fit
+reads complete days only (`is_complete = 'Y'`): the flow series `REDO_GB_DAY`
+drops its partial, restart and outage days, and the level series carry `'Y'`
+on every day. `newest_day` / `is_current` work as in Layer 3. The
 arithmetic is **copied**, not shared, on purpose: `CAPF_TBSPC_FORECAST` and
 `CAPF_CPU_TREND` grow robust slopes and change-point resets on their own
 schedule, while this view stays a plain, hand-auditable OLS fit.

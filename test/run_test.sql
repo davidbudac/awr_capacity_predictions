@@ -29,8 +29,14 @@ DECLARE
     v_num2  NUMBER;
     v_num3  NUMBER;
     v_str   VARCHAR2(40);
+    v_str2  VARCHAR2(40);
+    v_c1    VARCHAR2(1);
     v_msg   VARCHAR2(4000);
     v_r2    NUMBER;
+    meta_last_day DATE;
+    -- meta_n() cannot be called inside SQL (PLS-00231): these carry the
+    -- values the new forecast assertions use in WHERE / SET clauses.
+    n_aux   NUMBER;
 
     FUNCTION meta_n(p VARCHAR2) RETURN NUMBER IS x NUMBER;
     BEGIN SELECT nval INTO x FROM cap_fixture_meta WHERE mkey = p; RETURN x; END;
@@ -75,6 +81,7 @@ BEGIN
     d_probe   := meta_d('PROBE_DAY');
     n_slope   := meta_n('LINEAR_SLOPE');
     n_dtf     := meta_n('LINEAR_DTF');
+    meta_last_day := meta_d('LAST_DAY');
 
     DBMS_OUTPUT.PUT_LINE('=== FIX_LINEAR forecast ===');
     SELECT slope_bpd, r2, days_to_full, quality
@@ -121,9 +128,11 @@ BEGIN
     SELECT COUNT(*) INTO v_n FROM capr_alerts
       WHERE kind = 'TBSPC_NEARFULL' AND series_key = 'FIX_NEARFULL' AND severity = 'CRIT';
     chk_int('NEARFULL CRIT alert raised', v_n, 1);
+    -- FIX_OVERFULL (limit under its usage, 150%) is the only other series at
+    -- or over nearfull_warn_pct, so the "nobody else" check names both.
     SELECT COUNT(*) INTO v_n FROM capr_alerts
-      WHERE kind = 'TBSPC_NEARFULL' AND series_key <> 'FIX_NEARFULL';
-    chk_int('NEARFULL alerts only for FIX_NEARFULL', v_n, 0);
+      WHERE kind = 'TBSPC_NEARFULL' AND series_key NOT IN ('FIX_NEARFULL', 'FIX_OVERFULL');
+    chk_int('NEARFULL alerts only for FIX_NEARFULL / FIX_OVERFULL', v_n, 0);
 
     DBMS_OUTPUT.PUT_LINE('=== FIX_FILLING (M8.1: TBSPC_FULL alert) ===');
     SELECT days_to_full, pct_used, quality INTO v_n, v_num, v_str
@@ -148,6 +157,15 @@ BEGIN
       FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
     chk_close('LINEAR proj_30_lo = proj_30', v_num2, v_num, 0.000001);
     chk_close('LINEAR proj_30_hi = proj_30', v_num3, v_num, 0.000001);
+    -- Anchoring leaves FIX_LINEAR unchanged by construction: its fitted line
+    -- passes through cur_used, so cur + 30 * slope and the fitted-line value
+    -- icept + slope * (last_day_n + 30) are the same closed form.
+    chk_close('LINEAR proj_30_bytes = cur + 30 * slope (anchored)',
+              v_num, meta_n('LINEAR_PRED30_DAY'), 0.000000001);
+    SELECT icept + slope_bpd * (last_day - DATE '2020-01-01' + 30) INTO v_num2
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
+    chk_close('LINEAR fitted-line +30 = anchored +30 (line passes through cur_used)',
+              v_num2, meta_n('LINEAR_PRED30_DAY'), 0.000000001);
     SELECT days_to_full_lo, days_to_full_hi INTO v_num, v_num2
       FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
     -- headroom/slope is EXACTLY 4990.0 here, so a rounding epsilon on the
@@ -167,6 +185,27 @@ BEGIN
       FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_ZIGZAG';
     chk_close('ZIGZAG proj_30_lo',      v_num,  meta_n('ZZ_P30_LO'), 0.000001);
     chk_close('ZIGZAG proj_30_hi',      v_num2, meta_n('ZZ_P30_HI'), 0.000001);
+    -- The anchor is the last actual (an even day, +20 MiB off the line); icept
+    -- is still the fitted intercept, so the fitted line still reaches the old
+    -- +30 value and the gap between the two is the last day's residual.
+    SELECT cur_used, icept + slope_bpd * (last_day - DATE '2020-01-01' + 30)
+      INTO v_num, v_num2
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_ZIGZAG';
+    chk_int  ('ZIGZAG cur_used (anchor)', v_num, meta_n('ZZ_CUR'));
+    chk_close('ZIGZAG fitted-line +30 (icept unchanged)', v_num2, meta_n('ZZ_P30_FIT'), 0.000001);
+    chk_true ('ZIGZAG anchored +30 differs from the fitted-line +30 ('
+              || ROUND((meta_n('ZZ_P30') - meta_n('ZZ_P30_FIT')) / 1048576, 3) || ' MiB)',
+              ABS(meta_n('ZZ_P30') - meta_n('ZZ_P30_FIT')) > 1048576);
+    -- Every TBSPC row: proj_h = cur_used + slope * h, and the band is
+    -- symmetric around it.
+    SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+      WHERE slope_bpd IS NOT NULL
+        AND (ABS(proj_30_bytes  - (cur_used + slope_bpd * 30))  > 1
+          OR ABS(proj_90_bytes  - (cur_used + slope_bpd * 90))  > 1
+          OR ABS(proj_180_bytes - (cur_used + slope_bpd * 180)) > 1
+          OR ABS(proj_365_bytes - (cur_used + slope_bpd * 365)) > 1
+          OR ABS((proj_30_hi - proj_30_bytes) - (proj_30_bytes - proj_30_lo)) > 1);
+    chk_int('TBSPC rows off the anchored projection', v_n, 0);
     SELECT days_to_full, days_to_full_lo, days_to_full_hi INTO v_num, v_num2, v_num3
       FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_ZIGZAG';
     chk_int('ZIGZAG days_to_full',    v_num,  meta_n('ZZ_DTF'));
@@ -222,10 +261,15 @@ BEGIN
     chk_int('CAPR_TBSPC_DAYS_TO_FULL FILLING days_to_full', v_n, meta_n('FILLING_DTF'));
     chk_int('CAPR_TBSPC_DAYS_TO_FULL FILLING rank_dtf', v_num, 1);
     chk_str('CAPR_TBSPC_DAYS_TO_FULL FILLING sev_dtf', v_str, 'CRIT');
-    -- Section 1b: FIX_NEARFULL is the fullest RIGHT NOW (97%), any fit quality.
+    -- Section 1b: FIX_OVERFULL (150%) is the fullest RIGHT NOW, then
+    -- FIX_NEARFULL (97%), any fit quality.
+    SELECT rank_nearfull, sev_nearfull INTO v_num, v_str
+      FROM capr_tbspc_days_to_full WHERE tablespace_name = 'FIX_OVERFULL';
+    chk_int('CAPR_TBSPC_DAYS_TO_FULL OVERFULL rank_nearfull', v_num, 1);
+    chk_str('CAPR_TBSPC_DAYS_TO_FULL OVERFULL sev_nearfull', v_str, 'CRIT');
     SELECT rank_nearfull, sev_nearfull INTO v_num, v_str
       FROM capr_tbspc_days_to_full WHERE tablespace_name = 'FIX_NEARFULL';
-    chk_int('CAPR_TBSPC_DAYS_TO_FULL NEARFULL rank_nearfull', v_num, 1);
+    chk_int('CAPR_TBSPC_DAYS_TO_FULL NEARFULL rank_nearfull', v_num, 2);
     chk_str('CAPR_TBSPC_DAYS_TO_FULL NEARFULL sev_nearfull', v_str, 'CRIT');
     SELECT COUNT(*) INTO v_n FROM capr_tbspc_days_to_full WHERE db_pdb <> 'FIXCDB';
     chk_int('CAPR section views resolve db_pdb', v_n, 0);
@@ -388,22 +432,23 @@ BEGIN
     DBMS_OUTPUT.PUT_LINE('=== M9.2 Theil-Sen robust slope (knob slope_method) ===');
     SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'slope_method';
     chk_int('knob slope_method default (0 = OLS, 1 = THEILSEN)', v_num, 0);
-    SELECT slope_method, slope_bpd, ols_slope_bpd, ts_slope_bpd
-      INTO v_str, v_num, v_num2, v_num3
+    SELECT slope_method, slope_bpd, ols_slope_bpd
+      INTO v_str, v_num, v_num2
       FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
     chk_str  ('LINEAR slope_method label', v_str, 'OLS');
     chk_close('LINEAR slope_bpd = ols_slope_bpd under the default', v_num, v_num2, 0.000001);
-    chk_close('LINEAR ts_slope_bpd (exactly 10 MiB/day)', v_num3, n_slope, 0.000001);
-    SELECT ts_slope_bpd INTO v_num
-      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_ZIGZAG';
-    chk_close('ZIGZAG ts_slope_bpd = median of the ' || meta_n('ZZ_TS_PAIRS')
-              || ' pairwise slopes', v_num, meta_n('ZZ_TS_SLOPE'), 0.000001);
+    -- Theil-Sen is computed only when slope_method = 1: under the default
+    -- every ts_* column is NULL.
+    SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+      WHERE ts_slope_bpd IS NOT NULL OR ts_icept IS NOT NULL;
+    chk_int('TBSPC ts_slope_bpd / ts_icept IS NULL under slope_method = 0', v_n, 0);
+    SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
+      WHERE ts_slope_per_day IS NOT NULL OR ts_icept IS NOT NULL;
+    chk_int('CPU ts_slope_per_day / ts_icept IS NULL under slope_method = 0', v_n, 0);
     -- The whole point of M9.2: ONE +2 GiB step drags the OLS slope ~4x off the
-    -- true 5 MiB/day rate, while the pairwise median does not move at all.
-    SELECT ts_slope_bpd, ols_slope_bpd INTO v_num, v_num2
+    -- true 5 MiB/day rate (the knob flip below shows the median does not move).
+    SELECT ols_slope_bpd INTO v_num2
       FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_SPIKE';
-    chk_close('SPIKE ts_slope_bpd within 1% of the true 5 MiB/day',
-              v_num, meta_n('SPIKE_RATE'), 0.01);
     chk_true ('SPIKE ols_slope_bpd > 3x the true rate ('
               || ROUND(v_num2 / meta_n('SPIKE_RATE'), 2) || 'x)',
               v_num2 > 3 * meta_n('SPIKE_RATE'));
@@ -414,6 +459,17 @@ BEGIN
       FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_SPIKE';
     UPDATE cap_config SET cfg_value = 1 WHERE cfg_name = 'slope_method';
     BEGIN
+        SELECT ts_slope_bpd INTO v_num
+          FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
+        chk_close('LINEAR ts_slope_bpd with knob=1 (exactly 10 MiB/day)', v_num, n_slope, 0.000001);
+        SELECT ts_slope_bpd INTO v_num
+          FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_ZIGZAG';
+        chk_close('ZIGZAG ts_slope_bpd with knob=1 = median of the ' || meta_n('ZZ_TS_PAIRS')
+                  || ' pairwise slopes', v_num, meta_n('ZZ_TS_SLOPE'), 0.000001);
+        SELECT ts_slope_bpd INTO v_num
+          FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_SPIKE';
+        chk_close('SPIKE ts_slope_bpd with knob=1 within 1% of the true 5 MiB/day',
+                  v_num, meta_n('SPIKE_RATE'), 0.01);
         SELECT slope_method, slope_bpd INTO v_str, v_num
           FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_SPIKE';
         chk_str  ('SPIKE slope_method with knob=1', v_str, 'THEILSEN');
@@ -486,6 +542,185 @@ BEGIN
     chk_int('PURGE has exactly one anomaly', v_n, 1);
     SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE series_key = 'FIX_PURGE';
     chk_int('PURGE raises no CAPR_ALERTS (cliff predates the alert window)', v_n, 0);
+
+    DBMS_OUTPUT.PUT_LINE('=== clamp + limit_below_used (FIX_OVERFULL) ===');
+    -- Flat at 1.5 GiB under a 1 GiB override: FLAT, so days_to_full is NULL
+    -- (no growth to count with), not 0. limit_below_used and pct_used say
+    -- the tablespace is over its ceiling, and the near-full alert fires.
+    SELECT pct_used, quality, limit_below_used, limit_bytes, cur_used, limit_source
+      INTO v_num, v_str, v_c1, v_num2, v_num3, v_str2
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_OVERFULL';
+    chk_close('OVERFULL pct_used', v_num, meta_n('OVERFULL_PCT'), 0.000001);
+    chk_str  ('OVERFULL quality', v_str, 'FLAT');
+    chk_str  ('OVERFULL limit_below_used', v_c1, 'Y');
+    chk_int  ('OVERFULL limit_bytes (override)', v_num2, meta_n('OVERFULL_LIMIT'));
+    chk_int  ('OVERFULL cur_used', v_num3, meta_n('OVERFULL_CUR'));
+    chk_str  ('OVERFULL limit_source', v_str2, 'OVERRIDE');
+    SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+      WHERE tablespace_name = 'FIX_OVERFULL'
+        AND days_to_full IS NULL AND days_to_full_lo IS NULL AND days_to_full_hi IS NULL;
+    chk_int('OVERFULL days_to_full / _lo / _hi NULL (FLAT)', v_n, 1);
+    SELECT COUNT(*) INTO v_n FROM capr_alerts
+      WHERE kind = 'TBSPC_NEARFULL' AND series_key = 'FIX_OVERFULL' AND severity = 'CRIT';
+    chk_int('OVERFULL raises TBSPC_NEARFULL CRIT', v_n, 1);
+    SELECT COUNT(*) INTO v_n FROM capr_alerts
+      WHERE kind = 'TBSPC_FULL' AND series_key = 'FIX_OVERFULL';
+    chk_int('OVERFULL raises no TBSPC_FULL (flat)', v_n, 0);
+    SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+      WHERE limit_below_used = 'Y' AND tablespace_name <> 'FIX_OVERFULL';
+    chk_int('no other row has limit_below_used = Y', v_n, 0);
+    SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast WHERE days_to_full < 0
+       OR days_to_full_lo < 0 OR days_to_full_hi < 0;
+    chk_int('no negative days_to_full / _lo / _hi', v_n, 0);
+    SELECT limit_below_used INTO v_c1 FROM capr_tbspc_days_to_full
+      WHERE tablespace_name = 'FIX_OVERFULL';
+    chk_str('CAPR_TBSPC_DAYS_TO_FULL passes limit_below_used', v_c1, 'Y');
+    SELECT limit_below_used INTO v_num FROM capr_fit
+      WHERE kind = 'TBSPC' AND series = 'FIX_OVERFULL';
+    chk_int('CAPR_FIT limit_below_used = 1 for OVERFULL', v_num, 1);
+    -- The clamp on a GROWING series: an override at 1 GiB under FIX_LINEAR's
+    -- 1.27 GiB would give FLOOR(-26.0) = -26 days without it. Rolled back.
+    SAVEPOINT u4a_clamp;
+    BEGIN
+        INSERT INTO cap_tbspc_override (dbid, con_dbid, tablespace_name, limit_bytes, exclude_flag, note)
+        VALUES (v_dbid, v_dbid, 'FIX_LINEAR', 1073741824, 'N', 'run_test clamp probe');
+        SELECT days_to_full, days_to_full_lo, days_to_full_hi, limit_below_used
+          INTO v_num, v_num2, v_num3, v_c1
+          FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_LINEAR';
+        chk_int('clamp probe LINEAR days_to_full (limit < cur)', v_num, 0);
+        chk_int('clamp probe LINEAR days_to_full_lo', v_num2, 0);
+        chk_int('clamp probe LINEAR days_to_full_hi', v_num3, 0);
+        chk_str('clamp probe LINEAR limit_below_used', v_c1, 'Y');
+    EXCEPTION
+        WHEN OTHERS THEN ROLLBACK TO SAVEPOINT u4a_clamp; RAISE;
+    END;
+    ROLLBACK TO SAVEPOINT u4a_clamp;
+
+    DBMS_OUTPUT.PUT_LINE('=== staleness (stale_days / is_current, FIX_DROPPED) ===');
+    SELECT cfg_value INTO v_num FROM cap_config WHERE cfg_name = 'stale_days';
+    chk_int('knob stale_days default', v_num, 3);
+    SELECT last_day, newest_day, is_current, quality, train_n, cur_used
+      INTO d_tstart, d_reset, v_c1, v_str, v_n, v_num
+      FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_DROPPED';
+    chk_int  ('DROPPED last_day', d_tstart - meta_d('DROPPED_LAST_DAY'), 0);
+    chk_int  ('DROPPED newest_day = LAST_DAY', d_reset - meta_d('LAST_DAY'), 0);
+    chk_int  ('DROPPED newest_day - last_day', d_reset - d_tstart, meta_n('DROPPED_STALE_GAP'));
+    chk_str  ('DROPPED is_current', v_c1, 'N');
+    chk_str  ('DROPPED quality (still fits)', v_str, 'OK');
+    chk_int  ('DROPPED train_n', v_n, meta_n('DROPPED_TRAIN_N'));
+    chk_int  ('DROPPED cur_used (its last row)', v_num, meta_n('DROPPED_CUR'));
+    SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+      WHERE tablespace_name <> 'FIX_DROPPED' AND is_current <> 'Y';
+    chk_int('every other TBSPC row is_current = Y', v_n, 0);
+    SELECT COUNT(*) INTO v_n FROM capf_tbspc_forecast
+      WHERE newest_day <> meta_last_day;
+    chk_int('TBSPC newest_day = LAST_DAY on every row', v_n, 0);
+    SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
+      WHERE is_current <> 'Y' OR newest_day <> meta_last_day;
+    chk_int('CPU rows is_current = Y, newest_day = LAST_DAY', v_n, 0);
+    SELECT COUNT(*) INTO v_n FROM capf_series_forecast
+      WHERE is_current <> 'Y' OR newest_day <> meta_last_day;
+    chk_int('SERIES rows is_current = Y, newest_day = LAST_DAY', v_n, 0);
+    SELECT is_current INTO v_c1 FROM capr_tbspc_days_to_full WHERE tablespace_name = 'FIX_DROPPED';
+    chk_str('CAPR_TBSPC_DAYS_TO_FULL passes is_current', v_c1, 'N');
+    SELECT is_current INTO v_num FROM capr_fit WHERE kind = 'TBSPC' AND series = 'FIX_DROPPED';
+    chk_int('CAPR_FIT is_current = 0 for DROPPED', v_num, 0);
+    SELECT COUNT(*) INTO v_n FROM capr_fit WHERE is_current IS NULL
+       OR (kind = 'TBSPC' AND limit_below_used IS NULL)
+       OR (kind <> 'TBSPC' AND limit_below_used IS NOT NULL);
+    chk_int('CAPR_FIT flags set per kind', v_n, 0);
+    SELECT COUNT(*) INTO v_n FROM capr_cpu_trend WHERE is_current <> 'Y';
+    chk_int('CAPR_CPU_TREND passes is_current', v_n, 0);
+    SELECT COUNT(*) INTO v_n FROM capr_series WHERE is_current <> 'Y';
+    chk_int('CAPR_SERIES passes is_current', v_n, 0);
+    -- The boundary is last_day >= newest_day - stale_days: 30 days behind is
+    -- stale at stale_days = 29 and current at 30. Uncommitted, then reset.
+    BEGIN
+        n_aux := meta_n('DROPPED_STALE_GAP');
+        UPDATE cap_config SET cfg_value = n_aux - 1 WHERE cfg_name = 'stale_days';
+        SELECT is_current INTO v_c1 FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_DROPPED';
+        chk_str('DROPPED is_current with stale_days = gap - 1', v_c1, 'N');
+        UPDATE cap_config SET cfg_value = n_aux WHERE cfg_name = 'stale_days';
+        SELECT is_current INTO v_c1 FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_DROPPED';
+        chk_str('DROPPED is_current with stale_days = gap', v_c1, 'Y');
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'stale_days';
+            COMMIT;
+            RAISE;
+    END;
+    UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'stale_days';
+    COMMIT;
+
+    DBMS_OUTPUT.PUT_LINE('=== anchoring on CPU and SERIES fits ===');
+    -- FIXPDB1 DB_CPU_PCT: the +18 step in the last 7 days leaves the last
+    -- point above the fitted line, so anchored and fitted-line +30 differ.
+    n_aux := meta_n('PDB_CON_DBID');
+    SELECT train_n, cur_val, slope_per_day, proj_30,
+           icept + slope_per_day * (last_day - DATE '2020-01-01' + 30)
+      INTO v_n, v_num, v_num2, v_num3, v_r2
+      FROM capf_cpu_trend
+      WHERE dbid = v_dbid AND con_dbid = n_aux AND metric = 'DB_CPU_PCT';
+    chk_int  ('PDB DB_CPU_PCT train_n (restart day has no row)', v_n, meta_n('PDB_DBCPU_TRAIN_N'));
+    chk_close('PDB DB_CPU_PCT cur_val', v_num, meta_n('PDB_DBCPU_CUR'), 0.000001);
+    chk_close('PDB DB_CPU_PCT slope', v_num2, meta_n('PDB_DBCPU_SLOPE'), 0.000001);
+    chk_close('PDB DB_CPU_PCT proj_30 = cur + 30 * slope', v_num3, meta_n('PDB_DBCPU_P30'), 0.000001);
+    chk_close('PDB DB_CPU_PCT fitted-line +30 (icept unchanged)', v_r2, meta_n('PDB_DBCPU_P30_FIT'), 0.000001);
+    SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
+      WHERE slope_per_day IS NOT NULL
+        AND (ABS(proj_30 - (cur_val + slope_per_day * 30)) > 0.000001
+          OR ABS(proj_90 - (cur_val + slope_per_day * 90)) > 0.000001);
+    chk_int('CPU rows off the anchored projection', v_n, 0);
+    -- SESSIONS is exactly linear, so anchoring changes nothing: 440 + 2 * 30.
+    SELECT proj_30 INTO v_num FROM capf_series_forecast
+      WHERE dbid = v_dbid AND series = 'SESSIONS';
+    chk_close('SESSIONS proj_30 = 440 + 2 * 30', v_num, meta_n('SESS_CUR') + 2 * 30, 0.000001);
+    SELECT COUNT(*) INTO v_n FROM capf_series_forecast
+      WHERE slope_per_day IS NOT NULL
+        AND (ABS(proj_30 - (cur_val + slope_per_day * 30)) > 0.000001
+          OR ABS(proj_90 - (cur_val + slope_per_day * 90)) > 0.000001);
+    chk_int('SERIES rows off the anchored projection', v_n, 0);
+
+    DBMS_OUTPUT.PUT_LINE('=== complete-day fits (is_complete = Y only) ===');
+    SELECT train_n, train_start INTO v_n, d_tstart FROM capf_cpu_trend
+      WHERE dbid = v_dbid AND con_dbid = v_dbid AND metric = 'BUSY_PCT';
+    chk_int('BUSY_PCT train_n, train_days 90 (no partial day in the window)', v_n, meta_n('CPU_TRAIN_N'));
+    SELECT train_n INTO v_n FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'REDO_GB_DAY';
+    chk_int('REDO_GB_DAY train_n, train_days 90', v_n, meta_n('REDO_TRAIN_N'));
+    SELECT train_n INTO v_n FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'SESSIONS';
+    chk_int('SESSIONS train_n, train_days 90 (level series, every day)', v_n, meta_n('SESS_TRAIN_N'));
+    -- Widen the window to 120 days so it holds the partial day (and day 1):
+    -- the fits must skip the partial day. Uncommitted, then reset.
+    BEGIN
+        UPDATE cap_config SET cfg_value = 120 WHERE cfg_name = 'train_days';
+        SELECT COUNT(*) INTO v_num FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND busy_pct IS NOT NULL
+            AND day_dt > meta_last_day - 120;
+        SELECT train_n, train_start INTO v_n, d_tstart FROM capf_cpu_trend
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND metric = 'BUSY_PCT';
+        chk_int('BUSY_PCT train_n, train_days 120 (partial day skipped; '
+                || v_num || ' rows in the window)', v_n, meta_n('CPU_TRAIN_N_120'));
+        chk_int('BUSY_PCT rows in the 120-day window = train_n + the partial day',
+                v_num, meta_n('CPU_TRAIN_N_120') + 1);
+        chk_int('BUSY_PCT train_start = day 1', d_tstart - meta_d('BASE_DAY'), 1);
+        n_aux := meta_n('CPU_TRAIN_N_120');
+        SELECT COUNT(*) INTO v_n FROM capf_cpu_trend
+          WHERE dbid = v_dbid AND con_dbid = v_dbid
+            AND metric IN ('BUSY_P95', 'BUSY_PEAK', 'DB_CPU_SEC', 'DB_CPU_PCT', 'DB_CPU_P95')
+            AND train_n <> n_aux;
+        chk_int('every root CPU metric skips the partial day', v_n, 0);
+        SELECT train_n INTO v_n FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'REDO_GB_DAY';
+        chk_int('REDO_GB_DAY train_n, train_days 120 (partial day skipped)', v_n, meta_n('REDO_TRAIN_N_120'));
+        SELECT train_n INTO v_n FROM capf_series_forecast WHERE dbid = v_dbid AND series = 'SESSIONS';
+        chk_int('SESSIONS train_n, train_days 120', v_n, meta_n('SESS_TRAIN_N_120'));
+    EXCEPTION
+        WHEN OTHERS THEN
+            UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'train_days';
+            COMMIT;
+            RAISE;
+    END;
+    UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'train_days';
+    COMMIT;
 
     DBMS_OUTPUT.PUT_LINE('=== anomaly deviation as % of baseline (median / train_days avg) ===');
     -- FIX_SPIKE: 640 blocks/day (SPIKE_RATE = 5 MiB/day) every day, plus a

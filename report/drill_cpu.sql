@@ -99,8 +99,10 @@ PROMPT =========================================================================
 PROMPT  CAPACITY DRILL-DOWN  --  CPU metric &drill_metric
 PROMPT ================================================================================
 PROMPT  Read-only. Every number below is reproducible by hand from the columns shown.
-PROMPT  Fit window = the last &k_train days (CAP_CONFIG train_days), day index
-PROMPT  DAY_N = day_dt - DATE '2020-01-01' exactly as ddl/30_forecast_views.sql uses.
+PROMPT  Fit window = the COMPLETE days (is_complete = Y) from TRAIN_START to
+PROMPT  LAST_DAY, inside the last &k_train days (CAP_CONFIG train_days). Partial,
+PROMPT  restart and outage days are left out here exactly as the view leaves them out.
+PROMPT  Day index DAY_N = day_dt - DATE '2020-01-01' exactly as ddl/30_forecast_views.sql uses.
 PROMPT  Saturation threshold cpu_sat_pct = &k_sat (percent metrics only).
 PROMPT ================================================================================
 
@@ -122,9 +124,9 @@ END;
 
 PROMPT
 PROMPT == 1. FIT HEADER (CAPF_CPU_TREND + CAPR_CONTAINER) ==
-PROMPT    FIT(day_n) = ICEPT + SLOPE/DAY * day_n. CAPF_CPU_TREND publishes no
-PROMPT    intercept, so ICEPT is recovered exactly from the projection it does
-PROMPT    publish: ICEPT = PROJ_30 - SLOPE * (last_day_n + 30).
+PROMPT    FIT(day_n) = ICEPT + SLOPE/DAY * day_n (CAPF_CPU_TREND.icept, the fitted
+PROMPT    intercept). Projections start from today instead: +h days = CURRENT +
+PROMPT    SLOPE/DAY * h, and DAYS_SAT counts from CURRENT too.
 PROMPT    R2/QUALITY grade the fit (INSUFFICIENT_HISTORY = TRAIN_N < &k_min).
 PROMPT    +-CI = 95% half-width on the slope; WORST/BEST = days-to-saturation at
 PROMPT    the fast/slow edge of that CI (BEST empty = might never saturate).
@@ -132,6 +134,7 @@ PROMPT    the fast/slow edge of that CI (BEST empty = might never saturate).
 COLUMN db_pdb    FORMAT A18            HEADING 'DB/PDB'
 COLUMN metric    FORMAT A11            HEADING 'METRIC'
 COLUMN last_day  FORMAT A10            HEADING 'LAST_DAY'
+COLUMN tr_start  FORMAT A11            HEADING 'TRAIN_START'
 COLUMN train_n   FORMAT 99990          HEADING 'TRAIN_N'
 COLUMN cur_val   FORMAT 99999990.000   HEADING 'CURRENT'
 COLUMN slope_day FORMAT 9999990.00000  HEADING 'SLOPE/DAY'
@@ -146,12 +149,12 @@ COLUMN quality   FORMAT A20            HEADING 'QUALITY'
 SELECT NVL(c.db_pdb, TO_CHAR(f.con_dbid))                       AS db_pdb,
        f.metric                                                 AS metric,
        TO_CHAR(f.last_day, 'YYYY-MM-DD')                        AS last_day,
+       TO_CHAR(f.train_start, 'YYYY-MM-DD')                     AS tr_start,
        f.train_n                                                AS train_n,
        f.cur_val                                                AS cur_val,
        f.slope_per_day                                          AS slope_day,
        f.slope_ci_per_day                                       AS slope_ci,
-       f.proj_30 - f.slope_per_day
-         * ((f.last_day - DATE '2020-01-01') + 30)              AS icept,
+       f.icept                                                  AS icept,
        f.r2                                                     AS r2,
        f.days_to_sat                                            AS dts,
        f.days_to_sat_lo                                         AS dts_lo,
@@ -171,6 +174,7 @@ PROMPT    since the previous sampled day, GAP = calendar days since it.
 PROMPT    P95/MAX/PEAK are the same day's companions (busy_p95/busy_max/
 PROMPT    busy_peak_pct for BUSY_*, db_cpu_p95/max/peak_pct for DB_CPU_*).
 PROMPT    N_IVL = snapshot intervals that survived the restart/reset guard.
+PROMPT    Incomplete days (is_complete = N) are not listed: the fit skips them.
 PROMPT    MED/SIGMA/THR/Z/FLAG come from CAPA_CPU_ANOM (daily busy% only, so
 PROMPT    they read n/a unless the metric is BUSY_PCT).
 
@@ -191,8 +195,9 @@ COLUMN thr     FORMAT 99990.00      HEADING 'THR'    NULL 'n/a'
 COLUMN z       FORMAT 99990.0       HEADING 'Z'      NULL 'n/a'
 COLUMN flag    FORMAT A4            HEADING 'FLAG'   NULL 'n/a'
 
--- Metric -> source column, mirroring the `src` CTE of CAPF_CPU_TREND.
--- Only the branch owning the requested metric contributes rows.
+-- Metric -> source column, mirroring the `src` CTE of CAPF_CPU_TREND,
+-- complete days only, as the view fits them. Only the branch owning the
+-- requested metric contributes rows.
 WITH src AS (
         SELECT dbid, con_dbid, day_dt, n_intervals,
                CASE '&drill_metric' WHEN 'BUSY_PCT'  THEN busy_pct
@@ -201,6 +206,7 @@ WITH src AS (
                busy_p95, busy_max, busy_peak_pct
         FROM   capd_cpu_daily
         WHERE  '&drill_metric' IN ('BUSY_PCT','BUSY_P95','BUSY_PEAK')
+          AND  is_complete = 'Y'
         UNION  ALL
         SELECT dbid, con_dbid, day_dt, n_intervals,
                CASE '&drill_metric' WHEN 'DB_CPU_SEC' THEN db_cpu_sec
@@ -209,6 +215,7 @@ WITH src AS (
                db_cpu_p95_pct, db_cpu_max_pct, db_cpu_peak_pct
         FROM   capd_dbtime_daily
         WHERE  '&drill_metric' IN ('DB_CPU_SEC','DB_CPU_PCT','DB_CPU_P95')
+          AND  is_complete = 'Y'
      ),
      -- LAG over the WHOLE series, then filter to the fit window, so the first
      -- printed day still shows its true delta / gap.
@@ -223,8 +230,7 @@ WITH src AS (
         WHERE  x.val IS NOT NULL
      ),
      f AS (
-        SELECT dbid, con_dbid, metric, last_day, slope_per_day,
-               proj_30 - slope_per_day * ((last_day - DATE '2020-01-01') + 30) AS icept
+        SELECT dbid, con_dbid, metric, last_day, train_start, slope_per_day, icept
         FROM   capf_cpu_trend
         WHERE  metric = '&drill_metric'
           AND  ('&drill_con' = '0' OR TO_CHAR(con_dbid) = '&drill_con')
@@ -252,11 +258,10 @@ SELECT TO_CHAR(s.day_dt, 'YYYY-MM-DD')                          AS day_dt,
        CAST(a.anomaly_flag AS VARCHAR2(5))                      AS flag
 FROM   f
 JOIN   s   ON s.dbid = f.dbid AND s.con_dbid = f.con_dbid
-CROSS  JOIN cap_cfg cfg
 LEFT   JOIN capa_cpu_anom a
   ON   a.dbid = s.dbid AND a.con_dbid = s.con_dbid AND a.day_dt = s.day_dt
  AND   '&drill_metric' = 'BUSY_PCT'
-WHERE  s.day_dt > f.last_day - cfg.train_days
+WHERE  s.day_dt BETWEEN f.train_start AND f.last_day
 ORDER  BY s.con_dbid, s.day_dt;
 
 PROMPT
@@ -281,6 +286,7 @@ WITH src AS (
                                     WHEN 'BUSY_PEAK' THEN busy_peak_pct END AS val
         FROM   capd_cpu_daily
         WHERE  '&drill_metric' IN ('BUSY_PCT','BUSY_P95','BUSY_PEAK')
+          AND  is_complete = 'Y'
         UNION  ALL
         SELECT dbid, con_dbid, day_dt,
                CASE '&drill_metric' WHEN 'DB_CPU_SEC' THEN db_cpu_sec
@@ -288,10 +294,10 @@ WITH src AS (
                                     WHEN 'DB_CPU_P95' THEN db_cpu_p95_pct END
         FROM   capd_dbtime_daily
         WHERE  '&drill_metric' IN ('DB_CPU_SEC','DB_CPU_PCT','DB_CPU_P95')
+          AND  is_complete = 'Y'
      ),
      f AS (
-        SELECT dbid, con_dbid, last_day, slope_per_day, slope_ci_per_day,
-               proj_30 - slope_per_day * ((last_day - DATE '2020-01-01') + 30) AS icept
+        SELECT dbid, con_dbid, last_day, train_start, slope_per_day, slope_ci_per_day, icept
         FROM   capf_cpu_trend
         WHERE  metric = '&drill_metric'
           AND  ('&drill_con' = '0' OR TO_CHAR(con_dbid) = '&drill_con')
@@ -304,9 +310,8 @@ WITH src AS (
                f.slope_ci_per_day
         FROM   f
         JOIN   src s ON s.dbid = f.dbid AND s.con_dbid = f.con_dbid
-        CROSS  JOIN cap_cfg cfg
         WHERE  s.val IS NOT NULL
-          AND  s.day_dt > f.last_day - cfg.train_days
+          AND  s.day_dt BETWEEN f.train_start AND f.last_day
      )
 SELECT COUNT(*)                                                     AS n,
        SUM(resid)                                                   AS sum_resid,
@@ -331,7 +336,7 @@ PROMPT    cpu_min_dow_hist=&k_hist (min prior same-weekdays). Values in percent 
 COLUMN arith FORMAT A190 HEADING 'FLAGGED DAY'
 
 WITH f AS (
-        SELECT dbid, con_dbid, last_day
+        SELECT dbid, con_dbid, last_day, train_start
         FROM   capf_cpu_trend
         WHERE  metric = '&drill_metric'
           AND  ('&drill_con' = '0' OR TO_CHAR(con_dbid) = '&drill_con')
@@ -345,7 +350,7 @@ WITH f AS (
         JOIN   capa_cpu_anom a
           ON   a.dbid = f.dbid AND a.con_dbid = f.con_dbid
         CROSS  JOIN cap_cfg cfg
-        WHERE  a.day_dt > f.last_day - cfg.train_days
+        WHERE  a.day_dt BETWEEN f.train_start AND f.last_day
           AND  a.anomaly_flag IS NOT NULL
           AND  '&drill_metric' = 'BUSY_PCT'
      )

@@ -416,6 +416,9 @@ WHERE  e.step_days = e.esm_horizon_days
 -- held-out actuals:
 --   engine REGR : the linear fit is recomputed here in pure SQL on the
 --                 truncated window -- always available, no models needed.
+--                 Like the live CAPF_* projections it is anchored at the
+--                 last training day's actual value:
+--                 pred = anchor_val + slope * (day_n - anchor_day_n).
 --   engine ESM  : rows appear after EXEC cap_forecast_ml.train_backtest
 --                 (or train_all, which refreshes the twins of the series it
 --                 trains), which trains purpose=BACKTEST models through the
@@ -460,8 +463,9 @@ WITH act AS (
                MAX(b.last_day) - cfg.backtest_holdout_days AS cutoff_day,
                cfg.backtest_holdout_days                   AS holdout_days,
                REGR_SLOPE(b.val, b.day_n)                  AS slope,
-               REGR_INTERCEPT(b.val, b.day_n)              AS icept,
-               REGR_COUNT(b.val, b.day_n)                  AS n_train
+               REGR_COUNT(b.val, b.day_n)                  AS n_train,
+               MAX(b.val) KEEP (DENSE_RANK LAST ORDER BY b.day_n) AS anchor_val,
+               MAX(b.day_n)                                AS anchor_day_n
         FROM   b CROSS JOIN cap_cfg cfg
         WHERE  b.day_dt <= b.last_day - cfg.backtest_holdout_days
           AND  b.day_dt >  b.last_day - cfg.backtest_holdout_days - cfg.train_days
@@ -474,9 +478,9 @@ SELECT h.dbid, h.con_dbid, h.series_kind, h.series_key,
        f.holdout_days,
        f.n_train,
        COUNT(*)                                      AS n_days,
-       AVG(ABS(f.icept + f.slope * h.day_n - h.val)
+       AVG(ABS(f.anchor_val + f.slope * (h.day_n - f.anchor_day_n) - h.val)
            / NULLIF(ABS(h.val), 0)) * 100            AS mape_pct,
-       AVG((f.icept + f.slope * h.day_n - h.val)
+       AVG((f.anchor_val + f.slope * (h.day_n - f.anchor_day_n) - h.val)
            / NULLIF(ABS(h.val), 0)) * 100            AS bias_pct,
        CAST(NULL AS VARCHAR2(20))                    AS model_type
 FROM   b h

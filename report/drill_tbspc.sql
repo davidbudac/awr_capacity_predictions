@@ -94,8 +94,9 @@ PROMPT =========================================================================
 PROMPT  CAPACITY DRILL-DOWN  --  tablespace &drill_ts
 PROMPT ================================================================================
 PROMPT  Read-only. Every number below is reproducible by hand from the columns shown.
-PROMPT  Fit window = the last &k_train days (CAP_CONFIG train_days), day index
-PROMPT  DAY_N = day_dt - DATE '2020-01-01' exactly as ddl/30_forecast_views.sql uses.
+PROMPT  Fit window = TRAIN_START .. LAST_DAY: the last &k_train days (CAP_CONFIG
+PROMPT  train_days), restarted at RESET_DAY when an M9.3 purge reset applied.
+PROMPT  Day index DAY_N = day_dt - DATE '2020-01-01' exactly as ddl/30_forecast_views.sql uses.
 PROMPT ================================================================================
 
 -- Usage when the (required) tablespace argument is missing. No exit / no
@@ -119,11 +120,16 @@ PROMPT
 PROMPT == 1. FIT HEADER (CAPF_TBSPC_FORECAST + CAPR_CONTAINER) ==
 PROMPT    FIT(day_n) = ICEPT_MIB + MIB/DAY * day_n. R2/QUALITY grade the fit
 PROMPT    (INSUFFICIENT_HISTORY = TRAIN_N below min_train_days &k_min).
+PROMPT    TRAIN_START = first fitted day, RESET_DAY = the purge that restarted
+PROMPT    the window (empty = no reset). Projections start from today:
+PROMPT    +h days = CUR + MIB/DAY * h, and DAYS_FULL counts from CUR too.
 PROMPT    +-CI = 95% half-width on the slope; WORST/BEST = days-to-full at the
 PROMPT    fast/slow edge of that CI (BEST empty = might never fill).
 
 COLUMN db_pdb    FORMAT A18            HEADING 'DB/PDB'
 COLUMN last_day  FORMAT A10            HEADING 'LAST_DAY'
+COLUMN tr_start  FORMAT A11            HEADING 'TRAIN_START'
+COLUMN reset_day FORMAT A10            HEADING 'RESET_DAY'
 COLUMN train_n   FORMAT 99990          HEADING 'TRAIN_N'
 COLUMN slope_mib FORMAT 999990.000     HEADING 'MIB/DAY'
 COLUMN slope_ci  FORMAT 99990.000      HEADING '+-CI'
@@ -139,6 +145,8 @@ COLUMN quality   FORMAT A20            HEADING 'QUALITY'
 
 SELECT NVL(c.db_pdb, TO_CHAR(f.con_dbid))     AS db_pdb,
        TO_CHAR(f.last_day, 'YYYY-MM-DD')      AS last_day,
+       TO_CHAR(f.train_start, 'YYYY-MM-DD')   AS tr_start,
+       TO_CHAR(f.reset_day, 'YYYY-MM-DD')     AS reset_day,
        f.train_n                              AS train_n,
        f.slope_bpd     / 1048576              AS slope_mib,
        f.slope_ci_bpd  / 1048576              AS slope_ci,
@@ -181,7 +189,7 @@ COLUMN z         FORMAT 99990.0        HEADING 'Z'
 COLUMN flag      FORMAT A4             HEADING 'FLAG'
 
 WITH f AS (
-        SELECT dbid, con_dbid, tablespace_name, last_day, slope_bpd, icept
+        SELECT dbid, con_dbid, tablespace_name, last_day, train_start, slope_bpd, icept
         FROM   capf_tbspc_forecast
         WHERE  tablespace_name = '&drill_ts'
           AND  ('&drill_con' = '0' OR TO_CHAR(con_dbid) = '&drill_con')
@@ -205,11 +213,10 @@ FROM   f
 JOIN   capd_tbspc_delta d
   ON   d.dbid = f.dbid AND d.con_dbid = f.con_dbid
  AND   d.tablespace_name = f.tablespace_name
-CROSS  JOIN cap_cfg cfg
 LEFT   JOIN capa_tbspc_anom a
   ON   a.dbid = d.dbid AND a.con_dbid = d.con_dbid
  AND   a.tablespace_name = d.tablespace_name AND a.day_dt = d.day_dt
-WHERE  d.day_dt > f.last_day - cfg.train_days
+WHERE  d.day_dt BETWEEN f.train_start AND f.last_day
 ORDER  BY d.con_dbid, d.day_dt;
 
 PROMPT
@@ -228,7 +235,7 @@ COLUMN ci_calc    FORMAT 999990.000000   HEADING 'CI_CALC_MIB'
 COLUMN ci_view    FORMAT 999990.000000   HEADING 'CI_VIEW_MIB'
 
 WITH f AS (
-        SELECT dbid, con_dbid, tablespace_name, last_day, slope_bpd, icept, slope_ci_bpd
+        SELECT dbid, con_dbid, tablespace_name, last_day, train_start, slope_bpd, icept, slope_ci_bpd
         FROM   capf_tbspc_forecast
         WHERE  tablespace_name = '&drill_ts'
           AND  ('&drill_con' = '0' OR TO_CHAR(con_dbid) = '&drill_con')
@@ -243,8 +250,7 @@ WITH f AS (
         JOIN   capd_tbspc_daily d
           ON   d.dbid = f.dbid AND d.con_dbid = f.con_dbid
          AND   d.tablespace_name = f.tablespace_name
-        CROSS  JOIN cap_cfg cfg
-        WHERE  d.day_dt > f.last_day - cfg.train_days
+        WHERE  d.day_dt BETWEEN f.train_start AND f.last_day
      )
 SELECT COUNT(*)                                                          AS n,
        SUM(resid) / 1048576                                              AS sum_resid,
@@ -269,7 +275,7 @@ PROMPT    can never inflate its own threshold. All values in MiB/day.
 COLUMN arith FORMAT A190 HEADING 'FLAGGED DAY'
 
 WITH f AS (
-        SELECT dbid, con_dbid, tablespace_name, last_day
+        SELECT dbid, con_dbid, tablespace_name, last_day, train_start
         FROM   capf_tbspc_forecast
         WHERE  tablespace_name = '&drill_ts'
           AND  ('&drill_con' = '0' OR TO_CHAR(con_dbid) = '&drill_con')
@@ -288,7 +294,7 @@ WITH f AS (
           ON   a.dbid = f.dbid AND a.con_dbid = f.con_dbid
          AND   a.tablespace_name = f.tablespace_name
         CROSS  JOIN cap_cfg cfg
-        WHERE  a.day_dt > f.last_day - cfg.train_days
+        WHERE  a.day_dt BETWEEN f.train_start AND f.last_day
           AND  a.anomaly_flag IS NOT NULL
      )
 SELECT arith FROM (

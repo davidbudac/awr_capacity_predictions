@@ -15,6 +15,7 @@
 -- resets, ...), and this view must stay a plain, hand-auditable OLS fit.
 --
 --   days_to_limit = FLOOR((limit_value * series_sat_pct/100 - cur_val) / slope)
+--   proj_h        = cur_val + slope * h       (anchored at today, as in ddl/30)
 --
 -- series_sat_pct (CAP_CONFIG, default 90) is the "call it full here" fraction:
 -- hitting `processes` exactly is an outage, so the alert wants the days until
@@ -26,6 +27,12 @@
 -- days_to_limit_lo / _hi are the M9.1 range from the 95% CI on the slope:
 -- lo = WORST case (fastest plausible growth, saturates soonest), hi = BEST
 -- case, NULL when the slow edge of the CI is <= 0 ("might never get there").
+--
+-- Only complete days are fitted (is_complete = 'Y'): the flow series
+-- REDO_GB_DAY drops its partial, restart and outage days, the level series
+-- carry 'Y' on every day. newest_day / is_current follow ddl/30: newest_day
+-- is the newest day with a value for the dbid, complete or not, and
+-- is_current = 'Y' when last_day >= newest_day - stale_days.
 --
 -- quality grades, in priority order (identical to the other CAPF_ views):
 --   INSUFFICIENT_HISTORY  REGR_COUNT < min_train_days
@@ -40,12 +47,23 @@
 SET DEFINE OFF
 
 CREATE OR REPLACE VIEW capf_series_forecast AS
-WITH d AS (
-        SELECT dbid, con_dbid, series, unit, day_dt,
-               day_dt - DATE '2020-01-01' AS day_n,
-               value AS val, limit_value
+WITH src AS (
+        SELECT dbid, con_dbid, series, unit, day_dt, value AS val, limit_value,
+               is_complete
         FROM   capd_series_daily
         WHERE  value IS NOT NULL
+     ),
+     nd AS (
+        SELECT dbid, MAX(day_dt) AS newest_day
+        FROM   src
+        GROUP  BY dbid
+     ),
+     d AS (
+        SELECT dbid, con_dbid, series, unit, day_dt,
+               day_dt - DATE '2020-01-01' AS day_n,
+               val, limit_value
+        FROM   src
+        WHERE  is_complete = 'Y'
      ),
      b AS (
         SELECT dbid, con_dbid, series, MAX(day_dt) AS last_day
@@ -128,12 +146,13 @@ SELECT f.dbid,
        f.slope                                      AS slope_per_day,
        f.icept,
        f.r2,
-       f.icept + f.slope * (f.last_day_n + 30)      AS proj_30,
-       f.icept + f.slope * (f.last_day_n + 90)      AS proj_90,
-       f.icept + f.slope * (f.last_day_n + 30) - f.half_30 AS proj_30_lo,
-       f.icept + f.slope * (f.last_day_n + 30) + f.half_30 AS proj_30_hi,
-       f.icept + f.slope * (f.last_day_n + 90) - f.half_90 AS proj_90_lo,
-       f.icept + f.slope * (f.last_day_n + 90) + f.half_90 AS proj_90_hi,
+       -- Anchored at today; the OLS half-widths are drawn around the anchor.
+       c.cur_val + f.slope * 30                     AS proj_30,
+       c.cur_val + f.slope * 90                     AS proj_90,
+       c.cur_val + f.slope * 30 - f.half_30         AS proj_30_lo,
+       c.cur_val + f.slope * 30 + f.half_30         AS proj_30_hi,
+       c.cur_val + f.slope * 90 - f.half_90         AS proj_90_lo,
+       c.cur_val + f.slope * 90 + f.half_90         AS proj_90_hi,
        f.slope_ci                                   AS slope_ci_per_day,
        -- The saturation target itself, so a reader can check the arithmetic
        -- without re-reading the knob.
@@ -156,7 +175,11 @@ SELECT f.dbid,
             WHEN f.slope = 0 OR f.r2 IS NULL   THEN 'FLAT'
             WHEN f.r2 < cfg.r2_gate            THEN 'LOW_CONFIDENCE'
             ELSE 'OK'
-       END                                          AS quality
+       END                                          AS quality,
+       n.newest_day,
+       CASE WHEN f.last_day >= n.newest_day - cfg.stale_days
+            THEN 'Y' ELSE 'N' END                   AS is_current
 FROM   band f
 JOIN   cur c ON c.dbid = f.dbid AND c.con_dbid = f.con_dbid AND c.series = f.series
+JOIN   nd  n ON n.dbid = f.dbid
 CROSS  JOIN cap_cfg cfg;

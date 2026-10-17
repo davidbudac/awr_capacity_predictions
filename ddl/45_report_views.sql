@@ -310,6 +310,8 @@ LEFT   JOIN capr_container c
 -- ranking is deliberately independent of fit quality.
 -- GiB / MiB-per-day conversions are numeric columns (not strings) so a
 -- consumer can still compare and threshold them.
+-- limit_below_used / is_current pass straight through from
+-- CAPF_TBSPC_FORECAST ('Y'/'N'); nothing here filters on them.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_tbspc_days_to_full AS
 SELECT f.dbid,
@@ -336,7 +338,9 @@ SELECT f.dbid,
        ROW_NUMBER() OVER (ORDER BY f.days_to_full NULLS LAST,
                                    f.con_dbid, f.tablespace_name)  AS rank_dtf,
        ROW_NUMBER() OVER (ORDER BY f.pct_used DESC NULLS LAST,
-                                   f.con_dbid, f.tablespace_name)  AS rank_nearfull
+                                   f.con_dbid, f.tablespace_name)  AS rank_nearfull,
+       f.limit_below_used,
+       f.is_current
 FROM   capf_tbspc_forecast f
 CROSS  JOIN cap_cfg cfg
 LEFT   JOIN capr_container c
@@ -394,7 +398,8 @@ SELECT t.dbid,
        t.days_to_sat,
        t.days_to_sat_lo                    AS sat_worst,
        t.days_to_sat_hi                    AS sat_best,
-       t.quality
+       t.quality,
+       t.is_current
 FROM   capf_cpu_trend t
 LEFT   JOIN capr_container c
   ON   c.dbid = t.dbid AND c.con_dbid = t.con_dbid;
@@ -499,7 +504,8 @@ SELECT s.dbid,
        -- Most urgent first: soonest days_to_limit, then fullest, then name.
        ROW_NUMBER() OVER (ORDER BY s.days_to_limit NULLS LAST,
                                    s.pct_of_limit DESC NULLS LAST,
-                                   s.con_dbid, s.series) AS rank_series
+                                   s.con_dbid, s.series) AS rank_series,
+       s.is_current
 FROM   capf_series_forecast s
 CROSS  JOIN cap_cfg cfg
 LEFT   JOIN capr_container c
@@ -653,6 +659,9 @@ LEFT   JOIN capr_container c
 -- CRIT/WARN/OK: TBSPC from both CAPR_TBSPC_DAYS_TO_FULL markers, CPU from
 -- its CAPR_ALERTS saturation row, SERIES from CAPR_SERIES.sev. CPU's
 -- limit_value is the saturation threshold (cpu_sat_pct), not 100.
+-- is_current (every kind) and limit_below_used (TBSPC only, NULL for CPU and
+-- SERIES) are the CAPF_ 'Y'/'N' flags as NUMBER 1/0, appended last so the
+-- explicit column lists of the existing consumers keep working.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_fit AS
 SELECT f.dbid,
@@ -678,7 +687,9 @@ SELECT f.dbid,
        f.sev,
        CASE f.sev WHEN 'CRIT' THEN 1 WHEN 'WARN' THEN 2 ELSE 3 END AS sev_rank,
        f.limit_source,
-       f.last_day
+       f.last_day,
+       f.is_current,
+       f.limit_below_used
 FROM  (
         SELECT t.dbid, t.con_dbid, 'TBSPC' AS kind, t.tablespace_name AS series,
                'bytes' AS unit, t.slope_method AS method,
@@ -689,7 +700,9 @@ FROM  (
                CASE WHEN 'CRIT' IN (r.sev_dtf, r.sev_nearfull) THEN 'CRIT'
                     WHEN 'WARN' IN (r.sev_dtf, r.sev_nearfull) THEN 'WARN'
                     ELSE 'OK' END AS sev,
-               t.limit_source, t.last_day
+               t.limit_source, t.last_day,
+               CASE t.is_current WHEN 'Y' THEN 1 ELSE 0 END       AS is_current,
+               CASE t.limit_below_used WHEN 'Y' THEN 1 ELSE 0 END AS limit_below_used
         FROM   capf_tbspc_forecast t
         LEFT   JOIN capr_tbspc_days_to_full r
           ON   r.dbid = t.dbid AND r.con_dbid = t.con_dbid
@@ -704,7 +717,8 @@ FROM  (
                t.days_to_sat, t.days_to_sat_lo, t.days_to_sat_hi,
                NULL, t.train_n,
                CASE al.sev_rank WHEN 1 THEN 'CRIT' WHEN 2 THEN 'WARN' ELSE 'OK' END,
-               NULL, t.last_day
+               NULL, t.last_day,
+               CASE t.is_current WHEN 'Y' THEN 1 ELSE 0 END, NULL
         FROM   capf_cpu_trend t
         CROSS  JOIN cap_cfg cfg
         LEFT   JOIN (SELECT dbid, con_dbid, series_key, MIN(sev_rank) AS sev_rank
@@ -720,7 +734,8 @@ FROM  (
                t.days_to_limit, t.days_to_limit_lo, t.days_to_limit_hi,
                NULL, t.train_n,
                NVL(UPPER(r.sev), 'OK'),
-               NULL, t.last_day
+               NULL, t.last_day,
+               CASE t.is_current WHEN 'Y' THEN 1 ELSE 0 END, NULL
         FROM   capf_series_forecast t
         LEFT   JOIN capr_series r
           ON   r.dbid = t.dbid AND r.con_dbid = t.con_dbid AND r.series = t.series
