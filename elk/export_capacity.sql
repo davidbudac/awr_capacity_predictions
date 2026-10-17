@@ -397,6 +397,9 @@ LEFT   JOIN capr_series r
 -- anomaly: severity comes from the matching CAPR_ALERTS row (WARN for a
 -- HIGH, INFO for a LOW/DOWN); events older than the alert window have no
 -- alert row and default to INFO.
+-- A level shift is dated at the START of its recent window (the day the
+-- level moved), with the window's last day in obs_day; the id still keys on
+-- last_day so the event is overwritten, not duplicated, as the window slides.
 -- ===================================================================
 SELECT JSON_OBJECT(
          'id' VALUE LOWER(RAWTOHEX(STANDARD_HASH('anom|' || t.dbid || '|' || t.con_dbid
@@ -467,13 +470,14 @@ WHERE  t.anomaly_flag IN ('HIGH', 'LOW');
 SELECT JSON_OBJECT(
          'id' VALUE LOWER(RAWTOHEX(STANDARD_HASH('anom|' || t.dbid || '|' || t.con_dbid
                     || '|CPU_SHIFT|' || t.metric || '|' || TO_CHAR(t.last_day, 'YYYY-MM-DD'), 'MD5'))),
-         '@timestamp' VALUE TO_CHAR(t.last_day, 'YYYY-MM-DD') || 'T00:00:00Z',
+         '@timestamp' VALUE TO_CHAR(t.last_day - t.recent_days + 1, 'YYYY-MM-DD') || 'T00:00:00Z',
          'cap' VALUE JSON_OBJECT(
              'record' VALUE 'anomaly', 'kind' VALUE 'CPU', 'series' VALUE t.metric,
              &ident,
              'unit'         VALUE LOWER(TRIM(t.unit)),
              'anomaly'      VALUE 'true' FORMAT JSON,
              'anomaly_kind' VALUE 'CPU_SHIFT',
+             'obs_day'      VALUE TO_CHAR(t.last_day, 'YYYY-MM-DD') || 'T00:00:00Z',
              'anomaly_flag' VALUE t.shift_flag,
              'value'        VALUE t.recent_med,
              'expected'     VALUE t.base_med,
