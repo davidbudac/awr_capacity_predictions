@@ -12,3 +12,4 @@ bench/logs/
 grafana/.ords.env
 grafana/ords/config/*
 !grafana/ords/config/.gitkeep
+__pycache__/
