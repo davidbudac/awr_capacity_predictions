@@ -5,10 +5,10 @@
 -- its anomaly flags with a pocket calculator:
 --   1. the fit header      -- slope / intercept / R2 / slope CI / days-to-full
 --   2. the daily series    -- actual, fitted, residual, day-over-day delta, gap
---                             and the CAPA_* anomaly baseline for that day
+--                             and both day baselines (trailing, same weekday)
 --   3. residual footer     -- SUM(resid) ~ 0 and resid_se = sqrt(SSE/(n-2)),
 --                             the number the M9.1 prediction bands are built on
---   4. anomaly arithmetic  -- one spelled-out line per flagged day
+--   4. anomaly arithmetic  -- one spelled-out line per flagged (day, mode)
 --
 -- READ-ONLY: SELECTs against CAPD_/CAPF_/CAPA_/CAPR_ views only (never
 -- DBA_HIST_*), no DML/DDL, no database object created or modified.
@@ -72,6 +72,8 @@ COLUMN k_madk  NEW_VALUE k_madk  NOPRINT
 COLUMN k_madw  NEW_VALUE k_madw  NOPRINT
 COLUMN k_floor NEW_VALUE k_floor NOPRINT
 COLUMN k_hist  NEW_VALUE k_hist  NOPRINT
+COLUMN k_dow   NEW_VALUE k_dow   NOPRINT
+COLUMN k_whist NEW_VALUE k_whist NOPRINT
 -- FM/RTRIM: a raw NUMBER NEW_VALUE keeps SQL*Plus's right-justified width
 -- ("WARN<=        90"), and FM on a whole number leaves a trailing "3." behind.
 SELECT TO_CHAR(c.train_days,                'FM9999990')         AS k_train,
@@ -79,7 +81,9 @@ SELECT TO_CHAR(c.train_days,                'FM9999990')         AS k_train,
        RTRIM(TO_CHAR(c.mad_k,               'FM9999990.9'), '.') AS k_madk,
        TO_CHAR(c.mad_window_days,           'FM9999990')         AS k_madw,
        TO_CHAR(c.abs_floor_bytes / 1048576, 'FM99999990.0')      AS k_floor,
-       TO_CHAR(c.trailing_min_hist,         'FM9999990')         AS k_hist
+       TO_CHAR(c.trailing_min_hist,         'FM9999990')         AS k_hist,
+       TO_CHAR(c.dow_weeks,                 'FM9999990')         AS k_dow,
+       TO_CHAR(c.weekly_min_hist,           'FM9999990')         AS k_whist
 FROM   cap_cfg c;
 SET TERMOUT ON
 
@@ -167,11 +171,13 @@ WHERE  f.tablespace_name = '&drill_ts'
 ORDER  BY f.con_dbid;
 
 PROMPT
-PROMPT == 2. DAILY SERIES OVER THE FIT WINDOW (CAPD_TBSPC_DELTA + CAPA_TBSPC_ANOM) ==
+PROMPT == 2. DAILY SERIES OVER THE FIT WINDOW (CAPD_TBSPC_DELTA + CAPA_ANOM twice) ==
 PROMPT    FIT_MIB = ICEPT_MIB + MIB/DAY * DAY_N ; RESID_MIB = USED_MIB - FIT_MIB.
 PROMPT    DELTA_MIB = change since the previous SAMPLED day, GAP = calendar days
 PROMPT    since it (>1 across an AWR gap), RATE = DELTA/GAP -- the anomaly input.
-PROMPT    MED/SIGMA/THR are the trailing &k_madw-day baseline the flag is judged against.
+PROMPT    Each day is judged against two baselines (CAPA_ANOM baseline_mode = ...):
+PROMPT    TRL_* = TRAILING, the previous &k_madw days; DOW_* = SAME_DOW, the same
+PROMPT    weekday over the previous &k_dow weeks. MED = baseline median, Z = robust z.
 
 COLUMN day_dt    FORMAT A10            HEADING 'DAY'
 COLUMN day_n     FORMAT 999990         HEADING 'DAY_N'
@@ -182,11 +188,12 @@ COLUMN resid_mib FORMAT 99999990.000   HEADING 'RESID_MIB'
 COLUMN delta_mib FORMAT 99999990.000   HEADING 'DELTA_MIB'
 COLUMN gap       FORMAT 990            HEADING 'GAP'
 COLUMN rate_mib  FORMAT 99999990.00    HEADING 'RATE_MIB/D'
-COLUMN med_mib   FORMAT 99999990.00    HEADING 'MED_MIB/D'
-COLUMN sig_mib   FORMAT 9999990.00     HEADING 'SIGMA'
-COLUMN thr_mib   FORMAT 99999990.00    HEADING 'THR_MIB/D'
-COLUMN z         FORMAT 99990.0        HEADING 'Z'
-COLUMN flag      FORMAT A4             HEADING 'FLAG'
+COLUMN trl_med   FORMAT 99999990.00    HEADING 'TRL_MED'
+COLUMN trl_z     FORMAT 99990.0        HEADING 'TRL_Z'
+COLUMN trl_flag  FORMAT A8             HEADING 'TRL_FLAG'
+COLUMN dow_med   FORMAT 99999990.00    HEADING 'DOW_MED'
+COLUMN dow_z     FORMAT 99990.0        HEADING 'DOW_Z'
+COLUMN dow_flag  FORMAT A8             HEADING 'DOW_FLAG'
 
 WITH f AS (
         SELECT dbid, con_dbid, tablespace_name, last_day, train_start, slope_bpd, icept
@@ -204,18 +211,24 @@ SELECT TO_CHAR(d.day_dt, 'YYYY-MM-DD')                    AS day_dt,
        d.used_delta_bytes / 1048576                       AS delta_mib,
        d.day_gap                                          AS gap,
        d.used_rate_bpd    / 1048576                       AS rate_mib,
-       a.median_rate_bpd  / 1048576                       AS med_mib,
-       a.mad_sigma        / 1048576                       AS sig_mib,
-       a.threshold_bpd    / 1048576                       AS thr_mib,
-       a.robust_z                                         AS z,
-       a.anomaly_flag                                     AS flag
+       t.expected         / 1048576                       AS trl_med,
+       t.robust_z                                         AS trl_z,
+       t.anomaly_flag                                     AS trl_flag,
+       w.expected         / 1048576                       AS dow_med,
+       w.robust_z                                         AS dow_z,
+       w.anomaly_flag                                     AS dow_flag
 FROM   f
 JOIN   capd_tbspc_delta d
   ON   d.dbid = f.dbid AND d.con_dbid = f.con_dbid
  AND   d.tablespace_name = f.tablespace_name
-LEFT   JOIN capa_tbspc_anom a
-  ON   a.dbid = d.dbid AND a.con_dbid = d.con_dbid
- AND   a.tablespace_name = d.tablespace_name AND a.day_dt = d.day_dt
+LEFT   JOIN capa_anom t
+  ON   t.dbid = d.dbid AND t.con_dbid = d.con_dbid AND t.kind = 'TBSPC'
+ AND   t.series = d.tablespace_name AND t.ts = d.day_dt
+ AND   t.baseline_mode = 'TRAILING'
+LEFT   JOIN capa_anom w
+  ON   w.dbid = d.dbid AND w.con_dbid = d.con_dbid AND w.kind = 'TBSPC'
+ AND   w.series = d.tablespace_name AND w.ts = d.day_dt
+ AND   w.baseline_mode = 'SAME_DOW'
 WHERE  d.day_dt BETWEEN f.train_start AND f.last_day
 ORDER  BY d.con_dbid, d.day_dt;
 
@@ -267,10 +280,11 @@ GROUP  BY con_dbid
 ORDER  BY con_dbid;
 
 PROMPT
-PROMPT == 3. ANOMALY ARITHMETIC (CAPA_TBSPC_ANOM, flagged days in the fit window) ==
-PROMPT    Knobs: mad_k=&k_madk, mad_window_days=&k_madw, abs_floor_bytes=&k_floor MiB,
-PROMPT    trailing_min_hist=&k_hist (min trailing obs). Baseline EXCLUDES the day itself, so a spike
-PROMPT    can never inflate its own threshold. All values in MiB/day.
+PROMPT == 3. ANOMALY ARITHMETIC (flagged days in the fit window, one line per mode) ==
+PROMPT    Knobs: mad_k=&k_madk, abs_floor_bytes=&k_floor MiB/day. TRL baseline = the previous
+PROMPT    &k_madw days (trailing_min_hist=&k_hist obs needed), DOW = the same weekday over the
+PROMPT    previous &k_dow weeks (weekly_min_hist=&k_whist). Every baseline EXCLUDES the day
+PROMPT    itself, so a spike can never inflate its own threshold. All values in MiB/day.
 
 COLUMN arith FORMAT A190 HEADING 'FLAGGED DAY'
 
@@ -280,43 +294,51 @@ WITH f AS (
         WHERE  tablespace_name = '&drill_ts'
           AND  ('&drill_con' = '0' OR TO_CHAR(con_dbid) = '&drill_con')
      ),
+     modes AS (
+        SELECT 'TRAILING' AS bm, 1 AS mrank, 'TRL' AS mshort FROM dual
+        UNION ALL SELECT 'SAME_DOW', 2, 'DOW' FROM dual
+     ),
      hits AS (
-        SELECT a.con_dbid, a.day_dt, a.anomaly_flag, a.n_hist, a.robust_z,
-               a.used_rate_bpd / 1048576   AS rate_mib,
-               a.median_rate_bpd / 1048576 AS med_mib,
-               a.dev_bpd / 1048576         AS dev_mib,
+        SELECT a.con_dbid, a.ts AS day_dt, m.mrank, m.mshort, a.anomaly_flag, a.n_hist, a.robust_z,
+               a.value / 1048576           AS rate_mib,
+               a.expected / 1048576        AS med_mib,
+               a.dev / 1048576             AS dev_mib,
                a.mad_sigma / 1048576       AS sig_mib,
-               a.threshold_bpd / 1048576   AS thr_mib,
+               a.thr_floor / 1048576       AS floor_mib,
+               a.threshold / 1048576       AS thr_mib,
                cfg.mad_k                   AS mad_k,
                cfg.mad_k * a.mad_sigma / 1048576 AS ksig_mib
         FROM   f
-        JOIN   capa_tbspc_anom a
+        JOIN   capa_anom a
           ON   a.dbid = f.dbid AND a.con_dbid = f.con_dbid
-         AND   a.tablespace_name = f.tablespace_name
+         AND   a.kind = 'TBSPC' AND a.series = f.tablespace_name
+        JOIN   modes m
+          ON   a.baseline_mode = m.bm
         CROSS  JOIN cap_cfg cfg
-        WHERE  a.day_dt BETWEEN f.train_start AND f.last_day
+        WHERE  a.ts BETWEEN f.train_start AND f.last_day
           AND  a.anomaly_flag IS NOT NULL
      )
 SELECT arith FROM (
-    SELECT 1 AS ord, day_dt AS srt,
-           TO_CHAR(day_dt, 'YYYY-MM-DD') || ' ' || RPAD(anomaly_flag, 5)
+    SELECT 1 AS ord, day_dt AS srt, mrank,
+           TO_CHAR(day_dt, 'YYYY-MM-DD') || ' ' || mshort || ' ' || RPAD(anomaly_flag, 5)
            || 'rate ' || TO_CHAR(rate_mib, 'FM999999990.000')
            || ' - median ' || TO_CHAR(med_mib, 'FM999999990.000')
            || ' = dev ' || TO_CHAR(dev_mib, 'FM999999990.000')
            || ' | threshold = GREATEST(k ' || TO_CHAR(mad_k, 'FM990.00')
            || ' * sigma ' || TO_CHAR(sig_mib, 'FM999999990.000')
            || ' = ' || TO_CHAR(ksig_mib, 'FM999999990.000')
-           || ', floor &k_floor) = ' || TO_CHAR(thr_mib, 'FM999999990.000')
+           || ', floor ' || TO_CHAR(floor_mib, 'FM999999990.0')
+           || ') = ' || TO_CHAR(thr_mib, 'FM999999990.000')
            || ' | z = ' || NVL(TO_CHAR(robust_z, 'FM99990.00'), 'n/a')
            || ' | n_hist ' || TO_CHAR(n_hist)                                   AS arith
     FROM   hits
     UNION  ALL
-    SELECT 2, NULL, '(no day flagged in this window)'
+    SELECT 2, NULL, NULL, '(no day flagged in this window)'
     FROM   dual
     WHERE  NOT EXISTS (SELECT 1 FROM hits)
       AND  '&drill_ts' != '?'
 )
-ORDER  BY ord, srt;
+ORDER  BY ord, srt, mrank;
 
 PROMPT
 PROMPT ================================================================================
@@ -340,4 +362,6 @@ UNDEFINE k_madk
 UNDEFINE k_madw
 UNDEFINE k_floor
 UNDEFINE k_hist
+UNDEFINE k_dow
+UNDEFINE k_whist
 CLEAR COLUMNS

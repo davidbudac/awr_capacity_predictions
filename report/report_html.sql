@@ -1,7 +1,7 @@
 --
 -- report/report_html.sql -- read-only, self-contained HTML capacity report.
 -- =====================================================================
--- Spools a single-file HTML dashboard from the CAPF_/CAPA_ views to
+-- Spools a single-file HTML dashboard from the CAPR_/CAPF_ views to
 -- reports/cap_report_<db>_<ts>.html. READ-ONLY: only SELECTs (the CAPF_ESM
 -- views call a pipelined function, which writes nothing). Creates/modifies no
 -- database object. This is a SIBLING of report/report.sql (the plain-text
@@ -443,6 +443,9 @@ DECLARE
   xs2 num_tab;  ys2 num_tab;
   bx  num_tab;  blo num_tab;  bhi num_tab;
   ax  num_tab;  ay  num_tab;
+  atip str_tab;                    -- anomaly ring tooltips, parallel to ax/ay
+  mad_window  NUMBER;              -- CAP_CONFIG mad_window_days (TRAILING baseline)
+  dow_wk      NUMBER;              -- CAP_CONFIG dow_weeks (SAME_DOW / HOUR_OF_WEEK)
   v_cnt2      PLS_INTEGER := 0;
   v_nband     PLS_INTEGER := 0;
   v_nanom     PLS_INTEGER := 0;
@@ -666,7 +669,9 @@ DECLARE
                 WHEN 'DBCPU_SAT'      THEN '#s4'
                 WHEN 'CPU_SHIFT'      THEN '#s5'
                 WHEN 'CPU_ANOM'       THEN '#s5'
+                WHEN 'DBCPU_ANOM'     THEN '#s5'
                 WHEN 'TBSPC_ANOM'     THEN '#s3'
+                WHEN 'SERIES_ANOM'    THEN '#s7'
                 WHEN 'SERIES_LIMIT'      THEN '#s7'
                 WHEN 'SERIES_NEARLIMIT'  THEN '#s7'
                 ELSE '#s0'
@@ -959,6 +964,48 @@ DECLARE
     RETURN TO_CHAR(ROUND(mb), 'FM999990') || ' MiB/day';
   END fmt_rate_mb;
 
+  -- Baseline-mode wording (CAPR_* baseline_mode): what "usual" was measured
+  -- against. Weekday names are pinned to English like the CAPR messages.
+  FUNCTION mode_phrase(p_mode IN VARCHAR2, p_ts IN DATE) RETURN VARCHAR2 IS
+  BEGIN
+    RETURN CASE p_mode
+             WHEN 'TRAILING' THEN 'over the last ' || TO_CHAR(mad_window, 'FM9990') || ' days'
+             WHEN 'SAME_DOW' THEN 'for a ' || TO_CHAR(p_ts, 'FMDay', 'NLS_DATE_LANGUAGE=ENGLISH')
+             ELSE 'for ' || TO_CHAR(p_ts, 'Dy HH24', 'NLS_DATE_LANGUAGE=ENGLISH') || ':00'
+           END;
+  END mode_phrase;
+
+  FUNCTION mode_label(p_mode IN VARCHAR2) RETURN VARCHAR2 IS
+  BEGIN
+    RETURN CASE p_mode
+             WHEN 'TRAILING' THEN 'Last ' || TO_CHAR(mad_window, 'FM9990') || ' days'
+             WHEN 'SAME_DOW' THEN 'Same weekday'
+             ELSE 'Same hour of week'
+           END;
+  END mode_label;
+
+  -- an M11 series value in its CAPA unit (COUNT / GIB_PER_DAY)
+  FUNCTION series_val(p_val IN NUMBER, p_unit IN VARCHAR2) RETURN VARCHAR2 IS
+  BEGIN
+    RETURN CASE p_unit WHEN 'COUNT' THEN TO_CHAR(p_val, 'FM99999999990')
+                       ELSE TO_CHAR(p_val, 'FM99999990.00') || ' GiB/day' END;
+  END series_val;
+
+  -- Chart-ring tooltip from CAPR_SERIES_POINTS: which day baselines flagged
+  -- the point (anomaly_modes, comma-separated) and how many hours of it the
+  -- hour-of-week baseline flagged.
+  FUNCTION ring_tip(p_ts IN DATE, p_val IN VARCHAR2, p_modes IN VARCHAR2, p_hours IN NUMBER) RETURN VARCHAR2 IS
+  BEGIN
+    RETURN dfmt(p_ts) || ': ' || p_val
+           || CASE WHEN p_modes IS NOT NULL THEN ', unusual vs '
+                   || REPLACE(REPLACE(REPLACE(p_modes, ',', ' and '),
+                              'TRAILING', 'the last ' || TO_CHAR(mad_window, 'FM9990') || ' days'),
+                              'SAME_DOW', 'the same weekday') END
+           || CASE WHEN p_hours > 0 THEN CASE WHEN p_modes IS NOT NULL THEN ';' ELSE ',' END || ' '
+                   || TO_CHAR(p_hours, 'FM990') || ' hour' || CASE WHEN p_hours = 1 THEN '' ELSE 's' END
+                   || ' unusual for the hour of the week' END;
+  END ring_tip;
+
   -- container label for chips and strips: the PDB part alone when the
   -- report spans containers, dimmed, so the series name stays readable
   FUNCTION con_prefix(p_db_pdb IN VARCHAR2) RETURN VARCHAR2 IS
@@ -1163,7 +1210,8 @@ DECLARE
     END IF;
     -- anomaly rings
     FOR i IN 1 .. v_nanom LOOP
-      p('<circle class="anom-dot" cx="' || fmt_px(sx(ax(i))) || '" cy="' || fmt_px(sy(ay(i))) || '" r="4"/>');
+      p('<circle class="anom-dot" cx="' || fmt_px(sx(ax(i))) || '" cy="' || fmt_px(sy(ay(i))) || '" r="4">'
+        || CASE WHEN atip.EXISTS(i) THEN '<title>' || esc(atip(i)) || '</title>' END || '</circle>');
     END LOOP;
     -- ESM +30: whisker + diamond
     IF p_esm_val IS NOT NULL AND p_esm_x IS NOT NULL THEN
@@ -1614,12 +1662,13 @@ BEGIN
   -- five numbers cannot disagree with the attention list below them.
   ----------------------------------------------------------------------
   SELECT COUNT(DISTINCT con_dbid) INTO v_con_count FROM capd_tbspc_daily;
+  SELECT mad_window_days, dow_weeks INTO mad_window, dow_wk FROM cap_cfg;
   SELECT NVL(MAX(day_dt) - MIN(day_dt) + 1, 0), MAX(day_dt) INTO v_hist_days, v_last_day FROM capd_tbspc_daily;
   SELECT SUM(CASE WHEN severity = 'CRIT' THEN 1 ELSE 0 END),
          SUM(CASE WHEN severity = 'WARN' THEN 1 ELSE 0 END),
          SUM(CASE WHEN severity = 'INFO' THEN 1 ELSE 0 END),
          SUM(CASE WHEN severity IN ('CRIT','WARN') AND kind IN ('TBSPC_FULL','TBSPC_NEARFULL','CPU_SAT','SERIES_LIMIT','SERIES_NEARLIMIT') THEN 1 ELSE 0 END),
-         SUM(CASE WHEN severity IN ('CRIT','WARN') AND kind IN ('TBSPC_ANOM','CPU_ANOM','CPU_SHIFT') THEN 1 ELSE 0 END)
+         SUM(CASE WHEN severity IN ('CRIT','WARN') AND kind IN ('TBSPC_ANOM','CPU_ANOM','DBCPU_ANOM','SERIES_ANOM','CPU_SHIFT') THEN 1 ELSE 0 END)
     INTO v_n_crit, v_n_warn, v_n_info, v_n_cap, v_n_beh
   FROM   capr_alerts;
   v_n_crit := NVL(v_n_crit, 0); v_n_warn := NVL(v_n_warn, 0); v_n_info := NVL(v_n_info, 0);
@@ -1706,7 +1755,8 @@ BEGIN
   p('<dt>Quality: LOW_CONFIDENCE</dt><dd>Growth is too erratic for a dependable estimate.</dd>');
   p('<dt>Quality: FLAT</dt><dd>Not growing at all.</dd>');
   p('<dt>Quality: INSUFFICIENT_HISTORY</dt><dd>Not enough days of AWR history yet.</dd>');
-  p('<dt>Anomaly</dt><dd>A day that stands out sharply from what is normal for that series.</dd>');
+  p('<dt>Anomaly</dt><dd>A day (or, for CPU, an hour) that stands out sharply from what is normal for that series.</dd>');
+  p('<dt>Baseline</dt><dd>What "normal" is measured against: the last few weeks of days, the same weekday in recent weeks, or (CPU hours) the same hour of the week.</dd>');
   p('<dt>Level shift</dt><dd>A sustained step in the level a series runs at, as opposed to a one-day outlier.</dd>');
   p('<dt>Robust z-score</dt><dd>How far outside its normal range a day was; 3 or more is clearly unusual.</dd>');
   p('<dt>MAD</dt><dd>Median absolute deviation -- a spike-resistant way of measuring "normal".</dd>');
@@ -1718,7 +1768,7 @@ BEGIN
   ----------------------------------------------------------------------
   -- Section 0: "At a glance" -- plain-English best-guess prediction cards
   -- and an anomaly timeline, for readers who do not want the statistics.
-  -- Everything below is SELECT-only over the same CAPF_/CAPA_/CAPD_ views
+  -- Everything below is SELECT-only over the same CAPR_/CAPF_/CAPD_ views
   -- the detailed sections use; nothing new is computed.
   ----------------------------------------------------------------------
   p('<section id="s0">');
@@ -1739,9 +1789,11 @@ BEGIN
     p('<div class="attn">');
     FOR a IN (
       SELECT severity, kind, dbid, con_dbid, db_pdb, series_key, day_dt, value, threshold, unit, message,
+             baseline_mode,
              CASE kind WHEN 'TBSPC_FULL' THEN 1 WHEN 'CPU_SAT' THEN 2 WHEN 'SERIES_LIMIT' THEN 3
                        WHEN 'CPU_SHIFT' THEN 4 WHEN 'TBSPC_NEARFULL' THEN 5 WHEN 'SERIES_NEARLIMIT' THEN 6
-                       WHEN 'TBSPC_ANOM' THEN 7 WHEN 'CPU_ANOM' THEN 8 ELSE 9 END AS kord
+                       WHEN 'TBSPC_ANOM' THEN 7 WHEN 'CPU_ANOM' THEN 8 WHEN 'DBCPU_ANOM' THEN 9
+                       WHEN 'SERIES_ANOM' THEN 10 ELSE 11 END AS kord
       FROM   capr_alerts
       WHERE  severity IN ('CRIT','WARN')
       ORDER  BY sev_rank, kord, value
@@ -1827,24 +1879,49 @@ BEGIN
       ELSIF a.kind = 'TBSPC_ANOM' THEN
         v_kind_lbl := 'Anomaly';
         FOR t IN (SELECT delta_mb, med_mb, z, anomaly_flag, day_str FROM capr_tbspc_anomalies
-                  WHERE con_dbid = a.con_dbid AND tablespace_name = a.series_key AND day_dt = a.day_dt FETCH FIRST 1 ROW ONLY) LOOP
+                  WHERE dbid = a.dbid AND con_dbid = a.con_dbid AND tablespace_name = a.series_key
+                    AND baseline_mode = a.baseline_mode AND day_dt = a.day_dt) LOOP
           v_main := '<b>' || esc(a.series_key) || '</b> ' || CASE WHEN t.delta_mb >= 0 THEN 'grew ' ELSE 'shrank ' END
                     || fmt_size_gb(ABS(t.delta_mb) / 1024) || ' in one day'
-                    || CASE WHEN t.med_mb IS NOT NULL THEN ' (normal: ' || fmt_size_gb(t.med_mb / 1024) || ')' END;
+                    || CASE WHEN t.med_mb IS NOT NULL THEN ' (normal ' || mode_phrase(a.baseline_mode, a.day_dt)
+                            || ': ' || fmt_rate_mb(t.med_mb) || ')' END;
           v_sub  := v_tmp || dfmt(a.day_dt) || ' &middot; robust z ' || TO_CHAR(t.z, 'FM99990.0')
                     || ' &middot; one day; the forecast is not driven by it';
           v_big  := CASE WHEN t.delta_mb >= 0 THEN '+' ELSE '&minus;' END || fmt_size_gb(ABS(t.delta_mb) / 1024);
         END LOOP;
         v_small := dfmt(a.day_dt);
-      ELSIF a.kind = 'CPU_ANOM' THEN
+      ELSIF a.kind IN ('CPU_ANOM', 'DBCPU_ANOM') THEN
         v_kind_lbl := 'Anomaly';
-        FOR t IN (SELECT busy_pct, median_pct, z FROM capr_cpu_anomalies
-                  WHERE con_dbid = a.con_dbid AND day_dt = a.day_dt FETCH FIRST 1 ROW ONLY) LOOP
-          v_main := '<b>Host CPU</b> ran ' || TO_CHAR(t.busy_pct, 'FM990.0') || '% busy vs the usual '
-                    || TO_CHAR(t.median_pct, 'FM990.0') || '% for a ' || TO_CHAR(a.day_dt, 'FMDay');
+        -- an hour-of-week alert carries its worst hour: largest |z|, earliest
+        -- on a tie, the same pick CAPR_ALERTS makes
+        FOR t IN (SELECT value_pct, median_pct, z, grain, ts, ts_str, COUNT(*) OVER () AS n_events
+                  FROM capr_cpu_anomalies
+                  WHERE dbid = a.dbid AND con_dbid = a.con_dbid AND metric = a.series_key
+                    AND baseline_mode = a.baseline_mode AND day_dt = a.day_dt
+                  ORDER BY ABS(z) DESC NULLS LAST, ts FETCH FIRST 1 ROW ONLY) LOOP
+          v_main := '<b>' || CASE a.kind WHEN 'CPU_ANOM' THEN 'Host CPU' ELSE esc(a.db_pdb) || ' DB CPU' END || '</b> ran '
+                    || TO_CHAR(t.value_pct, 'FM990.0') || CASE a.kind WHEN 'CPU_ANOM' THEN '% busy' ELSE '% of host cores' END
+                    || ' vs the usual ' || TO_CHAR(t.median_pct, 'FM990.0') || '% ' || mode_phrase(a.baseline_mode, t.ts);
+          v_sub  := v_tmp || CASE WHEN t.grain = 'HOUR' THEN esc(t.ts_str) ELSE dfmt(a.day_dt) END
+                    || ' &middot; robust z ' || TO_CHAR(t.z, 'FM99990.0') || ' &middot; '
+                    || CASE WHEN t.n_events > 1 THEN TO_CHAR(t.n_events, 'FM990') || ' hours flagged that day'
+                            WHEN t.grain = 'HOUR' THEN 'single hour' ELSE 'single day' END;
+          v_big  := CASE WHEN t.value_pct >= t.median_pct THEN '+' ELSE '&minus;' END
+                    || TO_CHAR(ABS(t.value_pct - t.median_pct), 'FM990') || ' pts';
+        END LOOP;
+        v_small := dfmt(a.day_dt);
+      ELSIF a.kind = 'SERIES_ANOM' THEN
+        v_kind_lbl := 'Anomaly';
+        FOR t IN (SELECT value, expected, z, unit FROM capr_series_anomalies
+                  WHERE dbid = a.dbid AND con_dbid = a.con_dbid AND series = a.series_key
+                    AND baseline_mode = a.baseline_mode AND day_dt = a.day_dt) LOOP
+          v_main := '<b>' || esc(a.series_key) || '</b> '
+                    || CASE WHEN a.series_key = 'DB_SIZE_GB' THEN 'grew ' ELSE 'at ' END
+                    || series_val(t.value, t.unit) || ' vs the usual ' || series_val(t.expected, t.unit)
+                    || ' ' || mode_phrase(a.baseline_mode, a.day_dt);
           v_sub  := v_tmp || dfmt(a.day_dt) || ' &middot; robust z ' || TO_CHAR(t.z, 'FM99990.0') || ' &middot; single day';
-          v_big  := CASE WHEN t.busy_pct >= t.median_pct THEN '+' ELSE '&minus;' END
-                    || TO_CHAR(ABS(t.busy_pct - t.median_pct), 'FM990') || ' pts';
+          v_big  := CASE WHEN t.value >= t.expected THEN '+' ELSE '&minus;' END
+                    || series_val(ABS(t.value - t.expected), t.unit);
         END LOOP;
         v_small := dfmt(a.day_dt);
       END IF;
@@ -1854,7 +1931,9 @@ BEGIN
         v_main := esc(a.message);
         v_big  := CASE a.unit WHEN 'DAYS' THEN TO_CHAR(a.value, 'FM999990') || ' days'
                               WHEN 'PCT'  THEN TO_CHAR(a.value, 'FM990.0') || '%'
-                              WHEN 'BYTES' THEN fmt_size_gb(a.value / 1073741824) END;
+                              WHEN 'BYTES' THEN fmt_size_gb(a.value / 1073741824)
+                              WHEN 'COUNT' THEN TO_CHAR(a.value, 'FM99999999990')
+                              WHEN 'GIB'   THEN fmt_size_gb(a.value) END;
       END IF;
       v_sub := v_sub || evidence_link(a.kind, a.con_dbid, a.series_key);
       attn_row(a.severity, v_kind_lbl, v_main, v_sub, v_big, v_small);
@@ -2108,8 +2187,10 @@ BEGIN
       IF v_proj_y IS NOT NULL AND v_proj_y > v_ymax THEN v_ymax := v_proj_y; END IF;
       IF v_nband = 2 AND bhi(2) > v_ymax THEN v_ymax := bhi(2); END IF;
       v_ymax := v_ymax * 1.06;
-      FOR a IN (SELECT day_dt, busy_pct FROM capa_cpu_anom WHERE con_dbid = ch.con_dbid AND anomaly_flag IS NOT NULL) LOOP
-        v_nanom := v_nanom + 1; ax(v_nanom) := a.day_dt - c_epoch; ay(v_nanom) := a.busy_pct;
+      FOR a IN (SELECT ts, value, anomaly_modes, how_hours_flagged FROM capr_series_points
+                WHERE con_dbid = ch.con_dbid AND kind = 'CPU' AND series = 'BUSY_PCT' AND anomaly = 1) LOOP
+        v_nanom := v_nanom + 1; ax(v_nanom) := a.ts - c_epoch; ay(v_nanom) := a.value;
+        atip(v_nanom) := ring_tip(a.ts, TO_CHAR(a.value, 'FM990.0') || '% busy (daily average)', a.anomaly_modes, a.how_hours_flagged);
       END LOOP;
       v_cross_x := NULL; v_cross_lbl := NULL;
       IF ch.quality = 'OK' AND ch.days_to_sat IS NOT NULL AND ch.days_to_sat <= 90 THEN
@@ -2435,15 +2516,11 @@ BEGIN
         FOR i IN 1 .. v_nband LOOP blo(i) := GREATEST(blo(i), 0); END LOOP;
         IF v_esm_lo IS NOT NULL THEN v_esm_lo := GREATEST(v_esm_lo, 0); END IF;
 
-        FOR a IN (SELECT an.day_dt, d.used_bytes / 1073741824 AS gb
-                  FROM   capa_tbspc_anom an
-                  JOIN   capd_tbspc_daily d
-                    ON   d.dbid = an.dbid AND d.con_dbid = an.con_dbid
-                   AND   d.tablespace_name = an.tablespace_name AND d.day_dt = an.day_dt
-                  WHERE  an.dbid = f.dbid AND an.con_dbid = f.con_dbid
-                    AND  an.tablespace_name = f.tablespace_name
-                    AND  an.anomaly_flag IS NOT NULL) LOOP
-          v_nanom := v_nanom + 1; ax(v_nanom) := a.day_dt - c_epoch; ay(v_nanom) := a.gb;
+        FOR a IN (SELECT ts, value / 1073741824 AS gb, anomaly_modes FROM capr_series_points
+                  WHERE  dbid = f.dbid AND con_dbid = f.con_dbid
+                    AND  kind = 'TBSPC' AND series = f.tablespace_name AND anomaly = 1) LOOP
+          v_nanom := v_nanom + 1; ax(v_nanom) := a.ts - c_epoch; ay(v_nanom) := a.gb;
+          atip(v_nanom) := ring_tip(a.ts, fmt_size_gb(a.gb) || ' used', a.anomaly_modes, NULL);
         END LOOP;
         v_cross_x := NULL; v_cross_lbl := NULL;
         IF v_show_limit AND f.quality = 'OK' AND f.days_to_full IS NOT NULL AND f.days_to_full <= v_horizon THEN
@@ -2565,8 +2642,10 @@ BEGIN
   p('<section id="s3">');
   p('<h2>3. Unusual tablespace days <span style="font-weight:400;color:var(--muted);font-size:12px">(last '
       || anomaly_days || ' days)</span></h2>');
-  p('<p class="desc">Days when a tablespace grew or shrank much faster than its own normal pace. One strip per '
-      || 'series: red = grew, blue = shrank, bigger = further outside normal. The numbers behind every dot are in the fold.</p>');
+  p('<p class="desc">Days when a tablespace grew or shrank much faster than its own normal pace, judged twice: against the last '
+      || TO_CHAR(mad_window, 'FM9990') || ' days and against the same weekday over the last ' || TO_CHAR(dow_wk, 'FM9990')
+      || ' weeks. One strip per series: red = grew, blue = shrank, bigger = further outside normal. '
+      || 'The numbers behind every dot, one row per baseline that flagged it, are in the fold.</p>');
 
   SELECT MAX(day_dt) INTO v_win_hi FROM capd_tbspc_daily;
   v_strip_n := 0;
@@ -2574,9 +2653,9 @@ BEGIN
     v_win_lo := v_win_hi - anomaly_days;
     v_xmin := v_win_lo - c_epoch; v_xmax := v_win_hi - c_epoch;
     FOR ln IN (
-      SELECT con_dbid, tablespace_name, db_pdb, COUNT(*) AS n_all,
-             SUM(CASE WHEN anomaly_flag = 'HIGH' THEN 1 ELSE 0 END) AS n_hi,
-             SUM(CASE WHEN anomaly_flag = 'LOW'  THEN 1 ELSE 0 END) AS n_lo,
+      SELECT con_dbid, tablespace_name, db_pdb, COUNT(DISTINCT day_dt) AS n_all,
+             COUNT(DISTINCT CASE WHEN anomaly_flag = 'HIGH' THEN day_dt END) AS n_hi,
+             COUNT(DISTINCT CASE WHEN anomaly_flag = 'LOW'  THEN day_dt END) AS n_lo,
              MAX(ABS(delta_mb)) AS max_delta, MAX(ABS(z)) AS max_z
       FROM   capr_tbspc_anomalies
       WHERE  days_ago < anomaly_days
@@ -2593,12 +2672,19 @@ BEGIN
         || CASE WHEN ln.n_lo > 0 THEN TO_CHAR(ln.n_lo, 'FM990') || ' day' || CASE WHEN ln.n_lo = 1 THEN '' ELSE 's' END || ' down' END
         || ' &middot; biggest ' || fmt_size_gb(ln.max_delta / 1024) || '</span></div>');
       strip_open(v_xmin, v_xmax);
-      FOR a IN (SELECT day_dt, day_str, delta_mb, rate_mb, med_mb, z, anomaly_flag
-                FROM capr_tbspc_anomalies
-                WHERE con_dbid = ln.con_dbid AND tablespace_name = ln.tablespace_name AND days_ago < anomaly_days) LOOP
+      -- one dot per day: the baseline with the largest |z| sizes it, the
+      -- others are named in the tooltip
+      FOR a IN (SELECT day_dt, day_str, delta_mb, med_mb, z, anomaly_flag, baseline_mode, n_modes
+                FROM  (SELECT t.*,
+                              ROW_NUMBER() OVER (PARTITION BY day_dt ORDER BY ABS(z) DESC NULLS LAST, mode_rank) AS rn,
+                              COUNT(*) OVER (PARTITION BY day_dt) AS n_modes
+                       FROM   capr_tbspc_anomalies t
+                       WHERE  con_dbid = ln.con_dbid AND tablespace_name = ln.tablespace_name AND days_ago < anomaly_days)
+                WHERE rn = 1) LOOP
         v_tip := a.day_str || ': ' || CASE WHEN a.delta_mb >= 0 THEN 'grew ' ELSE 'shrank ' END
-                 || fmt_size_gb(ABS(a.delta_mb) / 1024) || ' (usual ' || fmt_size_gb(NVL(a.med_mb, 0) / 1024) || '/day), robust z '
-                 || TO_CHAR(a.z, 'FM99990.0');
+                 || fmt_size_gb(ABS(a.delta_mb) / 1024) || ' (usual ' || fmt_rate_mb(NVL(a.med_mb, 0)) || ' '
+                 || mode_phrase(a.baseline_mode, a.day_dt) || '), robust z ' || TO_CHAR(a.z, 'FM99990.0')
+                 || CASE WHEN a.n_modes > 1 THEN '; both baselines flagged it' END;
         p('<circle class="' || CASE WHEN a.anomaly_flag = 'HIGH' THEN 'sd-hi' ELSE 'sd-lo' END
           || '" cx="' || fmt_px(lin(a.day_dt - c_epoch, v_xmin, v_xmax, 4, 896)) || '" cy="15" r="'
           || fmt_px(3.5 + LEAST(4, ABS(NVL(a.z, 0)) / 6)) || '"><title>' || esc(v_tip) || '</title></circle>');
@@ -2614,11 +2700,11 @@ BEGIN
 
   any_rows := FALSE;
   FOR r IN (
-    SELECT db_pdb, tablespace_name, day_str AS day_dt, gap, delta_mb, rate_mb, med_mb, thr_mb, z,
+    SELECT db_pdb, tablespace_name, day_str AS day_dt, baseline_mode, gap, delta_mb, rate_mb, med_mb, thr_mb, z,
            pct_vs_med, pct_vs_avg, anomaly_flag
     FROM   capr_tbspc_anomalies
     WHERE  days_ago < anomaly_days
-    ORDER  BY con_dbid, tablespace_name, days_ago
+    ORDER  BY con_dbid, tablespace_name, days_ago, mode_rank
   ) LOOP
     IF NOT any_rows THEN
       p('<details class="fold"><summary>The numbers behind every dot</summary><div class="fold-body">');
@@ -2626,10 +2712,13 @@ BEGIN
       p('<table class="tbl"><thead><tr>'
         || '<th>DB/PDB</th><th>Tablespace' || info_icon('CAPR column: TABLESPACE_NAME')
         || '</th><th>Day' || info_icon('CAPR column: DAY_DT')
+        || '</th><th>Baseline' || info_icon('what the day was compared against: the last '
+           || TO_CHAR(mad_window, 'FM9990') || ' days, or the same weekday over the last '
+           || TO_CHAR(dow_wk, 'FM9990') || ' weeks (CAPR column: BASELINE_MODE)')
         || '</th><th class="num">Gap' || info_icon('days since the previous sample -- a big gap can inflate a one-day change (CAPR column: GAP)')
         || '</th><th class="num">Delta (MiB)' || info_icon('CAPR column: DELTA_MB')
         || '</th><th class="num">Rate (MiB/day)' || info_icon('how fast it grew that day, in mebibytes (MiB) per day (CAPR column: RATE_MB)')
-        || '</th><th class="num">Median (MiB/day)' || info_icon('its usual daily growth rate over the recent baseline window (CAPR column: MED_MB)')
+        || '</th><th class="num">Median (MiB/day)' || info_icon('its usual daily growth rate on that baseline (CAPR column: MED_MB)')
         || '</th><th class="num">Threshold (MiB/day)' || info_icon('how far from usual a day must be before it is flagged (CAPR column: THR_MB)')
         || '</th><th class="num">Robust z' || info_icon('how far outside its normal range this day was -- 3 or more is clearly unusual (CAPR column: Z)')
         || '</th><th class="num">vs median %' || info_icon('how much faster (+) or slower (-) it grew that day than its usual daily rate, in percent -- +25 means 25% more (CAPR column: PCT_VS_MED)')
@@ -2639,6 +2728,7 @@ BEGIN
       any_rows := TRUE;
     END IF;
     p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.tablespace_name) || '</td><td style="white-space:nowrap">' || r.day_dt || '</td>'
+      || '<td style="white-space:nowrap">' || mode_label(r.baseline_mode) || '</td>'
       || '<td class="num">' || nz(r.gap, 'FM990') || '</td>'
       || '<td class="num">' || nz(r.delta_mb, 'FM9999990.0') || '</td>'
       || '<td class="num">' || nz(r.rate_mb, 'FM9999990.0') || '</td>'
@@ -2669,9 +2759,9 @@ BEGIN
 
   ----------------------------------------------------------------------
   -- Chart grid: one busy% card (history + saturation threshold + REGR
-  -- projection to +90 + anomaly dots) and one DB CPU sec/day card (history
-  -- + REGR projection to +90; no fixed ceiling, so no threshold line, and
-  -- CAPA_CPU_ANOM only covers busy%, so no anomaly dots there) per con_dbid.
+  -- projection to +90 + anomaly dots) and one DB CPU % of cores card
+  -- (history + REGR projection to +90 + anomaly dots + level-shift shading)
+  -- per con_dbid.
   -- Note (fleet/warehouse edge case): like the existing section 4/5 tables,
   -- this groups by con_dbid only, matching CAPF_CPU_TREND/CAPD_*_DAILY's own
   -- grouping; a con_dbid shared by more than one dbid (uncommon) would blend
@@ -2743,8 +2833,10 @@ BEGIN
         IF v_proj_y IS NOT NULL AND v_proj_y > v_ymax THEN v_ymax := v_proj_y; END IF;
         FOR i IN 1 .. v_nband LOOP IF bhi(i) > v_ymax THEN v_ymax := bhi(i); END IF; END LOOP;
         v_ymax := v_ymax * 1.06;
-        FOR a IN (SELECT day_dt, busy_pct FROM capa_cpu_anom WHERE con_dbid = cd.con_dbid AND anomaly_flag IS NOT NULL) LOOP
-          v_nanom := v_nanom + 1; ax(v_nanom) := a.day_dt - c_epoch; ay(v_nanom) := a.busy_pct;
+        FOR a IN (SELECT ts, value, anomaly_modes, how_hours_flagged FROM capr_series_points
+                  WHERE con_dbid = cd.con_dbid AND kind = 'CPU' AND series = 'BUSY_PCT' AND anomaly = 1) LOOP
+          v_nanom := v_nanom + 1; ax(v_nanom) := a.ts - c_epoch; ay(v_nanom) := a.value;
+          atip(v_nanom) := ring_tip(a.ts, TO_CHAR(a.value, 'FM990.0') || '% busy (daily average)', a.anomaly_modes, a.how_hours_flagged);
         END LOOP;
         v_cross_x := NULL; v_cross_lbl := NULL;
         IF v_quality = 'OK' AND v_dtf IS NOT NULL AND v_dtf <= 90 THEN
@@ -2760,7 +2852,7 @@ BEGIN
       END IF;
 
       -- ---- DB CPU as % of host cores: comparable to the busy% chart, and the
-      --      metric CAPA_CPU_SHIFT scores, so a sustained step is shaded here ----
+      --      metric the level-shift test scores, so a sustained step is shaded here ----
       xs.DELETE; ys.DELETE; xs2.DELETE; ys2.DELETE; v_cnt := 0; v_cnt2 := 0; v_nband := 0; v_nanom := 0; v_has_proj := FALSE;
       FOR h IN (SELECT day_dt, db_cpu_pct FROM capd_dbtime_daily
                 WHERE con_dbid = cd.con_dbid AND db_cpu_pct IS NOT NULL ORDER BY day_dt) LOOP
@@ -2814,6 +2906,11 @@ BEGIN
         IF v_ymax >= cpu_sat * 0.35 THEN v_ymax := GREATEST(v_ymax, cpu_sat); END IF;
         IF v_ymax < 1 THEN v_ymax := 1; END IF;
         v_ymax := v_ymax * 1.08;
+        FOR a IN (SELECT ts, value, anomaly_modes, how_hours_flagged FROM capr_series_points
+                  WHERE con_dbid = cd.con_dbid AND kind = 'CPU' AND series = 'DB_CPU_PCT' AND anomaly = 1) LOOP
+          v_nanom := v_nanom + 1; ax(v_nanom) := a.ts - c_epoch; ay(v_nanom) := a.value;
+          atip(v_nanom) := ring_tip(a.ts, TO_CHAR(a.value, 'FM990.0') || '% of host cores', a.anomaly_modes, a.how_hours_flagged);
+        END LOOP;
         chart_svg('DB CPU as a percent of host cores for ' || esc(db_label(NULL, cd.con_dbid))
                   || CASE WHEN v_shift_lbl IS NOT NULL THEN ', with the sustained level shift shaded' END,
                   v_xmin, v_xmax, v_ymin, v_ymax, '%', v_last_day_n,
@@ -2900,9 +2997,11 @@ BEGIN
   ----------------------------------------------------------------------
   p('<section id="s5">');
   p('<h2>5. Unusual CPU days <span style="font-weight:400;color:var(--muted);font-size:12px">'
-      || 'vs the same weekday, last ' || anomaly_days || ' days</span></h2>');
-  p('<p class="desc">Days when the host was much busier (red) or quieter (blue) than it usually is on that weekday, '
-      || 'then the sustained level shifts a single-day test cannot see.</p>');
+      || 'vs trailing / same-weekday / hour-of-week baselines, last ' || anomaly_days || ' days</span></h2>');
+  p('<p class="desc">Days and hours when the host, or a container''s DB CPU, was much busier (red) or quieter (blue) than usual. '
+      || 'Each day is judged against the last ' || TO_CHAR(mad_window, 'FM9990') || ' days and against the same weekday over the last '
+      || TO_CHAR(dow_wk, 'FM9990') || ' weeks; each hour against the same hour of the week over those weeks. '
+      || 'Then the sustained level shifts a single-day test cannot see.</p>');
 
   SELECT MAX(day_dt) INTO v_win_hi FROM capd_cpu_daily;
   v_strip_n := 0;
@@ -2910,29 +3009,40 @@ BEGIN
     v_win_lo := v_win_hi - anomaly_days;
     v_xmin := v_win_lo - c_epoch; v_xmax := v_win_hi - c_epoch;
     FOR ln IN (
-      SELECT con_dbid, db_pdb, COUNT(*) AS n_all,
-             SUM(CASE WHEN anomaly_flag = 'HIGH' THEN 1 ELSE 0 END) AS n_hi,
-             SUM(CASE WHEN anomaly_flag = 'LOW'  THEN 1 ELSE 0 END) AS n_lo,
-             MAX(busy_pct) AS max_busy
+      SELECT con_dbid, db_pdb, metric, COUNT(DISTINCT grain || TO_CHAR(ts, 'YYYYMMDDHH24')) AS n_all,
+             COUNT(DISTINCT CASE WHEN anomaly_flag = 'HIGH' THEN grain || TO_CHAR(ts, 'YYYYMMDDHH24') END) AS n_hi,
+             COUNT(DISTINCT CASE WHEN anomaly_flag = 'LOW'  THEN grain || TO_CHAR(ts, 'YYYYMMDDHH24') END) AS n_lo,
+             MAX(value_pct) AS max_busy
       FROM   capr_cpu_anomalies
       WHERE  days_ago < anomaly_days
-      GROUP  BY con_dbid, db_pdb
-      ORDER  BY n_all DESC, con_dbid
+      GROUP  BY con_dbid, db_pdb, metric
+      ORDER  BY n_all DESC, con_dbid, metric
     ) LOOP
       v_strip_n := v_strip_n + 1;
       IF v_strip_n = 1 THEN p('<div class="strips">'); END IF;
-      p('<div class="strip"><div class="sl"><b>Host CPU</b>' || CASE WHEN v_con_count > 1 THEN ' <span class="dim">' || esc(ln.db_pdb) || '</span>' END
+      p('<div class="strip"><div class="sl"><b>' || CASE ln.metric WHEN 'BUSY_PCT' THEN 'Host CPU' ELSE 'DB CPU' END || '</b>'
+        || CASE WHEN v_con_count > 1 OR ln.metric <> 'BUSY_PCT' THEN ' <span class="dim">' || esc(ln.db_pdb) || '</span>' END
         || '<span>' || CASE WHEN ln.n_hi > 0 THEN TO_CHAR(ln.n_hi, 'FM990') || ' busier' END
         || CASE WHEN ln.n_hi > 0 AND ln.n_lo > 0 THEN ' &middot; ' END
         || CASE WHEN ln.n_lo > 0 THEN TO_CHAR(ln.n_lo, 'FM990') || ' quieter' END
         || ' &middot; busiest ' || TO_CHAR(ln.max_busy, 'FM990') || '%</span></div>');
       strip_open(v_xmin, v_xmax);
-      FOR a IN (SELECT day_dt, day_str, busy_pct, median_pct, z, anomaly_flag FROM capr_cpu_anomalies
-                WHERE con_dbid = ln.con_dbid AND days_ago < anomaly_days) LOOP
-        v_tip := a.day_str || ': ' || TO_CHAR(a.busy_pct, 'FM990') || '% busy vs the usual '
-                 || TO_CHAR(a.median_pct, 'FM990') || '% for that weekday, robust z ' || TO_CHAR(a.z, 'FM99990.0');
+      -- one dot per day or hour: the day baseline with the largest |z| sizes
+      -- a day dot, the other is named in the tooltip
+      FOR a IN (SELECT ts, ts_str, value_pct, median_pct, z, anomaly_flag, baseline_mode, n_modes
+                FROM  (SELECT t.*,
+                              ROW_NUMBER() OVER (PARTITION BY grain, ts ORDER BY ABS(z) DESC NULLS LAST, mode_rank) AS rn,
+                              COUNT(*) OVER (PARTITION BY grain, ts) AS n_modes
+                       FROM   capr_cpu_anomalies t
+                       WHERE  con_dbid = ln.con_dbid AND metric = ln.metric AND days_ago < anomaly_days)
+                WHERE rn = 1) LOOP
+        v_tip := a.ts_str || ': ' || TO_CHAR(a.value_pct, 'FM990')
+                 || CASE ln.metric WHEN 'BUSY_PCT' THEN '% busy' ELSE '% of host cores' END || ' vs the usual '
+                 || TO_CHAR(a.median_pct, 'FM990') || '% ' || mode_phrase(a.baseline_mode, a.ts)
+                 || ', robust z ' || TO_CHAR(a.z, 'FM99990.0')
+                 || CASE WHEN a.n_modes > 1 THEN '; both day baselines flagged it' END;
         p('<circle class="' || CASE WHEN a.anomaly_flag = 'HIGH' THEN 'sd-hi' ELSE 'sd-lo' END
-          || '" cx="' || fmt_px(lin(a.day_dt - c_epoch, v_xmin, v_xmax, 4, 896)) || '" cy="15" r="'
+          || '" cx="' || fmt_px(lin(a.ts - c_epoch, v_xmin, v_xmax, 4, 896)) || '" cy="15" r="'
           || fmt_px(3.5 + LEAST(4, ABS(NVL(a.z, 0)) / 3)) || '"><title>' || esc(v_tip) || '</title></circle>');
       END LOOP;
       p('</svg></div>');
@@ -2946,26 +3056,31 @@ BEGIN
 
   any_rows := FALSE;
   FOR r IN (
-    SELECT db_pdb, day_str AS day_dt, busy_pct, median_pct, threshold_pct, z, pct_vs_med, anomaly_flag
+    SELECT db_pdb, metric, baseline_mode, ts_str, value_pct, median_pct, threshold_pct, z, pct_vs_med, anomaly_flag
     FROM   capr_cpu_anomalies
     WHERE  days_ago < anomaly_days
-    ORDER  BY days_ago, con_dbid
+    ORDER  BY days_ago, con_dbid, metric, mode_rank, ts
   ) LOOP
     IF NOT any_rows THEN
       p('<details class="fold"><summary>The numbers behind every dot</summary><div class="fold-body">');
       p('<div class="tscroll">');
       p('<table class="tbl"><thead><tr>'
-        || '<th>DB/PDB</th><th>Day' || info_icon('CAPR column: DAY_DT')
-        || '</th><th class="num">Busy %' || info_icon('CAPR column: BUSY_PCT')
-        || '</th><th class="num">Median %' || info_icon('the usual busy percent for that same weekday (CAPR column: MEDIAN_PCT)')
+        || '<th>DB/PDB</th><th>Metric' || info_icon('BUSY_PCT = host busy percent, DB_CPU_PCT = the container''s DB CPU as a percent of host cores (CAPR column: METRIC)')
+        || '</th><th>Baseline' || info_icon('what it was compared against: the last ' || TO_CHAR(mad_window, 'FM9990')
+           || ' days or the same weekday (per day), or the same hour of the week (per hour) (CAPR column: BASELINE_MODE)')
+        || '</th><th>When' || info_icon('the day, or for an hour row the day, weekday and END hour (CAPR column: TS_STR)')
+        || '</th><th class="num">Value %' || info_icon('CAPR column: VALUE_PCT')
+        || '</th><th class="num">Median %' || info_icon('the usual value on that baseline (CAPR column: MEDIAN_PCT)')
         || '</th><th class="num">Threshold %' || info_icon('how far from usual a day must be before it is flagged (CAPR column: THRESHOLD_PCT)')
         || '</th><th class="num">Robust z' || info_icon('how far outside its normal range this day was -- 3 or more is clearly unusual (CAPR column: Z)')
-        || '</th><th class="num">vs median %' || info_icon('how much busier (+) or quieter (-) the host was than usual for that weekday, in percent -- +25 means 25% more (CAPR column: PCT_VS_MED)')
+        || '</th><th class="num">vs median %' || info_icon('how much busier (+) or quieter (-) it was than usual on that baseline, in percent -- +25 means 25% more (CAPR column: PCT_VS_MED)')
         || '</th><th>Flag' || info_icon('CAPR column: ANOMALY_FLAG') || '</th></tr></thead><tbody>');
       any_rows := TRUE;
     END IF;
-    p('<tr><td>' || esc(r.db_pdb) || '</td><td style="white-space:nowrap">' || r.day_dt || '</td>'
-      || '<td class="num">' || nz(r.busy_pct, 'FM9990.00') || '</td>'
+    p('<tr><td>' || esc(r.db_pdb) || '</td><td>' || esc(r.metric) || '</td>'
+      || '<td style="white-space:nowrap">' || mode_label(r.baseline_mode) || '</td>'
+      || '<td style="white-space:nowrap">' || esc(r.ts_str) || '</td>'
+      || '<td class="num">' || nz(r.value_pct, 'FM9990.00') || '</td>'
       || '<td class="num">' || nz(r.median_pct, 'FM9990.00') || '</td>'
       || '<td class="num">' || nz(r.threshold_pct, 'FM9990.00') || '</td>'
       || '<td class="num' || (CASE WHEN ABS(NVL(r.z,0)) >= 3 THEN ' z-hi' ELSE '' END) || '">'
@@ -2977,7 +3092,7 @@ BEGIN
     p('</tbody></table>');
     p('</div></div></details>');
   ELSE
-    p('<div class="glance-ok">No unusual CPU days in the last ' || TO_CHAR(anomaly_days, 'FM999990') || ' days.</div>');
+    p('<div class="glance-ok">No unusual CPU days or hours in the last ' || TO_CHAR(anomaly_days, 'FM999990') || ' days.</div>');
   END IF;
 
   -- 5b: level shifts (M10.3). A different question from 5a -- not "was one
@@ -3174,6 +3289,54 @@ BEGIN
   ELSE
     p('<div class="empty-note">No fixed-ceiling series yet (needs DBA_HIST_RESOURCE_LIMIT / '
       || 'DBA_HIST_SYSSTAT history, or tablespace history for DB_SIZE_GB).</div>');
+  END IF;
+
+  -- 7b: unusual days of the same series (CAPR_SERIES_ANOMALIES), the rows
+  -- the SERIES_ANOM alerts point at
+  p('<h3 style="font-size:13px;margin:16px 0 6px">Unusual series days <span style="font-weight:400;color:var(--muted)">(last '
+      || anomaly_days || ' days)</span></h3>');
+  p('<p class="desc">PROCESSES, SESSIONS and REDO_GB_DAY are judged on their daily level, DB_SIZE_GB on how much it grew that day. '
+      || 'Each day is compared against the last ' || TO_CHAR(mad_window, 'FM9990') || ' days and against the same weekday over the last '
+      || TO_CHAR(dow_wk, 'FM9990') || ' weeks; one row per baseline that flagged it.</p>');
+  any_rows := FALSE;
+  FOR r IN (
+    SELECT db_pdb, series, unit, day_str, baseline_mode, value, expected, threshold, z, n_hist, pct_vs_med, anomaly_flag
+    FROM   capr_series_anomalies
+    WHERE  days_ago < anomaly_days
+    ORDER  BY days_ago, con_dbid, series, mode_rank
+  ) LOOP
+    IF NOT any_rows THEN
+      p('<div class="tscroll">');
+      p('<table class="tbl tight"><thead><tr>'
+        || '<th>DB/PDB</th><th>Series' || info_icon('CAPR column: SERIES')
+        || '</th><th>Day' || info_icon('CAPR column: DAY_STR')
+        || '</th><th>Baseline' || info_icon('what the day was compared against (CAPR column: BASELINE_MODE)')
+        || '</th><th class="num">Value' || info_icon('the level that day, or for DB_SIZE_GB the GiB grown per day (CAPR columns: VALUE, UNIT)')
+        || '</th><th class="num">Median' || info_icon('the usual value on that baseline (CAPR column: EXPECTED)')
+        || '</th><th class="num">Threshold' || info_icon('how far from usual a day must be before it is flagged (CAPR column: THRESHOLD)')
+        || '</th><th class="num">Robust z' || info_icon('how far outside its normal range this day was -- 3 or more is clearly unusual (CAPR column: Z)')
+        || '</th><th class="num">Baseline days' || info_icon('CAPR column: N_HIST')
+        || '</th><th class="num">vs median %' || info_icon('CAPR column: PCT_VS_MED')
+        || '</th><th>Flag' || info_icon('CAPR column: ANOMALY_FLAG') || '</th></tr></thead><tbody>');
+      any_rows := TRUE;
+    END IF;
+    p('<tr><td>' || esc(r.db_pdb) || '</td><td><b>' || esc(r.series) || '</b></td>'
+      || '<td style="white-space:nowrap">' || r.day_str || '</td>'
+      || '<td style="white-space:nowrap">' || mode_label(r.baseline_mode) || '</td>'
+      || '<td class="num">' || series_val(r.value, r.unit) || '</td>'
+      || '<td class="num">' || series_val(r.expected, r.unit) || '</td>'
+      || '<td class="num">' || series_val(r.threshold, r.unit) || '</td>'
+      || '<td class="num' || (CASE WHEN ABS(NVL(r.z,0)) >= 3 THEN ' z-hi' ELSE '' END) || '">'
+         || nz(r.z, 'FM99990.0') || '</td>'
+      || '<td class="num">' || nz(r.n_hist, 'FM9990') || '</td>'
+      || '<td class="num">' || nz(r.pct_vs_med, 'FMS999999999990') || '</td>'
+      || '<td class="' || CASE WHEN r.anomaly_flag = 'HIGH' THEN 'sev-crit' ELSE 'sev-ok' END || '">' || esc(r.anomaly_flag) || '</td></tr>');
+  END LOOP;
+  IF any_rows THEN
+    p('</tbody></table>');
+    p('</div>');  -- .tscroll
+  ELSE
+    p('<div class="glance-ok">No unusual series days in the last ' || TO_CHAR(anomaly_days, 'FM999990') || ' days.</div>');
   END IF;
   p('</section>');
 

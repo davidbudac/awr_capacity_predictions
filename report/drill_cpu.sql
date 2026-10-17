@@ -6,10 +6,11 @@
 --   1. the fit header      -- slope / intercept / R2 / slope CI / days-to-sat
 --   2. the daily series    -- actual, fitted, residual, day-over-day delta,
 --                             gap, the day's p95/max/peak-window companions,
---                             and the CAPA_CPU_ANOM baseline for that day
+--                             and both day baselines (trailing, same weekday)
 --   3. residual footer     -- SUM(resid) ~ 0 and resid_se = sqrt(SSE/(n-2)),
 --                             the number the M9.1 prediction bands are built on
---   4. anomaly arithmetic  -- one spelled-out line per flagged day
+--   4. anomaly arithmetic  -- one spelled-out line per flagged (day, mode),
+--                             then the flagged hours vs the hour-of-week baseline
 --
 -- METRICS (as in CAPF_CPU_TREND / ddl/30_forecast_views.sql `src`):
 --   BUSY_PCT   host busy%, daily time-weighted average   (CAPD_CPU_DAILY)
@@ -18,8 +19,8 @@
 --   DB_CPU_SEC foreground DB CPU seconds/day             (CAPD_DBTIME_DAILY)
 --   DB_CPU_PCT DB CPU as % of host core capacity         (CAPD_DBTIME_DAILY)
 --   DB_CPU_P95 p95 of the per-interval DB CPU %          (CAPD_DBTIME_DAILY)
--- CAPA_CPU_ANOM scores the DAILY AVERAGE busy% only, so the anomaly columns
--- and section 3 read "n/a" for every metric except BUSY_PCT.
+-- Anomalies are scored for BUSY_PCT and DB_CPU_PCT only (per day and per
+-- hour), so the anomaly columns and section 3 read "n/a" for the other four.
 --
 -- READ-ONLY: SELECTs against CAPD_/CAPF_/CAPA_/CAPR_ views only (never
 -- DBA_HIST_*), no DML/DDL, no database object created or modified.
@@ -76,6 +77,9 @@ COLUMN k_madk  NEW_VALUE k_madk  NOPRINT
 COLUMN k_dow   NEW_VALUE k_dow   NOPRINT
 COLUMN k_mmad  NEW_VALUE k_mmad  NOPRINT
 COLUMN k_hist  NEW_VALUE k_hist  NOPRINT
+COLUMN k_madw  NEW_VALUE k_madw  NOPRINT
+COLUMN k_thist NEW_VALUE k_thist NOPRINT
+COLUMN k_mmadh NEW_VALUE k_mmadh NOPRINT
 COLUMN k_sat   NEW_VALUE k_sat   NOPRINT
 SELECT TO_CHAR(c.train_days,                 'FM9999990')         AS k_train,
        TO_CHAR(c.min_train_days,             'FM9999990')         AS k_min,
@@ -84,6 +88,9 @@ SELECT TO_CHAR(c.train_days,                 'FM9999990')         AS k_train,
        TO_CHAR(c.dow_weeks,                  'FM9999990')         AS k_dow,
        RTRIM(TO_CHAR(c.cpu_min_mad_pct,      'FM9999990.9'), '.') AS k_mmad,
        TO_CHAR(c.weekly_min_hist,            'FM9999990')         AS k_hist,
+       TO_CHAR(c.mad_window_days,            'FM9999990')         AS k_madw,
+       TO_CHAR(c.trailing_min_hist,          'FM9999990')         AS k_thist,
+       RTRIM(TO_CHAR(c.cpu_min_mad_pct_hour, 'FM9999990.9'), '.') AS k_mmadh,
        TO_CHAR(c.cpu_sat_pct,                'FM9999990')         AS k_sat
 FROM   cap_cfg c;
 SET TERMOUT ON
@@ -175,8 +182,10 @@ PROMPT    P95/MAX/PEAK are the same day's companions (busy_p95/busy_max/
 PROMPT    busy_peak_pct for BUSY_*, db_cpu_p95/max/peak_pct for DB_CPU_*).
 PROMPT    N_IVL = snapshot intervals that survived the restart/reset guard.
 PROMPT    Incomplete days (is_complete = N) are not listed: the fit skips them.
-PROMPT    MED/SIGMA/THR/Z/FLAG come from CAPA_CPU_ANOM (daily busy% only, so
-PROMPT    they read n/a unless the metric is BUSY_PCT).
+PROMPT    Each day is judged against two baselines (CAPA_ANOM baseline_mode = ...):
+PROMPT    TRL_* = TRAILING, the previous &k_madw days; DOW_* = SAME_DOW, the same
+PROMPT    weekday over the previous &k_dow weeks. MED = baseline median, Z = robust z.
+PROMPT    Only BUSY_PCT and DB_CPU_PCT are scored; the other metrics read n/a.
 
 COLUMN day_dt  FORMAT A10           HEADING 'DAY'
 COLUMN day_n   FORMAT 999990        HEADING 'DAY_N'
@@ -189,11 +198,12 @@ COLUMN resid   FORMAT 9999990.000   HEADING 'RESID'
 COLUMN delta   FORMAT 9999990.000   HEADING 'DELTA'
 COLUMN gap     FORMAT 990           HEADING 'GAP'
 COLUMN n_ivl   FORMAT 9990          HEADING 'N_IVL'
-COLUMN med     FORMAT 99990.00      HEADING 'MED'    NULL 'n/a'
-COLUMN sigma   FORMAT 99990.00      HEADING 'SIGMA'  NULL 'n/a'
-COLUMN thr     FORMAT 99990.00      HEADING 'THR'    NULL 'n/a'
-COLUMN z       FORMAT 99990.0       HEADING 'Z'      NULL 'n/a'
-COLUMN flag    FORMAT A4            HEADING 'FLAG'   NULL 'n/a'
+COLUMN trl_med  FORMAT 99990.00   HEADING 'TRL_MED'  NULL 'n/a'
+COLUMN trl_z    FORMAT 99990.0    HEADING 'TRL_Z'    NULL 'n/a'
+COLUMN trl_flag FORMAT A8         HEADING 'TRL_FLAG' NULL 'n/a'
+COLUMN dow_med  FORMAT 99990.00   HEADING 'DOW_MED'  NULL 'n/a'
+COLUMN dow_z    FORMAT 99990.0    HEADING 'DOW_Z'    NULL 'n/a'
+COLUMN dow_flag FORMAT A8         HEADING 'DOW_FLAG' NULL 'n/a'
 
 -- Metric -> source column, mirroring the `src` CTE of CAPF_CPU_TREND,
 -- complete days only, as the view fits them. Only the branch owning the
@@ -246,21 +256,25 @@ SELECT TO_CHAR(s.day_dt, 'YYYY-MM-DD')                          AS day_dt,
        s.d_val                                                  AS delta,
        s.day_gap                                                AS gap,
        s.n_intervals                                            AS n_ivl,
-       -- CAST: when the metric is not BUSY_PCT the constant-false ON clause
-       -- lets Oracle eliminate the outer join and describe these as NULL
-       -- literals (zero-length CHAR), which would collapse the columns to one
-       -- character wide. The CAST pins the datatype so the FORMAT/NULL 'n/a'
-       -- widths hold for every metric.
-       CAST(a.median_pct   AS NUMBER)                           AS med,
-       CAST(a.mad_sigma    AS NUMBER)                           AS sigma,
-       CAST(a.threshold_pct AS NUMBER)                          AS thr,
-       CAST(a.robust_z     AS NUMBER)                           AS z,
-       CAST(a.anomaly_flag AS VARCHAR2(5))                      AS flag
+       -- CAST: pins the datatypes so the FORMAT/NULL 'n/a' widths hold even
+       -- when the optimizer describes an outer join that can match nothing
+       -- (an unscored metric) as NULL literals one character wide.
+       CAST(t.expected     AS NUMBER)                           AS trl_med,
+       CAST(t.robust_z     AS NUMBER)                           AS trl_z,
+       CAST(t.anomaly_flag AS VARCHAR2(5))                      AS trl_flag,
+       CAST(w.expected     AS NUMBER)                           AS dow_med,
+       CAST(w.robust_z     AS NUMBER)                           AS dow_z,
+       CAST(w.anomaly_flag AS VARCHAR2(5))                      AS dow_flag
 FROM   f
 JOIN   s   ON s.dbid = f.dbid AND s.con_dbid = f.con_dbid
-LEFT   JOIN capa_cpu_anom a
-  ON   a.dbid = s.dbid AND a.con_dbid = s.con_dbid AND a.day_dt = s.day_dt
- AND   '&drill_metric' = 'BUSY_PCT'
+LEFT   JOIN capa_anom t
+  ON   t.dbid = s.dbid AND t.con_dbid = s.con_dbid AND t.kind = 'CPU'
+ AND   t.series = '&drill_metric' AND t.ts = s.day_dt
+ AND   t.baseline_mode = 'TRAILING'
+LEFT   JOIN capa_anom w
+  ON   w.dbid = s.dbid AND w.con_dbid = s.con_dbid AND w.kind = 'CPU'
+ AND   w.series = '&drill_metric' AND w.ts = s.day_dt
+ AND   w.baseline_mode = 'SAME_DOW'
 WHERE  s.day_dt BETWEEN f.train_start AND f.last_day
 ORDER  BY s.con_dbid, s.day_dt;
 
@@ -328,10 +342,11 @@ GROUP  BY con_dbid
 ORDER  BY con_dbid;
 
 PROMPT
-PROMPT == 3. ANOMALY ARITHMETIC (CAPA_CPU_ANOM, flagged days in the fit window) ==
-PROMPT    Knobs: mad_k=&k_madk, dow_weeks=&k_dow (baseline = the prior same
-PROMPT    WEEKDAYS, never the day itself), cpu_min_mad_pct=&k_mmad (sigma floor),
-PROMPT    weekly_min_hist=&k_hist (min prior same-weekdays). Values in percent points.
+PROMPT == 3. ANOMALY ARITHMETIC (flagged days in the fit window, one line per mode) ==
+PROMPT    Knobs: mad_k=&k_madk, cpu_min_mad_pct=&k_mmad (sigma floor). TRL baseline = the
+PROMPT    previous &k_madw days (trailing_min_hist=&k_thist obs needed), DOW = the same weekday
+PROMPT    over the previous &k_dow weeks (weekly_min_hist=&k_hist). Every baseline EXCLUDES
+PROMPT    the day itself. Values in percent points.
 
 COLUMN arith FORMAT A190 HEADING 'FLAGGED DAY'
 
@@ -341,44 +356,94 @@ WITH f AS (
         WHERE  metric = '&drill_metric'
           AND  ('&drill_con' = '0' OR TO_CHAR(con_dbid) = '&drill_con')
      ),
+     modes AS (
+        SELECT 'TRAILING' AS bm, 1 AS mrank, 'TRL' AS mshort FROM dual
+        UNION ALL SELECT 'SAME_DOW', 2, 'DOW' FROM dual
+     ),
      hits AS (
-        SELECT a.con_dbid, a.day_dt, a.anomaly_flag, a.n_hist, a.robust_z,
-               a.busy_pct, a.median_pct, a.dev_pct, a.mad_sigma, a.threshold_pct,
-               cfg.mad_k, cfg.cpu_min_mad_pct AS min_mad,
-               GREATEST(a.mad_sigma, cfg.cpu_min_mad_pct) AS eff_sigma
+        SELECT a.con_dbid, a.ts AS day_dt, a.dow, m.mrank, m.mshort, a.anomaly_flag,
+               a.n_hist, a.robust_z, a.value, a.expected, a.dev, a.mad_sigma,
+               a.thr_floor / cfg.mad_k AS floor_sigma, a.threshold, cfg.mad_k
         FROM   f
-        JOIN   capa_cpu_anom a
+        JOIN   capa_anom a
           ON   a.dbid = f.dbid AND a.con_dbid = f.con_dbid
+         AND   a.kind = 'CPU' AND a.series = '&drill_metric'
+        JOIN   modes m
+          ON   a.baseline_mode = m.bm
         CROSS  JOIN cap_cfg cfg
-        WHERE  a.day_dt BETWEEN f.train_start AND f.last_day
+        WHERE  a.ts BETWEEN f.train_start AND f.last_day
           AND  a.anomaly_flag IS NOT NULL
-          AND  '&drill_metric' = 'BUSY_PCT'
      )
 SELECT arith FROM (
-    SELECT 1 AS ord, day_dt AS srt,
-           TO_CHAR(day_dt, 'YYYY-MM-DD') || ' ' || TO_CHAR(day_dt, 'DY') || ' '
-           || RPAD(anomaly_flag, 5)
-           || 'busy ' || TO_CHAR(busy_pct, 'FM99990.000')
-           || ' - median ' || TO_CHAR(median_pct, 'FM99990.000')
-           || ' = dev ' || TO_CHAR(dev_pct, 'FM99990.000')
+    SELECT 1 AS ord, day_dt AS srt, mrank,
+           TO_CHAR(day_dt, 'YYYY-MM-DD') || ' '
+           || DECODE(dow, 0, 'Mon', 1, 'Tue', 2, 'Wed', 3, 'Thu', 4, 'Fri', 5, 'Sat', 'Sun') || ' '
+           || mshort || ' ' || RPAD(anomaly_flag, 5)
+           || 'value ' || TO_CHAR(value, 'FM99990.000')
+           || ' - median ' || TO_CHAR(expected, 'FM99990.000')
+           || ' = dev ' || TO_CHAR(dev, 'FM99990.000')
            || ' | threshold = k ' || TO_CHAR(mad_k, 'FM990.00')
-           || ' * GREATEST(sigma ' || TO_CHAR(mad_sigma, 'FM99990.000')
-           || ', floor ' || TO_CHAR(min_mad, 'FM99990.000')
-           || ') = ' || TO_CHAR(threshold_pct, 'FM99990.000')
+           || ' * GREATEST(sigma ' || TO_CHAR(NVL(mad_sigma, 0), 'FM99990.000')
+           || ', floor ' || TO_CHAR(floor_sigma, 'FM99990.000')
+           || ') = ' || TO_CHAR(threshold, 'FM99990.000')
            || ' | z = ' || NVL(TO_CHAR(robust_z, 'FM99990.00'), 'n/a')
            || ' | n_hist ' || TO_CHAR(n_hist)                                   AS arith
     FROM   hits
     UNION  ALL
-    SELECT 2, NULL,
-           CASE WHEN '&drill_metric' = 'BUSY_PCT'
+    SELECT 2, NULL, NULL,
+           CASE WHEN '&drill_metric' IN ('BUSY_PCT', 'DB_CPU_PCT')
                 THEN '(no day flagged in this window)'
-                ELSE 'n/a -- CAPA_CPU_ANOM scores the daily average busy% only;'
+                ELSE 'n/a -- anomalies are scored for BUSY_PCT and DB_CPU_PCT only;'
                      || ' re-run as @report/drill_cpu.sql BUSY_PCT for anomalies.'
            END
     FROM   dual
     WHERE  NOT EXISTS (SELECT 1 FROM hits)
 )
-ORDER  BY ord, srt;
+ORDER  BY ord, srt, mrank;
+
+PROMPT
+PROMPT == 3b. HOUR-OF-WEEK ANOMALIES (flagged hours in the fit window) ==
+PROMPT    Each hour (END hour shown) against the same weekday and hour over the previous
+PROMPT    &k_dow weeks (CAPA_ANOM baseline_mode = HOUR_OF_WEEK, weekly_min_hist=&k_hist).
+PROMPT    EFF_SIGMA = GREATEST(MAD sigma, cpu_min_mad_pct_hour=&k_mmadh), THRESHOLD = mad_k *
+PROMPT    EFF_SIGMA, Z = DEV / EFF_SIGMA. Gap hours are never scored nor baseline.
+
+COLUMN h_day     FORMAT A10          HEADING 'DAY'
+COLUMN h_when    FORMAT A9           HEADING 'WHEN'
+COLUMN h_flag    FORMAT A4           HEADING 'FLAG'
+COLUMN h_val     FORMAT 99990.00     HEADING 'VALUE'
+COLUMN h_exp     FORMAT 99990.00     HEADING 'EXPECTED'
+COLUMN h_dev     FORMAT S9990.00     HEADING 'DEV'
+COLUMN h_sig     FORMAT 99990.000    HEADING 'EFF_SIGMA'
+COLUMN h_thr     FORMAT 99990.00     HEADING 'THRESHOLD'
+COLUMN h_z       FORMAT S9990.00     HEADING 'Z'
+COLUMN h_n       FORMAT 9990         HEADING 'N_HIST'
+
+WITH f AS (
+        SELECT dbid, con_dbid, last_day, train_start
+        FROM   capf_cpu_trend
+        WHERE  metric = '&drill_metric'
+          AND  ('&drill_con' = '0' OR TO_CHAR(con_dbid) = '&drill_con')
+     )
+SELECT TO_CHAR(a.ts, 'YYYY-MM-DD')                                   AS h_day,
+       DECODE(a.dow, 0, 'Mon', 1, 'Tue', 2, 'Wed', 3, 'Thu', 4, 'Fri', 5, 'Sat', 'Sun')
+         || ' ' || TO_CHAR(a.ts, 'HH24:MI')                          AS h_when,
+       a.anomaly_flag                                                AS h_flag,
+       a.value                                                       AS h_val,
+       a.expected                                                    AS h_exp,
+       a.dev                                                         AS h_dev,
+       a.eff_sigma                                                   AS h_sig,
+       a.threshold                                                   AS h_thr,
+       a.robust_z                                                    AS h_z,
+       a.n_hist                                                      AS h_n
+FROM   f
+JOIN   capa_anom a
+  ON   a.dbid = f.dbid AND a.con_dbid = f.con_dbid
+ AND   a.kind = 'CPU' AND a.series = '&drill_metric'
+ AND   a.baseline_mode = 'HOUR_OF_WEEK'
+WHERE  TRUNC(a.ts) BETWEEN f.train_start AND f.last_day
+  AND  a.anomaly_flag IS NOT NULL
+ORDER  BY a.con_dbid, a.ts;
 
 PROMPT
 PROMPT ================================================================================
@@ -402,5 +467,8 @@ UNDEFINE k_madk
 UNDEFINE k_dow
 UNDEFINE k_mmad
 UNDEFINE k_hist
+UNDEFINE k_madw
+UNDEFINE k_thist
+UNDEFINE k_mmadh
 UNDEFINE k_sat
 CLEAR COLUMNS

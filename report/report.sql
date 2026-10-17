@@ -80,6 +80,8 @@ COLUMN nf_crit  NEW_VALUE nf_crit  NOPRINT
 COLUMN esm_ok   NEW_VALUE esm_ok   NOPRINT
 COLUMN esm_failed NEW_VALUE esm_failed NOPRINT
 COLUMN esm_stale  NEW_VALUE esm_stale  NOPRINT
+COLUMN mad_w      NEW_VALUE mad_w      NOPRINT
+COLUMN dow_w      NEW_VALUE dow_w      NOPRINT
 COLUMN esm_file NEW_VALUE esm_file NOPRINT
 COLUMN min_gb   NEW_VALUE min_gb   NOPRINT
 COLUMN ts_total NEW_VALUE ts_total NOPRINT
@@ -119,7 +121,9 @@ SELECT TO_CHAR(c.dtf_warn,                                                    'F
        -- exact WHERE those sections apply -- so the header states the truth
        -- even when top_n is larger than the number of tablespaces.
        TO_CHAR((SELECT COUNT(*)  FROM capr_tbspc_forecast
-                WHERE is_reportable = 'Y' AND rank_report <= &top_n),               'FM9999990') AS ts_shown
+                WHERE is_reportable = 'Y' AND rank_report <= &top_n),               'FM9999990') AS ts_shown,
+       TO_CHAR(c.mad_window_days,                                             'FM9999990') AS mad_w,
+       TO_CHAR(c.dow_weeks,                                                   'FM9999990') AS dow_w
 FROM   cap_cfg c;
 
 -- Section 6 dispatch:

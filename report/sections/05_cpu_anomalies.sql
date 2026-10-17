@@ -1,37 +1,46 @@
 --
--- 05_cpu_anomalies.sql -- host busy% anomalies vs same-weekday baseline (5a)
--- and sustained level shifts (5b, M10.3).
--- FORMAT ONLY (M8.2): CAPR_CPU_ANOMALIES (flagged rows, DB/PDB label and
--- days_ago precomputed) and CAPR_CPU_SHIFTS (flagged rows, rank_shift
--- precomputed). Threshold = k * max(MAD, cpu_min_mad_pct floor) for 5a,
--- shift_min_pct points for 5b.
+-- 05_cpu_anomalies.sql -- CPU anomalies vs trailing / same-weekday /
+-- hour-of-week baselines (5a) and sustained level shifts (5b, M10.3).
+-- FORMAT ONLY (M8.2): CAPR_CPU_ANOMALIES (flagged rows, DB/PDB label,
+-- days_ago and the ts_str label precomputed) and CAPR_CPU_SHIFTS (flagged
+-- rows, rank_shift precomputed). Threshold = k * max(MAD, sigma floor) for
+-- 5a, shift_min_pct points for 5b.
 --
 PROMPT
-PROMPT == 5. CPU BUSY% ANOMALIES vs same-weekday baseline (last &anomaly_days days) ==
-PROMPT    FLAG when |busy% - median%| exceeds THRESHOLD (k*MAD, floored).
-PROMPT    VS_MED% = busy% vs the same-weekday median, as a percentage (+25 = 25% more)
+PROMPT == 5. CPU ANOMALIES vs trailing / same-weekday / hour-of-week baselines (last &anomaly_days days) ==
+PROMPT    METRIC BUSY_PCT = host busy%, DB_CPU_PCT = a container's DB CPU as % of host cores.
+PROMPT    MODE TRL = the trailing &mad_w days, DOW = the same weekday over the last &dow_w weeks
+PROMPT    (both per day), HOW = the same weekday and hour over those weeks (per hour, WHEN
+PROMPT    shows the END hour). FLAG when |value% - median%| exceeds THRESHOLD (k*MAD, floored).
+PROMPT    N_HIST = baseline points behind the median. VS_MED% = value vs that median, as a percentage (+25 = 25% more)
 
 COLUMN db_pdb       FORMAT A20          HEADING 'DB/PDB'
-COLUMN day_dt       FORMAT A10          HEADING 'DAY'
-COLUMN busy_pct     FORMAT 9990.00      HEADING 'BUSY%'
+COLUMN metric       FORMAT A10          HEADING 'METRIC'
+COLUMN mode_short   FORMAT A4           HEADING 'MODE'
+COLUMN ts_str       FORMAT A20          HEADING 'WHEN'
+COLUMN value_pct    FORMAT 9990.00      HEADING 'VALUE%'
 COLUMN median_pct   FORMAT 9990.00      HEADING 'MEDIAN%'
 COLUMN threshold_pct FORMAT 9990.00     HEADING 'THRESH%'
 COLUMN z            FORMAT 99990.0      HEADING 'ROBUST_Z'
+COLUMN n_hist       FORMAT 9990         HEADING 'N_HIST'
 COLUMN pct_vs_med   FORMAT S9999990     HEADING 'VS_MED%'
 COLUMN anomaly_flag FORMAT A5           HEADING 'FLAG'
 
 SELECT db_pdb,
-       day_str AS day_dt,
-       busy_pct,
+       metric,
+       mode_short,
+       ts_str,
+       value_pct,
        median_pct,
        threshold_pct,
        z,
+       n_hist,
        pct_vs_med,
        anomaly_flag
 FROM   capr_cpu_anomalies
 WHERE  days_ago < &anomaly_days
 -- days_ago ASC is exactly day_dt DESC (days_ago = last collected day - day_dt)
-ORDER  BY days_ago, con_dbid;
+ORDER  BY days_ago, con_dbid, metric, mode_rank, ts;
 
 PROMPT
 PROMPT == 5b. CPU LEVEL SHIFTS (sustained step, not a one-day outlier) ==
