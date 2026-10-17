@@ -1,0 +1,105 @@
+{
+  "_meta": {
+    "description": "awrcap-capacity: one plain index (not a data stream) holding every record the AWR capacity suite exports for Kibana. Plain so that deterministic _ids can be re-indexed (overwritten) on every export run; volume is tiny (days x series).",
+    "records": {
+      "observation": "one per (container, series, day): the observed daily value, with cap.anomaly=true when the CAPA_* layer flagged that day. @timestamp = the day.",
+      "forecast": "one per (container, series, method, horizon): REGR anchors at 0/30/90/180(/365) and the ESM +30 point, each with its band. @timestamp = last observed day + horizon. Overwritten on each run; stale target days are deleted by ship.sh.",
+      "fit": "one per (container, series, export day): slope, r2, quality, days-to-full/limit/saturation with bounds, severity. @timestamp = export day, so days_to_full can itself be charted over time.",
+      "anomaly": "one per flagged event: tablespace growth outlier, host CPU outlier, or a DB CPU level shift. @timestamp = the event day (shift: last day of the recent window).",
+      "alert": "one per CAPR_ALERTS row per export day. @timestamp = export day; cap.obs_day = the day the alert refers to."
+    },
+    "managed_by": "awr_capacity_predictions/elk"
+  },
+  "index_patterns": ["awrcap-capacity*"],
+  "priority": 210,
+  "template": {
+    "settings": {
+      "number_of_shards": 1,
+      "number_of_replicas": 0,
+      "refresh_interval": "5s"
+    },
+    "mappings": {
+      "dynamic": "strict",
+      "date_detection": false,
+      "properties": {
+        "@timestamp": {"type": "date"},
+        "cap": {
+          "properties": {
+            "record":      {"type": "keyword"},
+            "kind":        {"type": "keyword"},
+            "series":      {"type": "keyword"},
+            "db":          {"type": "keyword"},
+            "db_name":     {"type": "keyword"},
+            "con_name":    {"type": "keyword"},
+            "dbid":        {"type": "long"},
+            "con_dbid":    {"type": "long"},
+            "source":      {"type": "keyword"},
+            "exported_at": {"type": "date"},
+            "unit":        {"type": "keyword"},
+
+            "value":       {"type": "double"},
+            "limit":       {"type": "double"},
+            "pct":         {"type": "double"},
+            "lo":          {"type": "double"},
+            "hi":          {"type": "double"},
+
+            "method":       {"type": "keyword"},
+            "horizon_days": {"type": "integer"},
+
+            "anomaly":      {"type": "boolean"},
+            "anomaly_kind": {"type": "keyword"},
+            "anomaly_flag": {"type": "keyword"},
+            "z":            {"type": "double"},
+            "expected":     {"type": "double"},
+            "threshold":    {"type": "double"},
+            "shift_pct":    {"type": "double"},
+            "gap":          {"type": "boolean"},
+
+            "sev":          {"type": "keyword"},
+            "sev_rank":     {"type": "integer"},
+            "alert_kind":   {"type": "keyword"},
+            "obs_day":      {"type": "date"},
+            "message":      {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 1024}}},
+
+            "quality":          {"type": "keyword"},
+            "r2":               {"type": "double"},
+            "slope_per_day":    {"type": "double"},
+            "days_to_full":     {"type": "double"},
+            "days_to_full_lo":  {"type": "double"},
+            "days_to_full_hi":  {"type": "double"},
+            "accel":            {"type": "double"},
+            "train_n":          {"type": "integer"},
+
+            "tbspc": {
+              "properties": {
+                "used_bytes":   {"type": "double"},
+                "size_bytes":   {"type": "double"},
+                "limit_bytes":  {"type": "double"},
+                "limit_source": {"type": "keyword"},
+                "contents":     {"type": "keyword"},
+                "delta_bytes":  {"type": "double"},
+                "rate_bpd":     {"type": "double"}
+              }
+            },
+            "cpu": {
+              "properties": {
+                "busy_pct":        {"type": "double"},
+                "busy_p95":        {"type": "double"},
+                "busy_max":        {"type": "double"},
+                "busy_peak_pct":   {"type": "double"},
+                "host_busy_sec":   {"type": "double"},
+                "num_cpus":        {"type": "integer"},
+                "num_cpu_cores":   {"type": "integer"},
+                "db_cpu_sec":      {"type": "double"},
+                "db_time_sec":     {"type": "double"},
+                "db_cpu_pct":      {"type": "double"},
+                "db_cpu_p95_pct":  {"type": "double"},
+                "db_cpu_per_core": {"type": "double"}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
