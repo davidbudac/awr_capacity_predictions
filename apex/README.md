@@ -180,7 +180,8 @@ already have for the suite. Put ORDS behind TLS outside a lab.
 
 `apex/awrcap_app.sql` is generated; edit `apex/build.py` and re-run
 `python3 apex/build.py`. Component ids come from a fixed sequential
-allocator, so a rebuild is byte-identical unless the builder changed, and
-the file diffs like source. `python3 apex/build.py --smoke` writes
+allocator, so a rebuild is byte-identical unless the builder changed;
+inserting a component renumbers the ids after it, so a small builder change
+can touch many lines of the export (compare builders, not exports). `python3 apex/build.py --smoke` writes
 `apex/test/apex_smoke.sql`, which runs every region query inside a scripted
 APEX session against the demo data; run it after changing a query.
