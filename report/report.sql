@@ -78,6 +78,8 @@ COLUMN cpu_sat  NEW_VALUE cpu_sat  NOPRINT
 COLUMN nf_warn  NEW_VALUE nf_warn  NOPRINT
 COLUMN nf_crit  NEW_VALUE nf_crit  NOPRINT
 COLUMN esm_ok   NEW_VALUE esm_ok   NOPRINT
+COLUMN esm_failed NEW_VALUE esm_failed NOPRINT
+COLUMN esm_stale  NEW_VALUE esm_stale  NOPRINT
 COLUMN esm_file NEW_VALUE esm_file NOPRINT
 COLUMN min_gb   NEW_VALUE min_gb   NOPRINT
 COLUMN ts_total NEW_VALUE ts_total NOPRINT
@@ -104,7 +106,11 @@ SELECT TO_CHAR(c.dtf_warn,                                                    'F
        TO_CHAR(c.cpu_sat_pct,                                                 'FM9999990') AS cpu_sat,
        TO_CHAR(c.nearfull_warn_pct,                                           'FM9999990') AS nf_warn,
        TO_CHAR(c.nearfull_crit_pct,                                           'FM9999990') AS nf_crit,
-       TO_CHAR((SELECT COUNT(*)  FROM cap_ml_model WHERE status='OK'),               'FM9999990') AS esm_ok,
+       -- Tier 2 health: FORECAST models only (backtest twins never reach a
+       -- forecast). CAPF_ESM_HEALTH_SUMMARY has one row per container.
+       TO_CHAR((SELECT NVL(SUM(n_ok), 0)     FROM capf_esm_health_summary),    'FM9999990') AS esm_ok,
+       TO_CHAR((SELECT NVL(SUM(n_failed), 0) FROM capf_esm_health_summary),    'FM9999990') AS esm_failed,
+       TO_CHAR((SELECT NVL(SUM(n_stale), 0)  FROM capf_esm_health_summary),    'FM9999990') AS esm_stale,
        -- report_min_gb may be fractional, so keep the decimals and strip the
        -- trailing point FM leaves behind on a whole number (1. -> 1).
        RTRIM(TO_CHAR(c.report_min_gb, 'FM9999990.999'), '.')                                    AS min_gb,
@@ -118,7 +124,7 @@ FROM   cap_cfg c;
 
 -- Section 6 dispatch:
 --   show_esm='N'                    -> skip stub (note only)
---   show_esm='AUTO' and 0 OK models -> skip stub (nothing to compare yet)
+--   show_esm='AUTO' and 0 OK FORECAST models -> skip stub (nothing to compare yet)
 --   otherwise                       -> full ESM-vs-REGR compare
 SELECT CASE WHEN UPPER('&show_esm') = 'N'
               OR (UPPER('&show_esm') = 'AUTO' AND &esm_ok = 0)
@@ -139,7 +145,7 @@ PROMPT  Host     : &cap_host
 PROMPT  Schema   : &cap_user
 PROMPT  Generated: &cap_gen
 PROMPT  Config   : days-to-full WARN<=&dtf_warn CRIT<=&dtf_crit ; CPU saturation &cpu_sat%
-PROMPT  Tier 2   : &esm_ok OML ESM model(s) trained (OK)
+PROMPT  Tier 2   : OML ESM forecast models &esm_ok ok, &esm_failed failed, &esm_stale stale
 PROMPT ................................................................................
 PROMPT  NOTE: forecasts degrade loudly on short AWR retention -- watch TRAIN_N and
 PROMPT        QUALITY. INSUFFICIENT_HISTORY means fewer than the configured minimum

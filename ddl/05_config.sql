@@ -90,6 +90,8 @@ USING (
     UNION ALL SELECT 'shift_baseline_days',    28,       'M10.3: length of the BASELINE window (days) immediately before the recent window.'                                                   FROM dual
     UNION ALL SELECT 'shift_min_pct',          15,       'M10.3: minimum |recent median - baseline median|, in percentage POINTS, before a level shift is flagged.'                            FROM dual
     UNION ALL SELECT 'series_sat_pct',         90,        'M11: percent of a fixed-ceiling series'' limit (processes/sessions, DB size) treated as saturated for days_to_limit.' FROM dual
+    UNION ALL SELECT 'esm_max_age_days',        7,        'Tier 2: an ESM model trained more than this many days before its series'' last day is stale; CAPF_COMPARE drops it.' FROM dual
+    UNION ALL SELECT 'esm_auto_tie_pct',        0.25,     'Tier 2 AUTO: candidate MAPEs closer than this many percentage points tie and EXSM_HOLT is kept (chosen_by AUTO_TIE).' FROM dual
     UNION ALL SELECT 'suite_version',          13,        'Suite release that built these objects (latest PLAN.md milestone). Set by every install; not a tuning knob.' FROM dual
 ) s
 ON (c.cfg_name = s.cfg_name)
@@ -149,6 +151,8 @@ SELECT MAX(CASE WHEN cfg_name = 'train_days'             THEN cfg_value END) AS 
        MAX(CASE WHEN cfg_name = 'shift_baseline_days'    THEN cfg_value END) AS shift_baseline_days,
        MAX(CASE WHEN cfg_name = 'shift_min_pct'          THEN cfg_value END) AS shift_min_pct,
        MAX(CASE WHEN cfg_name = 'series_sat_pct'         THEN cfg_value END) AS series_sat_pct,
+       MAX(CASE WHEN cfg_name = 'esm_max_age_days'       THEN cfg_value END) AS esm_max_age_days,
+       MAX(CASE WHEN cfg_name = 'esm_auto_tie_pct'       THEN cfg_value END) AS esm_auto_tie_pct,
        MAX(CASE WHEN cfg_name = 'suite_version'          THEN cfg_value END) AS suite_version
 FROM   cap_config;
 
@@ -171,7 +175,8 @@ WITH u AS (
                peak_hour_from, peak_hour_to, cpu_sat_on_p95, backtest_holdout_days,
                report_min_gb, accel_slope_floor_bpd, slope_method, reset_on_shrink,
                shrink_mad_k, cpu_gap_hours, shift_days, shift_baseline_days,
-               shift_min_pct, series_sat_pct, suite_version))
+               shift_min_pct, series_sat_pct, esm_max_age_days, esm_auto_tie_pct,
+               suite_version))
      ),
      r AS (
         SELECT u.knob, u.value,
@@ -198,6 +203,10 @@ WITH u AS (
                         THEN 'must be 0 (OLS) or 1 (THEILSEN)'
                    WHEN u.knob = 'esm_tbspc_model'     AND u.value NOT IN (0, 1, 2)
                         THEN 'must be 0 (HOLT), 1 (ADDWINTERS) or 2 (AUTO)'
+                   WHEN u.knob = 'esm_max_age_days'    AND u.value < 0
+                        THEN 'must be >= 0'
+                   WHEN u.knob = 'esm_auto_tie_pct'    AND u.value < 0
+                        THEN 'must be >= 0'
                    WHEN u.knob = 'suite_version'       AND u.value < 13
                         THEN 'older than this release (13): re-run install.sql'
                END AS reason

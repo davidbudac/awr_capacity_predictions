@@ -40,6 +40,8 @@ DECLARE
         'CAPD_SERIES_DAILY',
         'CAPF_BACKTEST',
         'CAPF_COMPARE',
+        'CAPF_ESM_HEALTH_SUMMARY',
+        'CAPF_ESM_HEALTH',
         'CAPF_ESM_CANDIDATE',
         'CAPF_ESM_BACKTEST',
         'CAPF_ESM_FORECAST',

@@ -4,9 +4,16 @@
 -- NOT part of install.sql. Run it separately, in the schema that owns the
 -- suite, only if you want the two background jobs below:
 --
---   CAP_ML_RETRAIN    weekly (Sun 02:00) cap_forecast_ml.train_all -- refresh
+--   CAP_ML_RETRAIN    daily (02:00) cap_forecast_ml.train_all -- refresh
 --                     the Tier 2 OML ESM models against the latest AWR days.
---                     Needs CREATE MINING MODEL.
+--                     Needs CREATE MINING MODEL. The schedule is the
+--                     retrain_interval DEFINE (a DBMS_SCHEDULER calendar
+--                     string). Daily, not weekly, because of the freshness
+--                     gate: CAPF_COMPARE drops a model older than
+--                     esm_max_age_days (7), and until then compares an ESM
+--                     value dated up to a week before the REGR one. A run
+--                     ends FAILED (ORA-20060) when any forecast model failed
+--                     to build; the reason is in CAPF_ESM_HEALTH.last_error.
 --   CAP_REPORT_SPOOL_JOB
 --                     daily (03:00) cap_report_spool(<dir>) -- writes an
 --                     alert-snapshot text file into a directory object.
@@ -31,6 +38,8 @@
 -- Usage:
 --   sqlplus / as sysdba
 --   SQL> DEFINE report_dir = 'MY_DIR'    -- optional; default CAP_REPORTS
+--   SQL> DEFINE retrain_interval = 'FREQ=WEEKLY;BYDAY=SUN;BYHOUR=2'
+--                                        -- optional; default daily 02:00
 --   SQL> @install_jobs.sql
 --
 -- The directory object is NOT created here (that needs CREATE ANY DIRECTORY
@@ -59,6 +68,9 @@ SET TERMOUT OFF
 COLUMN report_dir NEW_VALUE report_dir NOPRINT
 SELECT CAST(NULL AS VARCHAR2(30)) AS report_dir FROM dual WHERE 1 = 0;
 SELECT UPPER(NVL('&report_dir', 'CAP_REPORTS')) AS report_dir FROM dual;
+COLUMN retrain_interval NEW_VALUE retrain_interval NOPRINT
+SELECT CAST(NULL AS VARCHAR2(200)) AS retrain_interval FROM dual WHERE 1 = 0;
+SELECT NVL('&retrain_interval', 'FREQ=DAILY;BYHOUR=2;BYMINUTE=0;BYSECOND=0') AS retrain_interval FROM dual;
 SET TERMOUT ON
 
 PROMPT
@@ -66,6 +78,7 @@ PROMPT ============================================================
 PROMPT  AWR Capacity Predictions -- scheduler jobs (opt-in)
 PROMPT ============================================================
 PROMPT  report_dir = &report_dir  (directory object for the alert snapshot)
+PROMPT  retrain    = &retrain_interval  (CAP_ML_RETRAIN schedule)
 PROMPT
 
 -- --------------------------------------------------------------------
@@ -218,18 +231,19 @@ END;
 /
 
 BEGIN
-    -- Weekly Tier 2 retrain. train_all(p_top_n) defaults to the top 20
-    -- capacity-critical series, which is what the report shows.
+    -- Tier 2 retrain (see the header for why daily). train_all(p_top_n)
+    -- defaults to the top 20 capacity-critical series, which is what the
+    -- report shows, and refreshes their backtest twins too.
     DBMS_SCHEDULER.CREATE_JOB(
         job_name        => 'CAP_ML_RETRAIN',
         job_type        => 'PLSQL_BLOCK',
         job_action      => 'BEGIN cap_forecast_ml.train_all; END;',
         start_date      => SYSTIMESTAMP,
-        repeat_interval => 'FREQ=WEEKLY;BYDAY=SUN;BYHOUR=2;BYMINUTE=0;BYSECOND=0',
+        repeat_interval => '&retrain_interval',
         enabled         => FALSE,
         auto_drop       => FALSE,
-        comments        => 'AWR capacity: weekly OML ESM retrain (cap_forecast_ml.train_all)');
-    DBMS_OUTPUT.PUT_LINE('  created CAP_ML_RETRAIN    (disabled, FREQ=WEEKLY SUN 02:00)');
+        comments        => 'AWR capacity: OML ESM retrain (cap_forecast_ml.train_all)');
+    DBMS_OUTPUT.PUT_LINE('  created CAP_ML_RETRAIN    (disabled, &retrain_interval)');
 END;
 /
 

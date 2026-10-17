@@ -10,7 +10,8 @@
 --
 --   CAPR_TBSPC_FORECAST -- section 2 body: per-tablespace REGR projections in
 --                          GiB with the +180 prediction band, R2, quality and
---                          the Tier 2 ESM +30 point (with its bounds). Also
+--                          the Tier 2 ESM point (with its bounds) from
+--                          CAPF_COMPARE's 30-day bucket. Also
 --                          carries the raw bytes columns and rank_chart, so
 --                          the HTML chart grid reads its geometry inputs from
 --                          the same row the table prints.
@@ -26,7 +27,7 @@
 --   CAPR_BACKTEST       -- section 6c: the M9.4 holdout scorecard pivoted to
 --                          one row per series, incl. the BETTER verdict and
 --                          (M10.4) the ESM model-type pick + its rationale.
---   CAPR_FORECAST_POINTS -- REGR anchors + the ESM +30 point as chartable
+--   CAPR_FORECAST_POINTS -- REGR anchors + the ESM point as chartable
 --                          rows, for grafana/API.md and elk/.
 --
 -- Read-only, like everything else in the suite.
@@ -35,10 +36,13 @@ SET DEFINE OFF
 
 -- --------------------------------------------------------------------
 -- CAPR_TBSPC_FORECAST
--- The ESM +30 point comes from a single LEFT JOIN onto the ESM/TBSPC/+30
+-- The ESM point comes from a single LEFT JOIN onto the ESM/TBSPC/+30
 -- slice of CAPF_COMPARE (at most one row per series -- CAPF_COMPARE's ESM
 -- branch is already unique on that key), rather than a scalar subquery per
--- column, so the pipelined ESM source is walked once.
+-- column, so the pipelined ESM source is walked once. esm30 / esm30_lo /
+-- esm30_hi keep their names but hold the model's furthest step, which is
+-- esm_horizon_days (<= 30) after trained_through; esm_age_days is the model
+-- age. Both are appended last so positional consumers keep their columns.
 -- rank_chart reproduces the HTML chart grid's own ordering
 -- (days_to_full NULLS LAST, then name) so that driver can cap at top_n with
 -- a plain WHERE.
@@ -95,11 +99,14 @@ SELECT f.dbid,
                                    f.cur_used DESC NULLS LAST,
                                    f.con_dbid, f.tablespace_name)  AS rank_report,
        ROW_NUMBER() OVER (ORDER BY f.days_to_full NULLS LAST,
-                                   f.tablespace_name)  AS rank_chart
+                                   f.tablespace_name)  AS rank_chart,
+       e.esm_horizon_days,
+       e.model_age_days                    AS esm_age_days
 FROM   f
 LEFT   JOIN capr_container cn
   ON   cn.dbid = f.dbid AND cn.con_dbid = f.con_dbid
-LEFT   JOIN (SELECT dbid, con_dbid, series_key, value, lower_bound, upper_bound
+LEFT   JOIN (SELECT dbid, con_dbid, series_key, value, lower_bound, upper_bound,
+                    esm_horizon_days, model_age_days
              FROM   capf_compare
              WHERE  engine = 'ESM' AND series_kind = 'TBSPC' AND horizon_days = 30) e
   ON   e.dbid = f.dbid AND e.con_dbid = f.con_dbid
@@ -108,10 +115,13 @@ LEFT   JOIN (SELECT dbid, con_dbid, series_key, value, lower_bound, upper_bound
 -- --------------------------------------------------------------------
 -- CAPR_ESM_COMPARE -- sections 6a (series_kind='TBSPC', GiB columns) and
 -- 6b (series_kind='CPU', raw columns). ESM columns are populated only where
--- a fresh model exists and the horizon is inside Oracle's ESM cap (+30 on
--- 19c); +90/180/365 are REGR-only by design.
+-- a model no older than esm_max_age_days exists, in the 30-day bucket
+-- (Oracle's ESM cap is +30 on 19c); +90/180/365 are REGR-only by design.
 -- M10.4 adds esm_model_type / esm_model: which candidate (EXSM_HOLT or
 -- EXSM_ADDWINTERS/7) the production model for that series was trained with.
+-- esm_horizon_days / esm_age_days: the step the ESM value sits at and the
+-- model's age (CAPF_COMPARE). esm_at is the printable step, '+22', set only
+-- when it differs from the row's horizon_days.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_esm_compare AS
 SELECT f.dbid,
@@ -143,7 +153,12 @@ SELECT f.dbid,
        CASE WHEN f.series_kind = 'TBSPC'
             THEN NVL(MAX(tf.is_reportable), 'Y') ELSE 'Y' END  AS is_reportable,
        CASE WHEN f.series_kind = 'TBSPC'
-            THEN NVL(MAX(tf.rank_report), 0)     ELSE 0   END  AS rank_report
+            THEN NVL(MAX(tf.rank_report), 0)     ELSE 0   END  AS rank_report,
+       MAX(CASE WHEN f.engine = 'ESM' THEN f.esm_horizon_days END) AS esm_horizon_days,
+       MAX(CASE WHEN f.engine = 'ESM' THEN f.model_age_days END)   AS esm_age_days,
+       CASE WHEN MAX(CASE WHEN f.engine = 'ESM' THEN f.esm_horizon_days END) <> f.horizon_days
+            THEN '+' || MAX(CASE WHEN f.engine = 'ESM' THEN f.esm_horizon_days END)
+       END                                                     AS esm_at
 FROM   capf_compare f
 LEFT   JOIN capr_container cn
   ON   cn.dbid = f.dbid AND cn.con_dbid = f.con_dbid
@@ -159,6 +174,8 @@ GROUP  BY f.dbid, f.con_dbid, f.series_kind, f.series_key, f.horizon_days;
 -- the BETTER verdict (NULL when either engine has no score, e.g. before
 -- EXEC cap_forecast_ml.train_backtest). cutoff_day is pre-formatted -- MIN()
 -- because the two engines record the same cutoff from different sources.
+-- esm_cutoff_day is the ESM twin's own cutoff: it differs from cutoff_day when
+-- the twins are older than the data (train_all with p_backtest => FALSE).
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_backtest AS
 SELECT f.dbid,
@@ -175,11 +192,13 @@ SELECT f.dbid,
        MAX(p.mape_addw)                                    AS mape_addw,
        -- esm_pick: one narrow column that says WHICH and WHY, e.g.
        --   ADDW H=2.90 W=1.20     (AUTO: Holt 2.90% vs AddWinters 1.20% MAPE)
+       --   HOLT tie H=0.07 W=0.06 (AUTO: within esm_auto_tie_pct, Holt kept)
        --   HOLT (config)          (pinned by esm_tbspc_model)
        CASE
             WHEN MAX(p.model_type) IS NULL THEN NULL
-            WHEN MAX(p.chosen_by) = 'AUTO_BACKTEST'
+            WHEN MAX(p.chosen_by) IN ('AUTO_BACKTEST', 'AUTO_TIE')
               THEN CASE MAX(p.model_type) WHEN 'EXSM_ADDWINTERS' THEN 'ADDW' ELSE 'HOLT' END
+                   || CASE WHEN MAX(p.chosen_by) = 'AUTO_TIE' THEN ' tie' END
                    || ' H=' || NVL(TO_CHAR(ROUND(MAX(p.mape_holt), 2), 'FM99990.00'), '-')
                    || ' W=' || NVL(TO_CHAR(ROUND(MAX(p.mape_addw), 2), 'FM99990.00'), '-')
             ELSE CASE MAX(p.model_type) WHEN 'EXSM_ADDWINTERS' THEN 'ADDW' ELSE 'HOLT' END
@@ -196,7 +215,9 @@ SELECT f.dbid,
                < MAX(CASE WHEN f.engine = 'REGR' THEN f.mape_pct END)
             THEN 'ESM'
             ELSE 'REGR'
-       END                                                  AS better
+       END                                                  AS better,
+       TO_CHAR(MAX(CASE WHEN f.engine = 'ESM' THEN f.cutoff_day END),
+               'YYYY-MM-DD')                                AS esm_cutoff_day
 FROM   capf_backtest f
 LEFT   JOIN capr_container cn
   ON   cn.dbid = f.dbid AND cn.con_dbid = f.con_dbid
@@ -213,10 +234,11 @@ GROUP  BY f.dbid, f.con_dbid, f.series_kind, f.series_key;
 -- CAPR_FORECAST_POINTS -- the projected points to chart after the observed
 -- series (grafana/API.md, elk/export_capacity.sql): the REGR anchors at
 -- horizon 0 (the fitted current value) and +30/+90 (+180/+365 for TBSPC)
--- with their M9.1 bands, plus the ESM +30 point. ts = last observed day +
--- horizon. CAPF_COMPARE folds DB CPU into kind CPU under DB_CPU_SEC and
--- only returns ESM rows trained through the series' last day, so that last
--- day anchors the ESM target date too.
+-- with their M9.1 bands, plus the ESM point. ts = last observed day +
+-- horizon on every row. CAPF_COMPARE folds DB CPU into kind CPU under
+-- DB_CPU_SEC. The ESM value sits at trained_through + esm_horizon_days, so
+-- its horizon here is esm_horizon_days - model_age_days (22 for a fresh
+-- model on 90 rows, less as the model ages).
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_forecast_points AS
 SELECT p.dbid,
@@ -274,12 +296,12 @@ FROM  (
         WHERE  t.quality <> 'INSUFFICIENT_HISTORY'
           AND  h.val IS NOT NULL
         UNION ALL
-        SELECT t.dbid, t.con_dbid, f.last_day + t.horizon_days, t.series_kind,
-               t.series_key,
+        SELECT t.dbid, t.con_dbid, f.last_day + (t.esm_horizon_days - t.model_age_days),
+               t.series_kind, t.series_key,
                CASE WHEN t.series_kind = 'TBSPC' THEN 'bytes'
                     WHEN t.series_key = 'DB_CPU_SEC' THEN 'sec' ELSE 'pct' END,
                'ESM',
-               t.horizon_days, t.value, t.lower_bound, t.upper_bound,
+               t.esm_horizon_days - t.model_age_days, t.value, t.lower_bound, t.upper_bound,
                f.limit_val, ROUND(100 * t.value / NULLIF(f.limit_val, 0), 2), f.quality
         FROM   capf_compare t
         JOIN  (SELECT dbid, con_dbid, 'TBSPC' AS series_kind, tablespace_name AS series_key,

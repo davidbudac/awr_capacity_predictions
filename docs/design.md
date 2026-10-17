@@ -378,17 +378,46 @@ no partitioned ESM) via `DBMS_DATA_MINING.CREATE_MODEL2(mining_function =>
   any series length (verified 30 valid / 31 invalid at 121, 300 and 600 rows;
   `ORA-40206`). `build_model` caps at `LEAST(30, cfg_step, FLOOR(rows/4))`, so no
   train ever fails on the horizon and ESM forecasts only ever reach +30 days.
+  The `rows/4` floor bites on short history: 90 days of AWR gives a 22-step
+  model, 118 days a 29-step one.
 - Predictions live in the dynamic `DM$VP<model>` view
   (`CASE_ID, VALUE, PREDICTION, LOWER, UPPER`). Because the name is only known
   at runtime, the package exposes `get_forecast(model) PIPELINED`, and
-  `CAPF_ESM_FORECAST` lateral-joins it over the registry.
+  `CAPF_ESM_FORECAST` lateral-joins it over the registry. It adds `step_days`
+  (days after `trained_through` on forecast rows) and `esm_horizon_days` (the
+  model's furthest step); `CAPF_ESM_BACKTEST` carries the same two columns.
 - `CAPF_COMPARE` unions Tier 1 point projections (REGR, +30/90/180/365) with
-  Tier 2 predictions + 95% bounds (ESM, **+30 only** — the 19c hard cap). ESM
-  rows are also gated on **freshness**: a model must be trained through the
-  series' current last day, so a model left behind by a later top-N retrain
-  (stale `trained_through`) is never compared against a current-dated REGR
-  point. Model names hash `(dbid | con_dbid | series_key)` so a cross-database
-  `con_dbid` collision cannot overwrite another database's model.
+  Tier 2 predictions + 95% bounds (ESM, **30-day bucket only**, the 19c hard
+  cap). The ESM value is the model's **furthest** step, not exactly +30, so a
+  22-step model still shows up; `esm_horizon_days` says which step it is.
+  ESM rows are gated on **age**, not exact-day freshness: `model_age_days`
+  (series last day minus `trained_through`) must be `<= esm_max_age_days`
+  (default 7). The old exact-day rule hid ESM six days out of seven under a
+  weekly retrain. A model left behind by a later top-N retrain still drops out
+  once it is older than the limit. The ESM value is dated `trained_through +
+  esm_horizon_days`; `CAPR_FORECAST_POINTS` turns that into a horizon from the
+  series' last day (`esm_horizon_days - model_age_days`), and section 6 prints
+  the step as `+22` when it is not 30, plus the model age. Model names hash
+  `(dbid | con_dbid | series_key)` so a cross-database `con_dbid` collision
+  cannot overwrite another database's model.
+- **Build safety and health**: `build_model` builds under `<name>_N`, and only
+  after `CREATE_MODEL2` succeeds drops the old model and renames the new one
+  (`DBMS_DATA_MINING.RENAME_MODEL`, which also renames the `DM$VP` view; it
+  refuses an existing target, hence drop-then-rename). A failed build leaves
+  the old model and the registry row's description of it alone and sets
+  `status = 'FAILED'`, `last_error` (message plus backtrace) and `failed_at`.
+  `CAPF_ESM_FORECAST` keeps reading a FAILED row's surviving model until the
+  age gate drops it. An empty training query also fails: `CREATE_MODEL2`
+  accepts one and builds a model with no forecast. The public `train_*`
+  procedures finish every series, then raise ORA-20060 if any FORECAST build
+  failed, so a scheduler run ends FAILED instead of SUCCEEDED. `CAPF_ESM_HEALTH`
+  lists every registry row with `status`, `model_age_days`, `stale_flag` (age
+  over `esm_max_age_days`) and `last_error`; for a BACKTEST twin the age is
+  measured against today's holdout cutoff. `CAPF_ESM_HEALTH_SUMMARY` counts
+  FORECAST models per container (`n_ok`, `n_failed`, `n_stale`), which is the
+  report header's Tier 2 line ("10 ok, 0 failed, 0 stale"). Twins are left out
+  of those counts. `train_tablespace(name)` retrains one series, e.g. after a
+  failure.
 - **Backtest (M9.4)**: `train_backtest` builds `purpose = 'BACKTEST'` twin
   models (CBT* name prefixes) whose training data stops
   `backtest_holdout_days` (28) before each series' last day, so their forecast
@@ -399,18 +428,26 @@ no partitioned ESM) via `DBMS_DATA_MINING.CREATE_MODEL2(mining_function =>
   with zero models trained) — as `mape_pct` / `bias_pct` per series per
   engine, surfaced as report section 6c ("which engine was right"). ESM may
   cover fewer than holdout_days days (30-step cap + the rows/4 floor);
-  `n_days` records actual coverage.
+  `n_days` records actual coverage. `train_all(p_top_n, p_backtest => TRUE)`
+  refreshes the twins of every series it trains, the CPU ones included, so
+  the ESM row is scored on the same cutoff as the REGR row. That costs 3
+  builds per tablespace and 2 per CPU series; `p_backtest => FALSE` skips the
+  CPU twins (and the tablespace twins unless AUTO needs them).
+  `CAPR_BACKTEST.esm_cutoff_day` shows the twin's own cutoff.
 - **Model-type selection (M10.4)**: with `esm_tbspc_model = 2` (AUTO) and
   `esm_select_by_backtest = 1` — both defaults — `train_tablespaces` first
   builds **two** backtest twins per tablespace series, one per candidate
   (`EXSM_HOLT` and `EXSM_ADDWINTERS(7)`), then trains the production model with
   whichever scored the lower holdout MAPE in the new `CAPF_ESM_CANDIDATE` view
-  (one row per *(series, model_type)*). Ties, and "no evidence" (a candidate
-  that failed to train), go to `EXSM_HOLT` — the historical default and the
-  cheaper model. The decision and its evidence are written back onto the
+  (one row per *(series, model_type)*). MAPEs closer than `esm_auto_tie_pct`
+  points (default 0.25) tie, and "no evidence" (a candidate that failed to
+  train) also goes to `EXSM_HOLT`, the historical default and the cheaper
+  model. Without the margin a 0.06 vs 0.07 MAPE picked ADDW and could flip on
+  the next run. The decision and its evidence are written back onto the
   production row: `CAP_ML_MODEL.model_type` / `chosen_by` (`AUTO_BACKTEST` |
-  `CONFIG` | `DEFAULT`) / `mape_holt` / `mape_addw`, which is what lets report
-  section 6c print *"ADDW H=2.90 W=1.20"* instead of an unexplained pick.
+  `AUTO_TIE` | `CONFIG` | `DEFAULT`) / `mape_holt` / `mape_addw`, which is what
+  lets report section 6c print *"ADDW H=2.90 W=1.20"* or *"HOLT tie H=0.07
+  W=0.06"* instead of an unexplained pick.
   `esm_tbspc_model = 0 | 1` pins a type and skips the twins entirely;
   `esm_select_by_backtest = 0` makes AUTO fall back to `EXSM_HOLT`.
   The twins' names hash *(dbid | con_dbid | series_key | model_type)* so the two
@@ -425,8 +462,9 @@ no partitioned ESM) via `DBMS_DATA_MINING.CREATE_MODEL2(mining_function =>
 ### Retraining (M8.3 — opt-in, never part of `install.sql`)
 
 `@install_jobs.sql` at the repo root creates two `DBMS_SCHEDULER` jobs, both
-**DISABLED**, idempotently: `CAP_ML_RETRAIN` (weekly, Sun 02:00,
-`cap_forecast_ml.train_all`) and `CAP_REPORT_SPOOL_JOB` (daily 03:00), which
+**DISABLED**, idempotently: `CAP_ML_RETRAIN` (daily 02:00 by default,
+`cap_forecast_ml.train_all`; `DEFINE retrain_interval` overrides the calendar
+string) and `CAP_REPORT_SPOOL_JOB` (daily 03:00), which
 calls the `cap_report_spool(p_dir)` procedure the same script creates. That
 procedure writes a pollable `<dir>/cap_alerts.txt` snapshot of `CAPR_ALERTS`
 through `UTL_FILE` — *not* the formatted report, because SQL\*Plus spooling
@@ -436,7 +474,10 @@ cron for that. The directory object is not created for you: the script checks
 DDL if it is missing (`DEFINE report_dir` overrides the default `CAP_REPORTS`).
 The `_JOB` suffix on the second job is not decoration: jobs share the schema
 namespace with procedures, so `CAP_REPORT_SPOOL` for both would be ORA-27477.
-`@uninstall_jobs.sql` drops both jobs and the procedure.
+`@uninstall_jobs.sql` drops both jobs and the procedure. The retrain used to
+be weekly. It is daily now because of the age gate: a weekly model sits up to
+7 days behind the data, right at `esm_max_age_days`, and its ESM value is
+dated up to a week before the REGR value it is compared with.
 
 ## Layer 6 — integration + report views (`CAPR_*`, M7.2/M8.1/M8.2)
 

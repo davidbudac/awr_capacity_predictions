@@ -83,6 +83,8 @@ COLUMN cpu_sat  NEW_VALUE cpu_sat  NOPRINT
 COLUMN nf_warn  NEW_VALUE nf_warn  NOPRINT
 COLUMN nf_crit  NEW_VALUE nf_crit  NOPRINT
 COLUMN esm_ok   NEW_VALUE esm_ok   NOPRINT
+COLUMN esm_failed NEW_VALUE esm_failed NOPRINT
+COLUMN esm_stale  NEW_VALUE esm_stale  NOPRINT
 COLUMN train_days     NEW_VALUE train_days     NOPRINT
 COLUMN min_train_days NEW_VALUE min_train_days NOPRINT
 COLUMN r2_gate        NEW_VALUE r2_gate        NOPRINT
@@ -113,7 +115,10 @@ SELECT c.dtf_warn                                         AS dtf_warn,
        c.cpu_sat_pct                                      AS cpu_sat,
        c.nearfull_warn_pct                                AS nf_warn,
        c.nearfull_crit_pct                                AS nf_crit,
-       (SELECT COUNT(*) FROM cap_ml_model WHERE status='OK') AS esm_ok,
+       -- Tier 2 health, FORECAST models only (same counts as report.sql).
+       (SELECT NVL(SUM(n_ok), 0)     FROM capf_esm_health_summary) AS esm_ok,
+       (SELECT NVL(SUM(n_failed), 0) FROM capf_esm_health_summary) AS esm_failed,
+       (SELECT NVL(SUM(n_stale), 0)  FROM capf_esm_health_summary) AS esm_stale,
        c.train_days                                       AS train_days,
        c.min_train_days                                   AS min_train_days,
        c.r2_gate                                          AS r2_gate,
@@ -138,6 +143,8 @@ VARIABLE b_cpu_sat      NUMBER
 VARIABLE b_nf_warn      NUMBER
 VARIABLE b_nf_crit      NUMBER
 VARIABLE b_esm_ok       NUMBER
+VARIABLE b_esm_failed   NUMBER
+VARIABLE b_esm_stale    NUMBER
 VARIABLE b_train_days     NUMBER
 VARIABLE b_min_train_days NUMBER
 VARIABLE b_r2_gate        NUMBER
@@ -158,6 +165,8 @@ BEGIN
   :b_nf_warn      := &nf_warn;
   :b_nf_crit      := &nf_crit;
   :b_esm_ok       := &esm_ok;
+  :b_esm_failed   := &esm_failed;
+  :b_esm_stale    := &esm_stale;
   :b_train_days     := &train_days;
   :b_min_train_days := &min_train_days;
   :b_r2_gate        := &r2_gate;
@@ -192,7 +201,9 @@ DECLARE
   cpu_sat      NUMBER := :b_cpu_sat;
   nf_warn      NUMBER := :b_nf_warn;   -- near-full-now WARN percent (M7.1)
   nf_crit      NUMBER := :b_nf_crit;   -- near-full-now CRIT percent (M7.1)
-  esm_ok       PLS_INTEGER := :b_esm_ok;
+  esm_ok       PLS_INTEGER := :b_esm_ok;       -- FORECAST models with status OK
+  esm_failed   PLS_INTEGER := :b_esm_failed;   -- FORECAST models whose last build failed
+  esm_stale    PLS_INTEGER := :b_esm_stale;    -- FORECAST models older than esm_max_age_days
   -- Forecast knobs, same source (CAP_CONFIG) and meaning as CAPF_TBSPC_FORECAST.
   train_days     NUMBER := :b_train_days;      -- primary linear-fit window (days)
   min_train_days NUMBER := :b_min_train_days;  -- below this REGR_COUNT => INSUFFICIENT_HISTORY
@@ -1658,10 +1669,13 @@ BEGIN
   ELSE
     p('<div class="kpi"><div class="l">Host CPU p95</div><div class="v">&ndash;</div><div class="s">no CPU history yet</div></div>');
   END IF;
-  p('<div class="kpi"><div class="l">Tier 2 models</div><div class="v">' || TO_CHAR(esm_ok, 'FM999990') || '</div><div class="s">'
-    || CASE WHEN esm_ok = 0 THEN 'none trained'
-            WHEN v_bt_rows > 0 THEN 'ESM trained &middot; backtest on'
-            ELSE 'ESM trained &middot; no backtest yet' END || '</div></div>');
+  p('<div class="kpi' || CASE WHEN esm_failed > 0 OR esm_stale > 0 THEN ' warn' END
+    || '"><div class="l">Tier 2 models</div><div class="v">' || TO_CHAR(esm_ok, 'FM999990') || '</div><div class="s">'
+    || CASE WHEN esm_ok + esm_failed = 0 THEN 'none trained'
+            ELSE TO_CHAR(esm_ok, 'FM999990') || ' ok, ' || TO_CHAR(esm_failed, 'FM999990') || ' failed, '
+                 || TO_CHAR(esm_stale, 'FM999990') || ' stale &middot; '
+                 || CASE WHEN v_bt_rows > 0 THEN 'backtest on' ELSE 'no backtest yet' END
+       END || '</div></div>');
   p('</div>');  -- .kpis
   -- one fold for everything about reading the report
   p('<details class="fold"><summary>How to read this report</summary><div class="fold-body">');
@@ -1671,7 +1685,8 @@ BEGIN
       || '%; CPU saturation ' || cpu_sat || '%</dd></div>');
   p('<div class="kv"><dt>Training window</dt><dd>last ' || TO_CHAR(train_days, 'FM999990') || ' days; at least '
       || TO_CHAR(min_train_days, 'FM999990') || ' days before a forecast is trusted; R2 gate ' || TO_CHAR(r2_gate, 'FM0.00') || '</dd></div>');
-  p('<div class="kv"><dt>Tier 2 models</dt><dd>' || esm_ok || ' OML ESM model(s) trained (OK)</dd></div>');
+  p('<div class="kv"><dt>Tier 2 models</dt><dd>OML ESM forecast models: ' || esm_ok || ' ok, ' || esm_failed || ' failed, '
+      || esm_stale || ' stale (detail: CAPF_ESM_HEALTH)</dd></div>');
   p('</dl>');
   p('<div class="note">Forecasts degrade loudly on short AWR retention: watch Train days and Quality. '
       || 'INSUFFICIENT_HISTORY means fewer than the configured minimum training days; raise '
@@ -3004,7 +3019,9 @@ BEGIN
   ELSE
     p('<p class="desc">A second opinion on the next 30 days from an Oracle ML model (ESM), beside the straight-line '
         || 'forecast (REGR), with the holdout backtest that says which engine was right over the last '
-        || 'few weeks. ' || esm_ok || ' OML ESM model(s) trained. ESM reaches +30 only on 19c; the +90 / +180 / +365 '
+        || 'few weeks. OML ESM forecast models: ' || esm_ok || ' ok, ' || esm_failed || ' failed, ' || esm_stale || ' stale. '
+        || 'The ESM value is the model&#39;s furthest step, at most +30 on 19c; when that is not +30 (short history) the '
+        || 'step is shown beside it, and models older than esm_max_age_days are left out. The +90 / +180 / +365 '
         || 'numbers in section 2 are REGR-only. HOLT = EXSM_HOLT, ADDW = EXSM_ADDWINTERS with a 7-day season.</p>');
 
     any_rows := FALSE;
@@ -3014,7 +3031,7 @@ BEGIN
              CASE WHEN c.series_kind = 'TBSPC' THEN c.esm_gb    ELSE c.esm    END AS esm,
              CASE WHEN c.series_kind = 'TBSPC' THEN c.esm_lo_gb ELSE c.esm_lo END AS esm_lo,
              CASE WHEN c.series_kind = 'TBSPC' THEN c.esm_hi_gb ELSE c.esm_hi END AS esm_hi,
-             c.esm_model, c.rank_report,
+             c.esm_model, c.rank_report, c.esm_at, c.esm_age_days,
              b.regr_mape, b.esm_mape, b.better, b.esm_pick
       FROM   capr_esm_compare c
       LEFT   JOIN capr_backtest b
@@ -3029,10 +3046,10 @@ BEGIN
         p('<table class="tbl"><thead><tr>'
           || '<th>Series' || info_icon('tablespaces in GiB (the same ones as section 2), CPU metrics in their own unit (CAPR column: SERIES_KEY)')
           || '</th><th class="num">REGR +30' || info_icon('straight-line projection 30 days out (CAPR column: REGR_GB / REGR)')
-          || '</th><th class="num">ESM +30' || info_icon('the Oracle ML forecast 30 days out (CAPR column: ESM_GB / ESM)')
+          || '</th><th class="num">ESM +30' || info_icon('the Oracle ML forecast 30 days out, or at its furthest step when that is shorter, shown as at +N (CAPR columns: ESM_GB / ESM, ESM_AT)')
           || '</th><th class="num">ESM 95% band' || info_icon('CAPR columns: ESM_LO, ESM_HI')
           || '</th><th class="num">Gap' || info_icon('ESM minus REGR as a percent of REGR; a large gap means the two engines disagree about the near future')
-          || '</th><th>ESM model' || info_icon('HOLT = trend only; ADDW = trend plus a 7-day season (CAPR column: ESM_MODEL)')
+          || '</th><th>ESM model' || info_icon('HOLT = trend only; ADDW = trend plus a 7-day season; the age is days between the model&#39;s last training day and the data&#39;s (CAPR columns: ESM_MODEL, ESM_AGE_DAYS)')
           || '</th><th class="num">Backtest MAPE, REGR / ESM' || info_icon('average percent miss of each engine over the held-out window before today; lower is better (CAPR columns: REGR_MAPE, ESM_MAPE)')
           || '</th><th>Right last month' || info_icon('which engine had the lower backtest error, and which ESM variant AUTO picked and why (CAPR columns: BETTER, ESM_PICK)')
           || '</th></tr></thead><tbody>');
@@ -3042,13 +3059,15 @@ BEGIN
       p('<tr><td><b>' || esc(r.series_key) || '</b>' || CASE WHEN v_con_count > 1 OR r.series_kind = 'CPU' THEN ' <span class="dim">' || esc(r.db_pdb) || '</span>' END || '</td>'
         || '<td class="num">' || nz(r.regr, CASE WHEN r.series_kind = 'TBSPC' THEN 'FM999999990.0' ELSE 'FM99999990.00' END) || '</td>'
         || '<td class="num">' || CASE WHEN r.esm IS NULL THEN '<span class="na">no model</span>'
-                                      ELSE nz(r.esm, CASE WHEN r.series_kind = 'TBSPC' THEN 'FM999999990.0' ELSE 'FM99999990.00' END) END || '</td>'
+                                      ELSE nz(r.esm, CASE WHEN r.series_kind = 'TBSPC' THEN 'FM999999990.0' ELSE 'FM99999990.00' END)
+                                           || CASE WHEN r.esm_at IS NOT NULL THEN ' <span class="dim">at ' || esc(r.esm_at) || '</span>' END END || '</td>'
         || '<td class="num dim">' || CASE WHEN r.esm_lo IS NULL THEN '&ndash;'
                                           ELSE nz(r.esm_lo, CASE WHEN r.series_kind = 'TBSPC' THEN 'FM999999990.0' ELSE 'FM99999990.00' END)
                                                || ' &ndash; ' || nz(r.esm_hi, CASE WHEN r.series_kind = 'TBSPC' THEN 'FM999999990.0' ELSE 'FM99999990.00' END) END || '</td>'
         || '<td class="num' || CASE WHEN ABS(v_gap_pct) >= 10 THEN ' gap-hi' END || '">'
         || CASE WHEN v_gap_pct IS NULL THEN '&ndash;' ELSE CASE WHEN v_gap_pct >= 0 THEN '+' END || TO_CHAR(v_gap_pct, 'FM9990.0') || '%' END || '</td>'
-        || '<td>' || NVL(esc(r.esm_model), '&ndash;') || '</td>'
+        || '<td>' || NVL(esc(r.esm_model), '&ndash;')
+        || CASE WHEN r.esm_age_days IS NOT NULL THEN ' <span class="dim">' || TO_CHAR(r.esm_age_days, 'FM9990') || 'd old</span>' END || '</td>'
         || '<td class="num">' || CASE WHEN r.regr_mape IS NULL THEN '&ndash;' ELSE nz(r.regr_mape, 'FM99990.00') END
         || ' / ' || CASE WHEN r.esm_mape IS NULL THEN '&ndash;' ELSE nz(r.esm_mape, 'FM99990.00') END || '</td>'
         || '<td class="nowrap">' || CASE WHEN r.better IS NULL THEN '&ndash;'

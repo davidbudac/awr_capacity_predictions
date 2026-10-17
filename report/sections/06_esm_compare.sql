@@ -3,9 +3,11 @@
 -- FORMAT ONLY (M8.2): 6a/6b read CAPR_ESM_COMPARE (pivoted REGR-vs-ESM, in
 -- GiB and raw units) and 6c reads CAPR_BACKTEST (pivoted holdout scorecard
 -- with the BETTER verdict) -- both in ddl/55_report_views_ml.sql, both shared
--- with report_html.sql. ESM columns are populated only where a model exists
--- and the horizon is within Oracle's ESM cap (+30 on 19c); +180/365 are
--- REGR-only by design. Reached only when show_esm != 'N'.
+-- with report_html.sql. ESM columns are populated only where a model no older
+-- than esm_max_age_days exists, in the 30-day row (Oracle's ESM cap is +30 on
+-- 19c); +90/180/365 are REGR-only by design. ESM_AT prints the model's real
+-- step when it is not +30, AGE_D the model age. Reached only when
+-- show_esm != 'N'.
 --
 -- M7.4: 6a applies the same is_reportable / rank_report bound as section 2 --
 -- inherited by CAPR_ESM_COMPARE from CAPR_TBSPC_FORECAST, so the two sections
@@ -14,10 +16,14 @@
 --
 PROMPT
 PROMPT == 6. TIER 2 (ESM) vs TIER 1 (REGR) ==
-PROMPT    &esm_ok OML ESM model(s) trained (OK). If 0: run  EXEC cap_forecast_ml.train_all
-PROMPT    ESM reaches +30 only (19c hard horizon cap) and only for fresh models;
-PROMPT    +90/180/365 are REGR-only. ESM_MODEL names the ESM variant behind the
-PROMPT    ESM column: HOLT = EXSM_HOLT, ADDW = EXSM_ADDWINTERS with a 7-day season.
+PROMPT    OML ESM forecast models: &esm_ok ok, &esm_failed failed, &esm_stale stale (detail: CAPF_ESM_HEALTH).
+PROMPT    If none: run  EXEC cap_forecast_ml.train_all
+PROMPT    The ESM value is the model's furthest step, at most +30 (19c hard cap).
+PROMPT    ESM_AT shows that step when it is not +30 (short history: rows/4).
+PROMPT    AGE_D is days between the model's last training day and the data's.
+PROMPT    Models older than esm_max_age_days are left out. +90/180/365 are
+PROMPT    REGR-only. ESM_MODEL names the ESM variant behind the ESM column:
+PROMPT    HOLT = EXSM_HOLT, ADDW = EXSM_ADDWINTERS with a 7-day season.
 PROMPT
 PROMPT  6a. Tablespaces (GiB) -- the same &ts_shown of &ts_total tablespace(s) as
 PROMPT      section 2 (growing, near-full, or >= &min_gb GiB used, top &top_n):
@@ -30,6 +36,8 @@ COLUMN esm        FORMAT 99990.00      HEADING 'ESM_GIB'
 COLUMN esm_lo     FORMAT 99990.00      HEADING 'ESM_LO'
 COLUMN esm_hi     FORMAT 99990.00      HEADING 'ESM_HI'
 COLUMN esm_model  FORMAT A9            HEADING 'ESM_MODEL'
+COLUMN esm_at     FORMAT A6            HEADING 'ESM_AT'
+COLUMN esm_age    FORMAT 9990          HEADING 'AGE_D'
 
 SELECT db_pdb,
        series_key,
@@ -38,7 +46,9 @@ SELECT db_pdb,
        esm_gb    AS esm,
        esm_lo_gb AS esm_lo,
        esm_hi_gb AS esm_hi,
-       esm_model
+       esm_model,
+       esm_at,
+       esm_age_days AS esm_age
 FROM   capr_esm_compare
 WHERE  series_kind = 'TBSPC'
   AND  is_reportable = 'Y'
@@ -61,7 +71,9 @@ SELECT db_pdb,
        esm,
        esm_lo,
        esm_hi,
-       esm_model
+       esm_model,
+       esm_at,
+       esm_age_days AS esm_age
 FROM   capr_esm_compare
 WHERE  series_kind = 'CPU'
 ORDER  BY con_dbid, series_key, horizon_days;
@@ -74,6 +86,7 @@ PROMPT      columns fill after  EXEC cap_forecast_ml.train_backtest  (ESM may
 PROMPT      cover fewer days than REGR: 19c 30-step cap and rows/4 floor).
 PROMPT      ESM_PICK (M10.4) = the model type AUTO chose and why, as
 PROMPT      "<type> H=<Holt MAPE%> W=<AddWinters MAPE%>" over the same holdout.
+PROMPT      "tie" = the two MAPEs were within esm_auto_tie_pct, so HOLT was kept.
 
 COLUMN series_kind FORMAT A6           HEADING 'KIND'
 COLUMN series_key  FORMAT A16          HEADING 'SERIES'
@@ -83,7 +96,7 @@ COLUMN regr_bias   FORMAT S99990.00    HEADING 'REGR_BIAS%'
 COLUMN esm_mape    FORMAT 99990.00     HEADING 'ESM_MAPE%'
 COLUMN esm_bias    FORMAT S99990.00    HEADING 'ESM_BIAS%'
 COLUMN better      FORMAT A6           HEADING 'BETTER'
-COLUMN esm_pick    FORMAT A20          HEADING 'ESM_PICK'
+COLUMN esm_pick    FORMAT A24          HEADING 'ESM_PICK'
 
 SELECT db_pdb,
        series_kind,
