@@ -52,6 +52,13 @@ ES index `awrcap-capacity` (mapping = `elk/elasticsearch/index-template.json`,
 the `.ndjson`); `setup.sh` applies the template and imports them. Nothing on
 the DB host talks to Elasticsearch directly.
 See `elk/README.md`.
+`grafana/` is the second optional path (no Elastic): the ORDS module
+`grafana/ords/awrcap_module.sql` publishes the CAPR point-feed views
+(`CAPR_SERIES_POINTS` / `CAPR_FIT` / `CAPR_ANOMALIES` in ddl/45,
+`CAPR_FORECAST_POINTS` in ddl/55; contract `grafana/API.md`; the ELK export
+selects from the same views, so change the view, not the consumers) and
+`grafana/build_*.py` generate the provisioned Grafana boards. ORDS install
+state and passwords under `grafana/` are gitignored.
 Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomaly →
 `CAPR_` integration (display labels + pollable alerts).
 

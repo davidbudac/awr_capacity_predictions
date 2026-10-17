@@ -302,6 +302,25 @@ re-exports overwrite. Details, record shapes and limits:
 [Usage](https://davidbudac.github.io/awr_capacity_predictions/usage.html#kibana)
 page.
 
+## Optional: Grafana straight from Oracle (ORDS)
+
+The second visual path needs no Elastic stack and copies nothing: ORDS
+(Oracle REST Data Services) publishes six read-only views as JSON and
+Grafana's Infinity data source reads them live. The same three boards as the
+Kibana path (tablespaces, CPU and workload series, fleet anomalies), with
+anomalies as red markers, points and shaded spans.
+
+```
+Oracle CAPR_* views  ->  ORDS module awrcap (grafana/ords/awrcap_module.sql)  ->  Grafana + Infinity
+```
+
+Install ORDS against the database (lab recipe with a dedicated installer
+user and ORDS in Docker: `grafana/ords/README.md`), run
+`@grafana/ords/awrcap_module.sql` as the schema owner, then
+`docker compose -f grafana/docker-compose.yml up -d` for a provisioned
+Grafana on port 3001. Contract, limits and security notes:
+[`grafana/README.md`](grafana/README.md) and [`grafana/API.md`](grafana/API.md).
+
 ## Preflight & scheduler jobs
 
 Two standalone scripts at the repo root; neither is part of `install.sql`.

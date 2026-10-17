@@ -357,6 +357,58 @@
         sees it. Everything else, including how to add a field or regenerate a dashboard, is in
         <a href="https://github.com/davidbudac/awr_capacity_predictions/blob/main/elk/README.md">elk/README.md</a>.</p>
 
+      <!-- ===================== GRAFANA ===================== -->
+      <div class="section-head" id="grafana">
+        <span class="eyebrow">Integrate · optional</span>
+        <h2>Grafana dashboards (ORDS, no Elastic)</h2>
+        <p>The second visual path keeps the data in Oracle. ORDS (Oracle REST Data Services) publishes
+          six read-only views as JSON and Grafana's Infinity data source reads them live, so every
+          refresh is a query against the suite's own views and nothing is copied anywhere.</p>
+      </div>
+
+      <div class="tablewrap">
+        <table>
+          <caption>The <span class="inline">awrcap</span> ORDS module, one GET endpoint per row</caption>
+          <thead><tr><th scope="col">Endpoint</th><th scope="col">Backing view</th><th scope="col">Serves</th></tr></thead>
+          <tbody>
+            <tr><td><span class="k">containers</span></td><td class="def"><span class="inline">CAPR_CONTAINER</span></td><td class="def">the database variable</td></tr>
+            <tr><td><span class="k">series</span></td><td class="def"><span class="inline">CAPR_SERIES_POINTS</span></td><td class="def">observed daily points with the <span class="inline">CAPA_</span> flag joined on (<code>anomaly = 1</code>)</td></tr>
+            <tr><td><span class="k">forecast</span></td><td class="def"><span class="inline">CAPR_FORECAST_POINTS</span></td><td class="def">REGR anchors and the ESM +30 point, with bands, dated past today</td></tr>
+            <tr><td><span class="k">fit</span></td><td class="def"><span class="inline">CAPR_FIT</span></td><td class="def">the current fit per series: days to full / limit / saturation, R², quality, severity</td></tr>
+            <tr><td><span class="k">anomalies</span></td><td class="def"><span class="inline">CAPR_ANOMALIES</span></td><td class="def">one row per flagged event with its one-line explanation</td></tr>
+            <tr><td><span class="k">alerts</span></td><td class="def"><span class="inline">CAPR_ALERTS</span></td><td class="def">the pollable alert feed</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>The same views feed the ELK export, so both paths show the same numbers by construction. The
+        three boards mirror the Kibana ones; anomalies are red annotation markers with the message on
+        hover, red points on the observed line, and a shaded span for a DB CPU level shift.</p>
+
+      <figure class="figure">
+        <img src="assets/grafana-tablespaces.png" alt="The Grafana tablespaces dashboard: days-to-full table, used space with dashed forecasts and red anomaly markers, daily growth, anomaly and alert tables" loading="lazy">
+        <figcaption>The tablespaces board in Grafana over the demo database.</figcaption>
+      </figure>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">shell</span><span class="term__tag in">install</span></div>
+<pre><span class="c-cmt"># 1. ORDS against the database (lab recipe: grafana/ords/README.md)</span>
+<span class="c-cmt"># 2. publish the module, as the schema owner (or a DBA with ORDS_ADMIN)</span>
+<span class="c-prompt">SQL&gt;</span> @grafana/ords/awrcap_module.sql
+<span class="c-cmt"># 3. Grafana with the Infinity plugin, data source and dashboards provisioned</span>
+<span class="c-prompt">$</span> docker compose -f grafana/docker-compose.yml up -d     <span class="c-cmt"># http://localhost:3001</span></pre>
+      </div>
+
+      <div class="callout">
+        <span class="ico">i</span>
+        <p><strong>Live has a cost.</strong> Every refresh runs the forecast and anomaly views, which
+        take seconds at fixture size, and a module serves one schema. Pick this path when you have
+        Grafana and no Elastic; pick <a href="#kibana">the ELK path</a> when the fleet already lives
+        there or you want a daily history of the fits. Contract, limits and security notes are in
+        <a href="https://github.com/davidbudac/awr_capacity_predictions/blob/main/grafana/README.md">grafana/README.md</a>.</p>
+      </div>
+
       <!-- ===================== DASHBOARDS ===================== -->
       <div class="section-head" id="views">
         <span class="eyebrow">Integrate</span>

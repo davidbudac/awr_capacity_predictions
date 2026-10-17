@@ -285,6 +285,24 @@ new report section 7 (text + HTML), new fixture tables
       DBMS_SCHEDULER job) is still a manual step; so is keeping Filebeat up
       across reboots (by `elk_db_automation` design).
 
+## M13 — Optional Grafana path straight from Oracle (ORDS) (done)
+
+- [x] **M13.1 Point feeds.** `CAPR_SERIES_POINTS`, `CAPR_FIT`, `CAPR_ANOMALIES`
+      (ddl/45) and `CAPR_FORECAST_POINTS` (ddl/55): one chartable shape per
+      record type, shared by `elk/export_capacity.sql` and the ORDS module;
+      asserted in `test/run_test.sql`.
+- [x] **M13.2 ORDS module.** `grafana/ords/awrcap_module.sql` publishes six
+      GET endpoints (`grafana/API.md`), no pagination, `from`/`to` bound
+      explicitly; lab install with a dedicated installer user and ORDS in
+      Docker in `grafana/ords/README.md`.
+- [x] **M13.3 Dashboards.** Three generated Grafana boards
+      (`grafana/build_*.py`, provisioned by `grafana/docker-compose.yml`
+      with the Infinity plugin); anomalies as annotations, red points and
+      shaded shift spans.
+- [ ] **M13.4 Follow-ups.** Multi-value `db`/`series` filters server-side;
+      a result cache or materialized views under the point feeds for large
+      sites; ORDS privilege on the module for untrusted networks.
+
 ## v2 (unchanged)
 
 - [ ] Memory forecasting (SGA/PGA from `DBA_HIST_MEM_DYNAMIC_COMPONENTS` /
