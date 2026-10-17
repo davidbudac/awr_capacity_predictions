@@ -44,10 +44,13 @@ started" path), `doctor.sql` (preflight), `install_jobs.sql`
 reports generated from it (identity strings genericised) for the docs site.
 `elk/` is the Kibana integration (opt-in, outside install.sql):
 `export_capacity.sql` emits one JSON doc per line from the CAPD_/CAPF_/CAPA_/
-CAPR_ views, `ship.sh` bulk-loads it into the ES index `awrcap-capacity`
-(mapping = `elk/elasticsearch/index-template.json`, `dynamic: strict`, so add
-a field there FIRST), `elk/kibana/build_*.py` generate the three dashboards
-(edit the builder, never the `.ndjson`), `setup_kibana.sh` imports them.
+CAPR_ views; `export.sh` runs it ON THE DB HOST into Filebeat's `generated/`
+dir, `filebeat/awrcap.yml` + `logstash/oracle_capacity.conf` carry it into the
+ES index `awrcap-capacity` (mapping = `elk/elasticsearch/index-template.json`,
+`dynamic: strict`, so add a field there FIRST and re-run `elk/setup.sh`).
+`elk/kibana/build_*.py` generate the three dashboards (edit the builder, never
+the `.ndjson`); `setup.sh` applies the template and imports them. Nothing on
+the DB host talks to Elasticsearch directly.
 See `elk/README.md`.
 Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomaly →
 `CAPR_` integration (display labels + pollable alerts).

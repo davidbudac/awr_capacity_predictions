@@ -1,0 +1,23 @@
+# Filebeat input for the capacity suite's NDJSON (written by elk/export.sh).
+# Drop into the Filebeat inputs.d/ directory (chmod 0600). Adjust the path if
+# export.sh writes somewhere other than its default --out directory.
+#
+# document_id lifts the exporter's "id" into @metadata._id, which Logstash
+# passes to Elasticsearch as the document _id: a re-export overwrites the same
+# documents instead of duplicating them. overwrite_keys lets the document's
+# own @timestamp (the day the row is about) replace Filebeat's read time.
+- type: filestream
+  id: awrcap-capacity
+  enabled: true
+  paths:
+    - /u01/app/oracle/filebeat/generated/awrcap-*.ndjson
+  fields_under_root: true
+  fields:
+    log_type: awr_capacity
+  parsers:
+    - ndjson:
+        target: ""
+        add_error_key: true
+        expand_keys: true
+        overwrite_keys: true
+        document_id: id
