@@ -1,9 +1,10 @@
 -- bench/anomaly_load.sql -- deliberate tablespace-growth outlier.
 --
 -- Bulk-loads roughly &mb MiB into SOETBS under the SOE schema, so one day's
--- used_bytes delta lands far outside the rolling median/MAD baseline and
--- CAPA_TBSPC_ANOM has a real anomaly to catch (CAP_CONFIG.mad_k = 3, with
--- abs_floor_bytes = 100 MiB as the floor -- hence the 400 MiB default).
+-- used_bytes delta lands far outside the rolling median/MAD baselines and
+-- CAPA_ANOM (kind TBSPC, TRAILING and SAME_DOW) has a real anomaly to catch
+-- (CAP_CONFIG.mad_k = 3, with abs_floor_bytes = 100 MiB as the threshold
+-- floor -- hence the 400 MiB default).
 --
 -- The table is dropped by bench/teardown.sql, and re-running this script
 -- appends another chunk. Expects DEFINEs: owner, mb

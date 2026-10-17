@@ -47,7 +47,9 @@
 --                  18:00 = the daytime/peak interval) on an SMT host:
 --                  NUM_CPUS 8, NUM_CPU_CORES 4. Weekday 20% night /
 --                  60% day (daily avg 40%), weekend 10% / 30% (avg 20%), one
---                  +30pt Tuesday (70%/70%), one restart at day 60 (startup_time
+--                  +30pt Tuesday (70%/70%), one inverted Wednesday (40%/40%:
+--                  a normal daily average, an abnormal hour profile -- M15
+--                  HOUR_OF_WEEK), one restart at day 60 (startup_time
 --                  change + counter reset, morning snapshot missing so the
 --                  whole day drops), one PARTIAL day (a weekday in 14..20
 --                  whose instance restarts at noon: only its 06:00 interval
@@ -175,6 +177,12 @@ DECLARE
     v_bg     NUMBER := 0;
     v_inj    PLS_INTEGER;
     v_probe  PLS_INTEGER;
+    -- M15: the inverted-profile Wednesday. Both of its intervals read 40%
+    -- busy (the overnight batch ran in the daytime instead): the daily
+    -- average is 40, exactly a normal weekday, so TRAILING and SAME_DOW
+    -- cannot see it, while HOUR_OF_WEEK sees 06:00 at 40 vs 20 (HIGH) and
+    -- 18:00 at 40 vs 60 (LOW) -- the case only the third mode catches.
+    v_invwed PLS_INTEGER;
     -- M10.5: the pure-AWR-gap day. Both of its snapshots keep existing but
     -- carry NO osstat / time-model rows, so the next interval (06:00 of the
     -- following day) differences against 18:00 of the PRECEDING day and spans
@@ -191,8 +199,9 @@ DECLARE
     -- Its 06:00 interval is valid, its 18:00 one spans the restart and is
     -- dropped, so the day covers 12 h and reads is_complete = 'N' with
     -- gap_flag = 'N'. Placed before the train_days window (31..120) so no
-    -- fit or alert moves, and with at most two same-weekday priors so its
-    -- low busy% cannot flag (cpu_min_dow_hist = 3).
+    -- fit or alert moves. The anomaly engine never scores an is_complete =
+    -- 'N' day (its 20% would read LOW against the TRAILING median), and it
+    -- has at most two same-weekday priors anyway (weekly_min_hist = 3).
     v_partial PLS_INTEGER;
     v_startp TIMESTAMP;
     -- Local functions cannot be called inside SQL (PLS-00231), so the meta
@@ -233,12 +242,14 @@ DECLARE
     FUNCTION fnight(p_i PLS_INTEGER) RETURN NUMBER IS
     BEGIN
         IF p_i = v_inj THEN RETURN 0.70;
+        ELSIF p_i = v_invwed THEN RETURN 0.40;
         ELSIF dow(p_i) >= 5 THEN RETURN 0.10;
         ELSE RETURN 0.20; END IF;
     END;
     FUNCTION fday(p_i PLS_INTEGER) RETURN NUMBER IS
     BEGIN
         IF p_i = v_inj THEN RETURN 0.70;
+        ELSIF p_i = v_invwed THEN RETURN 0.40;
         ELSIF dow(p_i) >= 5 THEN RETURN 0.30;
         ELSE RETURN 0.60; END IF;
     END;
@@ -252,12 +263,13 @@ DECLARE
     -- point of the fixture: the N-of-M confirmation then has to clear a real
     -- base_med + sigma line (45.93) rather than a degenerate flat one.
     -- The step itself is +18 points from day c_shift on, and it lands on
-    -- DB_CPU_PCT -- a metric the daily CAPA_CPU_ANOM does not cover at all
-    -- (that view scores host busy%, and this container has no OSSTAT). So the
-    -- level shift is invisible to every other layer: the REGR trend fit reads
-    -- it as noise (R^2 well under the gate), no day is ever flagged, and
-    -- CAPA_CPU_SHIFT is the only thing that says the container now runs 18
-    -- points hotter than it did a month ago.
+    -- DB_CPU_PCT (this container has no OSSTAT, so no host busy%). The REGR
+    -- trend fit reads it as noise (R^2 well under the gate), and CAPA_CPU_SHIFT
+    -- says the container now runs 18 points hotter than a month ago. M15's
+    -- anomaly modes see the step DAYS too: every step day is 18 points over
+    -- its same-weekday priors (SAME_DOW, floor threshold 9), while TRAILING,
+    -- whose window mixes the sawtooth (sigma 5.93), flags only the days whose
+    -- deviation clears 3 x sigma (run_test.sql derives which).
     FUNCTION pdb_pct(p_i PLS_INTEGER) RETURN NUMBER IS
         v NUMBER := 40 + (MOD(p_i, 7) - 3) * 2;
     BEGIN
@@ -315,12 +327,6 @@ BEGIN
     FOR i IN REVERSE 90 .. c_nd LOOP
         IF MOD(TRUNC(v_base + i) - DATE '2020-01-06', 7) = 1 THEN v_inj := i; EXIT; END IF;
     END LOOP;
-    v_probe := NULL;
-    FOR i IN REVERSE 61 .. (c_nd - 1) LOOP
-        IF MOD(TRUNC(v_base + i) - DATE '2020-01-06', 7) < 5 AND i <> v_inj THEN
-            v_probe := i; EXIT;
-        END IF;
-    END LOOP;
     -- M10.5 gap day = the latest Sunday (dow 6) in 70..80. See the declaration
     -- comment for why Sunday and why that range.
     v_cpugap := NULL;
@@ -333,6 +339,21 @@ BEGIN
         IF MOD(TRUNC(v_base + i) - DATE '2020-01-06', 7) < 5 THEN v_partial := i; EXIT; END IF;
     END LOOP;
     v_startp := CAST(v_base + v_partial + 12/24 AS TIMESTAMP);
+    -- M15 inverted Wednesday = the latest Wednesday (dow 2) in 90..c_nd: inside
+    -- the alert window's reach, never the injected Tuesday or a gap day (a
+    -- Sunday / Monday in 70..81), and chosen BEFORE the probe so the probe
+    -- can avoid it.
+    v_invwed := NULL;
+    FOR i IN REVERSE 90 .. c_nd LOOP
+        IF MOD(TRUNC(v_base + i) - DATE '2020-01-06', 7) = 2 THEN v_invwed := i; EXIT; END IF;
+    END LOOP;
+    v_probe := NULL;
+    FOR i IN REVERSE 61 .. (c_nd - 1) LOOP
+        IF MOD(TRUNC(v_base + i) - DATE '2020-01-06', 7) < 5
+           AND i <> v_inj AND i <> v_invwed THEN
+            v_probe := i; EXIT;
+        END IF;
+    END LOOP;
 
     -- ---- dimensions ----
     INSERT INTO cap_fixture_tablespace VALUES (c_dbid, c_con, 10, 'FIX_LINEAR',   'PERMANENT', c_bs);
@@ -616,6 +637,7 @@ BEGIN
     INSERT INTO cap_fixture_meta (mkey, dval) VALUES ('RESTART_DAY', v_base + c_restart);
     INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('INJECTED_TUE', v_base + v_inj, v_inj);
     INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('PROBE_DAY',    v_base + v_probe, v_probe);
+    INSERT INTO cap_fixture_meta (mkey, dval, nval) VALUES ('INVERTED_WED', v_base + v_invwed, v_invwed);
     -- CPU closed forms on the probe weekday (M10.1 / M10.2). Assumes shipped
     -- peak window (8,18]: only the 18:00 interval is "peak".
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('CPU_PROBE_AVG',  40);     -- (20+60)/2
@@ -643,6 +665,8 @@ BEGIN
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PARTIAL_DBCPU_PCT',
         100 * v_pnight * 500 / (c_ncpu * 43200));                                                              -- 0.0289
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_PARTIAL_PCT', v_ppdb);
+    -- FIXPDB1's DB CPU is split evenly over the two 12 h intervals, so both
+    -- M15 hour buckets of a day also read pdb_pct (the day's level).
     INSERT INTO cap_fixture_meta (mkey, nval) VALUES ('PDB_PROBE_PCT',   v_prpdb);
     -- M10.5 gap closed forms. The gap day itself vanishes; the day AFTER it
     -- carries one 36 h interval (Sunday night 0.10 + Sunday day 0.30 + Monday
@@ -1187,7 +1211,8 @@ BEGIN
         || ' inj_tue=' || TO_CHAR(v_base + v_inj,'YYYY-MM-DD Dy')
         || ' probe=' || TO_CHAR(v_base + v_probe,'YYYY-MM-DD Dy')
         || ' cpu_gap=' || TO_CHAR(v_base + v_cpugap,'YYYY-MM-DD Dy')
-        || ' partial=' || TO_CHAR(v_base + v_partial,'YYYY-MM-DD Dy'));
+        || ' partial=' || TO_CHAR(v_base + v_partial,'YYYY-MM-DD Dy')
+        || ' inverted_wed=' || TO_CHAR(v_base + v_invwed,'YYYY-MM-DD Dy'));
 END;
 /
 

@@ -83,7 +83,7 @@ SELECT TO_CHAR(c.train_days,                 'FM9999990')         AS k_train,
        RTRIM(TO_CHAR(c.mad_k,                'FM9999990.9'), '.') AS k_madk,
        TO_CHAR(c.dow_weeks,                  'FM9999990')         AS k_dow,
        RTRIM(TO_CHAR(c.cpu_min_mad_pct,      'FM9999990.9'), '.') AS k_mmad,
-       TO_CHAR(c.cpu_min_dow_hist,           'FM9999990')         AS k_hist,
+       TO_CHAR(c.weekly_min_hist,            'FM9999990')         AS k_hist,
        TO_CHAR(c.cpu_sat_pct,                'FM9999990')         AS k_sat
 FROM   cap_cfg c;
 SET TERMOUT ON
@@ -331,7 +331,7 @@ PROMPT
 PROMPT == 3. ANOMALY ARITHMETIC (CAPA_CPU_ANOM, flagged days in the fit window) ==
 PROMPT    Knobs: mad_k=&k_madk, dow_weeks=&k_dow (baseline = the prior same
 PROMPT    WEEKDAYS, never the day itself), cpu_min_mad_pct=&k_mmad (sigma floor),
-PROMPT    cpu_min_dow_hist=&k_hist (min prior same-weekdays). Values in percent points.
+PROMPT    weekly_min_hist=&k_hist (min prior same-weekdays). Values in percent points.
 
 COLUMN arith FORMAT A190 HEADING 'FLAGGED DAY'
 

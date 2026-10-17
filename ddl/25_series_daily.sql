@@ -21,7 +21,7 @@
 --
 -- Column contract:
 --   (dbid, con_dbid, series, day_dt, value, limit_value, unit, n_samples,
---    covered_sec, is_complete)
+--    covered_sec, is_complete, day_gap, max_interval_hours, gap_flag)
 -- limit_value is NULL when the series has no ceiling (REDO_GB_DAY) or when it
 -- could not be resolved (an UNLIMITED / non-numeric resource limit).
 -- covered_sec / is_complete mean what they mean in CAPD_CPU_DAILY, and only a
@@ -29,6 +29,17 @@
 -- its intervals reads half the redo. The level series (PROCESSES, SESSIONS,
 -- DB_SIZE_GB) read one sample per day, so they carry covered_sec NULL and
 -- is_complete 'Y'.
+-- M15 gap columns, read by the anomaly layer (a gap day is neither scored
+-- nor used as baseline):
+--   day_gap            = days since the series' previous row.
+--   max_interval_hours = REDO_GB_DAY: the longest counter interval ending
+--                        that day; NULL for the level series.
+--   gap_flag           = 'Y' for REDO_GB_DAY when max_interval_hours >
+--                        cpu_gap_hours (the day carries more than a day of
+--                        redo); for DB_SIZE_GB when n_samples differs from the
+--                        previous row's (the tablespace SET changed, so the
+--                        day-over-day move measures membership, not growth);
+--                        else 'N'.
 --
 -- Seam-agnostic: only CAPV_* (+ CAPD_TBSPC_DAILY and CAPD_COUNTER_DELTA,
 -- both seam-agnostic).
@@ -111,7 +122,8 @@ WITH snap AS (
                SUM(delta) / 1073741824                        AS val,
                CAST(NULL AS NUMBER)                           AS lim,
                COUNT(*)                                       AS n_samples,
-               SUM(ivl_sec) / COUNT(DISTINCT instance_number) AS covered_sec
+               SUM(ivl_sec) / COUNT(DISTINCT instance_number) AS covered_sec,
+               MAX(ivl_sec) / 3600                            AS max_ivl
         FROM  ( SELECT dbid, con_dbid, instance_number,
                        TRUNC(end_time) AS day_dt, delta, ivl_sec
                 FROM   capd_counter_delta
@@ -135,21 +147,38 @@ WITH snap AS (
                COUNT(*)                      AS n_samples   -- tablespaces summed
         FROM   capd_tbspc_daily
         GROUP  BY dbid, con_dbid, day_dt
+     ),
+     u AS (
+        SELECT dbid, con_dbid, series, day_dt, val, lim,
+               'COUNT'       AS unit, n_samples,
+               CAST(NULL AS NUMBER) AS covered_sec, 'Y' AS is_complete,
+               CAST(NULL AS NUMBER) AS max_ivl
+        FROM   rl_day
+        UNION ALL
+        SELECT r.dbid, r.con_dbid, r.series, r.day_dt, r.val, r.lim,
+               'GIB_PER_DAY' AS unit, r.n_samples,
+               r.covered_sec,
+               CASE WHEN r.covered_sec >= cfg.complete_day_pct / 100 * 86400
+                    THEN 'Y' ELSE 'N' END,
+               r.max_ivl
+        FROM   redo_day r
+        CROSS  JOIN cap_cfg cfg
+        UNION ALL
+        SELECT dbid, con_dbid, series, day_dt, val, lim,
+               'GIB'         AS unit, n_samples,
+               CAST(NULL AS NUMBER), 'Y', CAST(NULL AS NUMBER)
+        FROM   size_day
      )
-SELECT dbid, con_dbid, series, day_dt, val AS value, lim AS limit_value,
-       'COUNT'       AS unit, n_samples,
-       CAST(NULL AS NUMBER) AS covered_sec, 'Y' AS is_complete
-FROM   rl_day
-UNION ALL
-SELECT r.dbid, r.con_dbid, r.series, r.day_dt, r.val, r.lim,
-       'GIB_PER_DAY' AS unit, r.n_samples,
-       r.covered_sec,
-       CASE WHEN r.covered_sec >= cfg.complete_day_pct / 100 * 86400
-            THEN 'Y' ELSE 'N' END
-FROM   redo_day r
-CROSS  JOIN cap_cfg cfg
-UNION ALL
-SELECT dbid, con_dbid, series, day_dt, val, lim,
-       'GIB'         AS unit, n_samples,
-       CAST(NULL AS NUMBER), 'Y'
-FROM   size_day;
+SELECT u.dbid, u.con_dbid, u.series, u.day_dt, u.val AS value, u.lim AS limit_value,
+       u.unit, u.n_samples, u.covered_sec, u.is_complete,
+       u.day_dt - LAG(u.day_dt) OVER (PARTITION BY u.dbid, u.con_dbid, u.series
+                                      ORDER BY u.day_dt)                      AS day_gap,
+       ROUND(u.max_ivl, 2)                                                    AS max_interval_hours,
+       CASE
+           WHEN u.max_ivl > cfg.cpu_gap_hours THEN 'Y'
+           WHEN u.series = 'DB_SIZE_GB'
+            AND u.n_samples <> LAG(u.n_samples) OVER (PARTITION BY u.dbid, u.con_dbid, u.series
+                                                      ORDER BY u.day_dt) THEN 'Y'
+           ELSE 'N'
+       END                                                                    AS gap_flag
+FROM   u CROSS JOIN cap_cfg cfg;

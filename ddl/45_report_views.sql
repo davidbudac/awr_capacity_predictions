@@ -12,16 +12,22 @@
 --                       * name unknown        -> the raw con_dbid as text
 --                     Defining the label ONCE here keeps text and HTML reports
 --                     from drifting.
+--   CAPR_ANOMALIES -- every flagged anomaly event (one row per observation
+--                     and baseline mode, plus CPU level shifts) with its
+--                     severity, message and alert eligibility. Also a point
+--                     feed for external dashboards.
 --   CAPR_ALERTS    -- one row per current issue, pollable by OEM metric
 --                     extensions / Zabbix / Nagios / a scheduler job:
 --                       severity   CRIT | WARN | INFO  (sev_rank 1|2|3)
 --                       kind       TBSPC_FULL | TBSPC_NEARFULL | TBSPC_ANOM |
---                                  CPU_SAT | DBCPU_SAT | CPU_ANOM |
---                                  CPU_SHIFT | SERIES_LIMIT | SERIES_NEARLIMIT
+--                                  CPU_SAT | DBCPU_SAT | CPU_ANOM | DBCPU_ANOM |
+--                                  CPU_SHIFT | SERIES_LIMIT | SERIES_NEARLIMIT |
+--                                  SERIES_ANOM
 --                     plus keys (dbid, con_dbid, db_pdb, series_key), the
---                     observation day, the metric value vs its threshold, and
---                     a ready-to-page plain-text message.
---   CAPR_SERIES_POINTS / CAPR_FIT / CAPR_ANOMALIES -- point feeds for
+--                     observation day, the metric value vs its threshold, a
+--                     ready-to-page plain-text message, the baseline_mode of
+--                     an anomaly kind and a unique alert_key.
+--   CAPR_SERIES_POINTS / CAPR_HOURLY_POINTS / CAPR_FIT -- point feeds for
 --                     external dashboards (grafana/API.md, elk/), at the
 --                     bottom of this file; CAPR_FORECAST_POINTS is in ddl/55.
 --
@@ -49,6 +55,158 @@ SELECT c.dbid,
 FROM   capv_container c;
 
 -- --------------------------------------------------------------------
+-- CAPR_ANOMALIES -- one row per flagged event over the whole history (no
+-- window): every flagged CAPA_ANOM row (one per observation AND baseline
+-- mode) plus the current CPU_SHIFT of each series. The single home of an
+-- anomaly's severity, message and alert eligibility; CAPR_ALERTS reads its
+-- anomaly rows FROM here.
+--   anomaly_kind  TBSPC_GROWTH | CPU_BUSY (host BUSY_PCT) | DBCPU_BUSY
+--                 (container DB_CPU_PCT) | SERIES_LEVEL | SERIES_GROWTH |
+--                 CPU_SHIFT
+--   value         the SCORED value (TBSPC: the growth rate in bytes/day;
+--                 raw_value is the day's raw delta); expected = the baseline
+--                 median; threshold = the allowed DEVIATION (mad_k *
+--                 eff_sigma), so the crossed bound is expected +/- threshold.
+--   alerting      'Y' when the family's alert_modes bitmask enables this
+--                 baseline mode AND the day is inside anomaly_report_days of
+--                 the kind's last collected day (CPU_SHIFT: always 'Y').
+--   sev           WARN for an alerting HIGH / UP, else INFO.
+--   obs_day       TRUNC(ts) (hour rows too); CPU_SHIFT: the last day of its
+--                 recent window, while ts is the window's first day.
+--   pct_vs_expected / pct_vs_avg  the move as a % of the baseline median /
+--                 of the long-run train_days mean; NULL when that baseline is
+--                 not positive.
+--   doc_key       the stable id input for exporters (unique).
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capr_anomalies AS
+WITH lastd AS (
+        SELECT kind, MAX(ts) AS last_day
+        FROM   capa_obs
+        WHERE  grain = 'DAY'
+        GROUP  BY kind
+     ),
+     pt AS (
+        SELECT a.*,
+               CASE WHEN a.alerting_mode = 'Y'
+                     AND TRUNC(a.ts) > l.last_day - cfg.anomaly_report_days
+                    THEN 'Y' ELSE 'N' END                                     AS alerting,
+               DECODE(a.dow, 0, 'Mon', 1, 'Tue', 2, 'Wed', 3, 'Thu',
+                             4, 'Fri', 5, 'Sat', 'Sun')                        AS dy,
+               cfg.mad_window_days, cfg.train_days
+        FROM   capa_anom a
+        CROSS  JOIN cap_cfg cfg
+        JOIN   lastd l ON l.kind = a.kind
+        WHERE  a.anomaly_flag IS NOT NULL
+     ),
+     fmt AS (
+        SELECT p.*,
+               CASE p.unit
+                   WHEN 'BYTES_PER_DAY' THEN TO_CHAR(p.expected / 1048576, 'FM999999990.0') || ' MiB/day'
+                   WHEN 'PCT'           THEN TO_CHAR(p.expected, 'FM9999990.0') || '%'
+                   WHEN 'COUNT'         THEN TO_CHAR(p.expected, 'FM99999999990')
+                   ELSE                      TO_CHAR(p.expected, 'FM9999990.00') || ' GiB/day'
+               END                                                            AS expected_txt,
+               CASE p.anomaly_kind
+                   WHEN 'TBSPC_GROWTH' THEN
+                       'Tablespace ' || p.series
+                       || CASE WHEN p.anomaly_flag = 'HIGH' THEN ' grew '
+                               WHEN p.raw_value < 0         THEN ' shrank '
+                               ELSE ' grew less than usual: ' END
+                       || TO_CHAR(ABS(p.raw_value) / 1073741824, 'FM99999990.00') || ' GiB'
+                   WHEN 'SERIES_GROWTH' THEN
+                       p.series
+                       || CASE WHEN p.anomaly_flag = 'HIGH' THEN ' grew '
+                               WHEN p.raw_value < 0         THEN ' shrank '
+                               ELSE ' grew less than usual: ' END
+                       || TO_CHAR(ABS(p.raw_value), 'FM99999990.00') || ' GiB'
+                   WHEN 'CPU_BUSY'   THEN 'Host CPU ' || TO_CHAR(p.value, 'FM990.0') || '% busy'
+                   WHEN 'DBCPU_BUSY' THEN 'DB CPU ' || TO_CHAR(p.value, 'FM990.0') || '% of host CPUs'
+                   ELSE p.series || ' at '
+                        || CASE p.unit WHEN 'COUNT' THEN TO_CHAR(p.value, 'FM99999999990')
+                                       ELSE TO_CHAR(p.value, 'FM9999990.00') || ' GiB/day' END
+               END                                                            AS subject,
+               CASE p.baseline_mode
+                   WHEN 'TRAILING' THEN 'over the last ' || TO_CHAR(p.mad_window_days, 'FM9990') || ' days'
+                   WHEN 'SAME_DOW' THEN 'for that weekday'
+                   ELSE 'for ' || p.dy || ' ' || TO_CHAR(p.ts, 'HH24') || ':00'
+               END                                                            AS phrase
+        FROM   pt p
+     ),
+     ev AS (
+        SELECT f.dbid, f.con_dbid, f.ts, f.kind, f.series, f.anomaly_kind, f.anomaly_flag,
+               f.value, f.expected, f.threshold, f.robust_z AS z,
+               CAST(NULL AS NUMBER) AS shift_pct, LOWER(f.unit) AS unit,
+               CASE WHEN f.alerting = 'Y' AND f.anomaly_flag = 'HIGH' THEN 'WARN' ELSE 'INFO' END AS sev,
+               f.subject || ' on '
+                 || TO_CHAR(f.ts, CASE f.grain WHEN 'HOUR' THEN 'YYYY-MM-DD HH24:MI' ELSE 'YYYY-MM-DD' END)
+                 || ' vs usual ' || f.expected_txt || ' ' || f.phrase
+                 || ', robust z ' || NVL(TO_CHAR(f.robust_z, 'FMS999999990.0'), 'off-scale')
+                 || CASE WHEN f.pct_vs_expected IS NOT NULL
+                         THEN ' (' || TO_CHAR(f.pct_vs_expected, 'FMS999999999990') || '% vs median)' END
+                 || CASE WHEN f.kind = 'TBSPC' AND f.pct_vs_avg IS NOT NULL
+                         THEN ', ' || TO_CHAR(f.pct_vs_avg, 'FMS999999999990') || '% vs '
+                              || TO_CHAR(f.train_days, 'FM9990') || '-day avg rate' END   AS message,
+               TRUNC(f.ts) AS obs_day,
+               CASE WHEN f.kind = 'TBSPC' THEN f.value END AS rate_bpd,
+               f.pct_vs_expected, f.pct_vs_avg,
+               f.baseline_mode, f.grain, f.n_hist, f.alerting, f.alert_kind, f.raw_value
+        FROM   fmt f
+        UNION ALL
+        SELECT s.dbid, s.con_dbid, s.last_day - s.recent_days + 1, 'CPU', s.metric,
+               'CPU_SHIFT', s.shift_flag,
+               s.recent_med, s.base_med, s.threshold_pct, NULL,
+               s.shift_pct, LOWER(TRIM(s.unit)),
+               CASE s.shift_flag WHEN 'UP' THEN 'WARN' ELSE 'INFO' END,
+               s.metric || ' shifted ' || s.shift_flag || ' '
+                 || TO_CHAR(s.shift_pct, 'FMS9999990.0') || ' pts: last '
+                 || TO_CHAR(s.recent_days, 'FM9999990') || ' days median '
+                 || TO_CHAR(s.recent_med, 'FM99999990.0') || '% vs prior '
+                 || TO_CHAR(s.base_days, 'FM9999990') || ' days '
+                 || TO_CHAR(s.base_med, 'FM99999990.0') || '%',
+               s.last_day, NULL,
+               CASE WHEN s.base_med > 0 THEN 100 * s.shift_pct / s.base_med END, NULL,
+               NULL, 'DAY', s.n_base, 'Y', 'CPU_SHIFT', s.recent_med
+        FROM   capa_cpu_shift s
+        WHERE  s.shift_flag IN ('UP', 'DOWN')
+     )
+SELECT e.dbid,
+       e.con_dbid,
+       NVL(c.db_pdb, TO_CHAR(e.con_dbid))  AS db,
+       c.db_name,
+       c.con_name,
+       e.ts,
+       e.kind,
+       e.series,
+       e.anomaly_kind,
+       e.anomaly_flag,
+       e.value,
+       e.expected,
+       e.threshold,
+       e.z,
+       e.shift_pct,
+       e.unit,
+       e.sev,
+       CASE e.sev WHEN 'CRIT' THEN 1 WHEN 'WARN' THEN 2 ELSE 3 END AS sev_rank,
+       e.message,
+       e.obs_day,
+       e.rate_bpd,
+       e.pct_vs_expected,
+       e.pct_vs_avg,
+       e.baseline_mode,
+       e.grain,
+       e.n_hist,
+       e.alerting,
+       e.alert_kind,
+       e.raw_value,
+       'anom|' || e.dbid || '|' || e.con_dbid || '|' || e.anomaly_kind || '|' || e.series
+         || '|' || NVL(e.baseline_mode, '-') || '|'
+         || TO_CHAR(CASE WHEN e.anomaly_kind = 'CPU_SHIFT' THEN e.obs_day ELSE e.ts END,
+                    'YYYY-MM-DD"T"HH24')                                       AS doc_key
+FROM   ev e
+LEFT   JOIN capr_container c
+  ON   c.dbid = e.dbid AND c.con_dbid = e.con_dbid;
+
+-- --------------------------------------------------------------------
 -- CAPR_ALERTS
 -- Every branch is hand-auditable against the view it reads:
 --   TBSPC_FULL     capf_tbspc_forecast: quality=OK, days_to_full <= dtf_warn.
@@ -58,9 +216,11 @@ FROM   capv_container c;
 --   CPU_SAT        capf_cpu_trend BUSY_P95 (or BUSY_PCT when cpu_sat_on_p95=0):
 --                  quality=OK, days_to_sat <= dtf_warn.
 --   DBCPU_SAT      capf_cpu_trend DB_CPU_PCT (per container, M10.2): same rule.
---   TBSPC_ANOM     capa_tbspc_anom flagged within the last anomaly_report_days
---                  (HIGH growth -> WARN, LOW/shrink -> INFO).
---   CPU_ANOM       capa_cpu_anom, same window/severity mapping.
+--   TBSPC_ANOM / CPU_ANOM / DBCPU_ANOM / SERIES_ANOM
+--                  CAPR_ANOMALIES rows with alerting = 'Y': the baseline
+--                  mode is enabled by alert_modes_<family> and the day lies
+--                  within the last anomaly_report_days (HIGH -> WARN, LOW ->
+--                  INFO). One row per (series, day, baseline_mode).
 --   CPU_SHIFT      capa_cpu_shift (M10.3): a flagged sustained level shift.
 --                  UP -> WARN, DOWN -> INFO. No day window applies -- the
 --                  view already holds only the CURRENT state of each series.
@@ -72,6 +232,8 @@ FROM   capv_container c;
 --                  processes / sessions / total DB size).
 -- value/threshold carry the number that crossed and the limit it crossed
 -- (units in the unit column), so a poller can alarm without parsing message.
+-- baseline_mode is NULL for every non-anomaly kind; alert_key =
+-- dbid|con_dbid|kind|series_key|YYYY-MM-DD|mode ('-' when none) is unique.
 -- db_pdb resolves through CAPR_CONTAINER; unknown containers degrade to the
 -- raw con_dbid string.
 -- --------------------------------------------------------------------
@@ -90,7 +252,8 @@ WITH alerts AS (
                'Tablespace ' || f.tablespace_name || ' forecast full in '
                  || TO_CHAR(f.days_to_full, 'FM9999990') || ' days ('
                  || TO_CHAR(f.pct_used, 'FM990.0') || '% used, '
-                 || TO_CHAR(f.slope_bpd / 1048576, 'FM99999990.0') || ' MiB/day)' AS message
+                 || TO_CHAR(f.slope_bpd / 1048576, 'FM99999990.0') || ' MiB/day)' AS message,
+               CAST(NULL AS VARCHAR2(12)) AS baseline_mode
         FROM   capf_tbspc_forecast f CROSS JOIN cap_cfg cfg
         WHERE  f.quality = 'OK'
           AND  f.days_to_full IS NOT NULL
@@ -109,7 +272,8 @@ WITH alerts AS (
                  || TO_CHAR(f.pct_used, 'FM990.0') || '% full now ('
                  || TO_CHAR(f.cur_used / 1073741824, 'FM99999990.00') || ' of '
                  || TO_CHAR(f.limit_bytes / 1073741824, 'FM99999990.00')
-                 || ' GiB; forecast quality ' || f.quality || ')'
+                 || ' GiB; forecast quality ' || f.quality || ')',
+               NULL
         FROM   capf_tbspc_forecast f CROSS JOIN cap_cfg cfg
         WHERE  f.pct_used >= cfg.nearfull_warn_pct
         UNION ALL
@@ -125,7 +289,8 @@ WITH alerts AS (
                'Host CPU ' || CASE t.metric WHEN 'BUSY_P95' THEN '(busy-hour p95) ' ELSE '(daily avg) ' END
                  || 'forecast to reach ' || TO_CHAR(cfg.cpu_sat_pct, 'FM990')
                  || '% busy in ' || TO_CHAR(t.days_to_sat, 'FM9999990')
-                 || ' days (now ' || TO_CHAR(t.cur_val, 'FM990.0') || '% busy)'
+                 || ' days (now ' || TO_CHAR(t.cur_val, 'FM990.0') || '% busy)',
+               NULL
         FROM   capf_cpu_trend t CROSS JOIN cap_cfg cfg
         -- which host-busy trend drives CPU_SAT (M10.1): p95 of the day's
         -- snapshot intervals (default) or the daily average
@@ -146,7 +311,8 @@ WITH alerts AS (
                'DAYS',
                'DB CPU forecast to reach ' || TO_CHAR(cfg.cpu_sat_pct, 'FM990')
                  || '% of host core capacity in ' || TO_CHAR(t.days_to_sat, 'FM9999990')
-                 || ' days (now ' || TO_CHAR(t.cur_val, 'FM990.0') || '%)'
+                 || ' days (now ' || TO_CHAR(t.cur_val, 'FM990.0') || '%)',
+               NULL
         FROM   capf_cpu_trend t CROSS JOIN cap_cfg cfg
         WHERE  t.metric = 'DB_CPU_PCT'
           AND  t.quality = 'OK'
@@ -172,53 +338,10 @@ WITH alerts AS (
                  || TO_CHAR(s.recent_days, 'FM9999990') || ' days median '
                  || TO_CHAR(s.recent_med, 'FM99999990.0') || '% vs prior '
                  || TO_CHAR(s.base_days, 'FM9999990') || ' days '
-                 || TO_CHAR(s.base_med, 'FM99999990.0') || '%'
+                 || TO_CHAR(s.base_med, 'FM99999990.0') || '%',
+               NULL
         FROM   capa_cpu_shift s CROSS JOIN cap_cfg cfg
         WHERE  s.shift_flag IS NOT NULL
-        UNION ALL
-        -- ---- TBSPC_ANOM: flagged growth-rate days in the alert window ----
-        SELECT CASE WHEN a.anomaly_flag = 'HIGH' THEN 'WARN' ELSE 'INFO' END,
-               'TBSPC_ANOM',
-               a.dbid, a.con_dbid,
-               a.tablespace_name,
-               a.day_dt,
-               a.used_delta_bytes,
-               a.threshold_bpd,
-               'BYTES',
-               'Tablespace ' || a.tablespace_name
-                 || CASE WHEN a.anomaly_flag = 'HIGH' THEN ' grew ' ELSE ' shrank ' END
-                 || TO_CHAR(ABS(a.used_delta_bytes) / 1073741824, 'FM99999990.00')
-                 || ' GiB on ' || TO_CHAR(a.day_dt, 'YYYY-MM-DD')
-                 -- robust_z is NULL when the baseline MAD is 0 (a spike off a
-                 -- perfectly steady series) -- exactly when the jump is most
-                 -- clear-cut, so say that instead of printing an empty number.
-                 || ' (robust z '
-                 || NVL(TO_CHAR(a.robust_z, 'FM99990.0'), 'off-scale, flat baseline') || ')'
-                 || CASE WHEN a.pct_vs_avg IS NOT NULL
-                         THEN ', ' || TO_CHAR(a.pct_vs_avg, 'FMS999999999990') || '% vs '
-                              || TO_CHAR(cfg.train_days, 'FM9990') || '-day avg rate' END
-        FROM   capa_tbspc_anom a CROSS JOIN cap_cfg cfg
-        WHERE  a.anomaly_flag IS NOT NULL
-          AND  a.day_dt > (SELECT MAX(day_dt) FROM capd_tbspc_daily) - cfg.anomaly_report_days
-        UNION ALL
-        -- ---- CPU_ANOM: flagged busy% days in the alert window ----
-        SELECT CASE WHEN a.anomaly_flag = 'HIGH' THEN 'WARN' ELSE 'INFO' END,
-               'CPU_ANOM',
-               a.dbid, a.con_dbid,
-               'BUSY_PCT',
-               a.day_dt,
-               a.busy_pct,
-               a.median_pct + CASE WHEN a.anomaly_flag = 'HIGH'
-                                   THEN a.threshold_pct ELSE -a.threshold_pct END,
-               'PCT',
-               'Host CPU ' || TO_CHAR(a.busy_pct, 'FM990.0') || '% busy on '
-                 || TO_CHAR(a.day_dt, 'YYYY-MM-DD') || ' vs usual '
-                 || TO_CHAR(a.median_pct, 'FM990.0') || '% for that weekday'
-                 || CASE WHEN a.pct_vs_median IS NOT NULL
-                         THEN ' (' || TO_CHAR(a.pct_vs_median, 'FMS999999999990') || '% vs median)' END
-        FROM   capa_cpu_anom a CROSS JOIN cap_cfg cfg
-        WHERE  a.anomaly_flag IS NOT NULL
-          AND  a.day_dt > (SELECT MAX(day_dt) FROM capd_cpu_daily) - cfg.anomaly_report_days
         UNION ALL
         -- ---- SERIES_LIMIT (M11): a fixed-ceiling series (PROCESSES /
         -- SESSIONS / DB_SIZE_GB) is forecast to reach series_sat_pct% of its
@@ -238,7 +361,8 @@ WITH alerts AS (
                  || '% of its limit (' || RTRIM(TO_CHAR(s.cur_limit, 'FM99999999990.99'), '.')
                  || ' ' || s.unit || ') in ' || TO_CHAR(s.days_to_limit, 'FM9999990')
                  || ' days (now ' || RTRIM(TO_CHAR(s.cur_val, 'FM99999999990.99'), '.')
-                 || ', ' || TO_CHAR(s.pct_of_limit, 'FM990.0') || '% of limit)'
+                 || ', ' || TO_CHAR(s.pct_of_limit, 'FM990.0') || '% of limit)',
+               NULL
         FROM   capf_series_forecast s CROSS JOIN cap_cfg cfg
         WHERE  s.quality = 'OK'
           AND  s.days_to_limit IS NOT NULL
@@ -259,9 +383,39 @@ WITH alerts AS (
                s.series || ' is at ' || TO_CHAR(s.pct_of_limit, 'FM990.0')
                  || '% of its limit now (' || RTRIM(TO_CHAR(s.cur_val, 'FM99999999990.99'), '.')
                  || ' of ' || RTRIM(TO_CHAR(s.cur_limit, 'FM99999999990.99'), '.') || ' ' || s.unit
-                 || '; forecast quality ' || s.quality || ')'
+                 || '; forecast quality ' || s.quality || ')',
+               NULL
         FROM   capf_series_forecast s CROSS JOIN cap_cfg cfg
         WHERE  s.pct_of_limit >= cfg.nearfull_warn_pct
+        UNION ALL
+        -- ---- TBSPC_ANOM / CPU_ANOM / DBCPU_ANOM / SERIES_ANOM (M15): the
+        -- alerting rows of CAPR_ANOMALIES, one per (series, day, baseline
+        -- mode). An HOUR_OF_WEEK day carries its worst hour (largest |z|,
+        -- earliest on a tie) and says how many hours flagged; it is a WARN
+        -- when any of them is. threshold = the bound crossed.
+        SELECT CASE WHEN x.day_rank = 2 THEN 'WARN' ELSE 'INFO' END,
+               x.alert_kind,
+               x.dbid, x.con_dbid,
+               x.series,
+               x.obs_day,
+               x.value,
+               x.expected + SIGN(x.value - x.expected) * x.threshold,
+               CASE x.unit WHEN 'bytes_per_day' THEN 'BYTES' WHEN 'pct' THEN 'PCT'
+                           WHEN 'count' THEN 'COUNT' ELSE 'GIB' END,
+               x.message || CASE WHEN x.n_events > 1
+                                 THEN '; ' || x.n_events || ' hours flagged that day' END,
+               x.baseline_mode
+        FROM  (SELECT a.*,
+                      ROW_NUMBER() OVER (PARTITION BY a.alert_kind, a.dbid, a.con_dbid, a.series,
+                                                      a.baseline_mode, a.obs_day
+                                         ORDER BY ABS(a.z) DESC NULLS LAST, a.ts) AS rn,
+                      COUNT(*)        OVER (PARTITION BY a.alert_kind, a.dbid, a.con_dbid, a.series,
+                                                     a.baseline_mode, a.obs_day)  AS n_events,
+                      MIN(a.sev_rank) OVER (PARTITION BY a.alert_kind, a.dbid, a.con_dbid, a.series,
+                                                     a.baseline_mode, a.obs_day)  AS day_rank
+               FROM   capr_anomalies a
+               WHERE  a.alerting = 'Y' AND a.anomaly_kind <> 'CPU_SHIFT') x
+        WHERE  x.rn = 1
      )
 SELECT a.severity,
        CASE a.severity WHEN 'CRIT' THEN 1 WHEN 'WARN' THEN 2 ELSE 3 END AS sev_rank,
@@ -274,7 +428,10 @@ SELECT a.severity,
        a.value,
        a.threshold,
        a.unit,
-       a.message
+       a.message,
+       a.baseline_mode,
+       a.dbid || '|' || a.con_dbid || '|' || a.kind || '|' || a.series_key || '|'
+         || TO_CHAR(a.day_dt, 'YYYY-MM-DD') || '|' || NVL(a.baseline_mode, '-') AS alert_key
 FROM   alerts a
 LEFT   JOIN capr_container c
   ON   c.dbid = a.dbid AND c.con_dbid = a.con_dbid;
@@ -354,37 +511,43 @@ LEFT   JOIN capr_container c
   ON   c.dbid = f.dbid AND c.con_dbid = f.con_dbid;
 
 -- --------------------------------------------------------------------
--- CAPR_TBSPC_ANOMALIES -- report section 3. Every FLAGGED day (no window
--- applied here); a driver bounds it with  WHERE days_ago < anomaly_days.
--- days_ago is measured from MAX(day_dt) over ALL of CAPD_TBSPC_DAILY --
--- the same reference the report used before, so "last N days" means the
--- last N collected days, not the last N days before an anomaly.
+-- CAPR_TBSPC_ANOMALIES -- report section 3. Every FLAGGED (day, baseline
+-- mode) of a tablespace (no window applied here); a driver bounds it with
+-- WHERE days_ago < anomaly_days and orders a day's verdicts by mode_rank.
+-- days_ago is measured from MAX(day_dt) over ALL of CAPD_TBSPC_DAILY, so
+-- "last N days" means the last N collected days.
 -- day_str is the pre-formatted YYYY-MM-DD the reports print; day_dt stays
--- a DATE for consumers that want to compare it.
+-- a DATE for consumers that want to compare it. thr_mb is the allowed
+-- deviation (mad_k * eff_sigma), z = dev / eff_sigma.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_tbspc_anomalies AS
 SELECT a.dbid,
        a.con_dbid,
        NVL(c.db_pdb, TO_CHAR(a.con_dbid))      AS db_pdb,
-       a.tablespace_name,
-       a.day_dt,
-       TO_CHAR(a.day_dt, 'YYYY-MM-DD')         AS day_str,
-       (SELECT MAX(day_dt) FROM capd_tbspc_daily) - a.day_dt AS days_ago,
+       a.series                                AS tablespace_name,
+       a.ts                                    AS day_dt,
+       TO_CHAR(a.ts, 'YYYY-MM-DD')             AS day_str,
+       (SELECT MAX(day_dt) FROM capd_tbspc_daily) - a.ts AS days_ago,
        a.day_gap                               AS gap,
-       a.used_delta_bytes / 1048576            AS delta_mb,
-       a.used_rate_bpd    / 1048576            AS rate_mb,
-       a.median_rate_bpd  / 1048576            AS med_mb,
-       a.threshold_bpd    / 1048576            AS thr_mb,
+       a.raw_value / 1048576                   AS delta_mb,
+       a.value     / 1048576                   AS rate_mb,
+       a.expected  / 1048576                   AS med_mb,
+       a.threshold / 1048576                   AS thr_mb,
        a.robust_z                              AS z,
-       a.avg_rate_bpd     / 1048576            AS avg_mb,
+       a.avg_value / 1048576                   AS avg_mb,
        a.avg_days,
-       a.pct_vs_median                         AS pct_vs_med,
+       a.pct_vs_expected                       AS pct_vs_med,
        a.pct_vs_avg,
-       a.anomaly_flag
-FROM   capa_tbspc_anom a
+       a.anomaly_flag,
+       a.baseline_mode,
+       DECODE(a.baseline_mode, 'TRAILING', 'TRL', 'DOW')  AS mode_short,
+       DECODE(a.baseline_mode, 'TRAILING', 1, 2)          AS mode_rank,
+       a.n_hist
+FROM   capa_anom a
 LEFT   JOIN capr_container c
   ON   c.dbid = a.dbid AND c.con_dbid = a.con_dbid
-WHERE  a.anomaly_flag IS NOT NULL;
+WHERE  a.kind = 'TBSPC'
+  AND  a.anomaly_flag IS NOT NULL;
 
 -- --------------------------------------------------------------------
 -- CAPR_CPU_TREND -- report section 4. One row per (container, metric):
@@ -419,27 +582,46 @@ LEFT   JOIN capr_container c
   ON   c.dbid = t.dbid AND c.con_dbid = t.con_dbid;
 
 -- --------------------------------------------------------------------
--- CAPR_CPU_ANOMALIES -- report section 5. Same shape/contract as
--- CAPR_TBSPC_ANOMALIES: flagged rows only, days_ago measured from
--- MAX(day_dt) over CAPD_CPU_DAILY.
+-- CAPR_CPU_ANOMALIES -- report section 5. Every flagged CPU point: host
+-- BUSY_PCT and per-container DB_CPU_PCT, at day grain (TRAILING, SAME_DOW)
+-- and hour grain (HOUR_OF_WEEK). Key (dbid, con_dbid, metric,
+-- baseline_mode, ts). day_dt = TRUNC(ts); ts_str is 'YYYY-MM-DD' for a day
+-- row and 'YYYY-MM-DD Dy HH24:MI' (NLS-proof weekday) for an hour row.
+-- days_ago is measured from the last collected CPU day. threshold_pct is
+-- the allowed deviation in points.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_cpu_anomalies AS
 SELECT a.dbid,
        a.con_dbid,
        NVL(c.db_pdb, TO_CHAR(a.con_dbid))    AS db_pdb,
-       a.day_dt,
-       TO_CHAR(a.day_dt, 'YYYY-MM-DD')       AS day_str,
-       (SELECT MAX(day_dt) FROM capd_cpu_daily) - a.day_dt AS days_ago,
-       a.busy_pct,
-       a.median_pct,
-       a.threshold_pct,
+       TRUNC(a.ts)                           AS day_dt,
+       TO_CHAR(a.ts, 'YYYY-MM-DD')           AS day_str,
+       (SELECT MAX(ts) FROM capa_obs WHERE kind = 'CPU' AND grain = 'DAY') - TRUNC(a.ts) AS days_ago,
+       a.value                               AS value_pct,
+       a.expected                            AS median_pct,
+       a.threshold                           AS threshold_pct,
        a.robust_z                            AS z,
-       a.pct_vs_median                       AS pct_vs_med,
-       a.anomaly_flag
-FROM   capa_cpu_anom a
+       a.pct_vs_expected                     AS pct_vs_med,
+       a.anomaly_flag,
+       a.series                              AS metric,
+       a.baseline_mode,
+       DECODE(a.baseline_mode, 'TRAILING', 'TRL', 'SAME_DOW', 'DOW', 'HOW') AS mode_short,
+       DECODE(a.baseline_mode, 'TRAILING', 1, 'SAME_DOW', 2, 3)             AS mode_rank,
+       a.grain,
+       a.ts,
+       CASE a.grain
+           WHEN 'HOUR' THEN TO_CHAR(a.ts, 'YYYY-MM-DD') || ' '
+                            || DECODE(a.dow, 0, 'Mon', 1, 'Tue', 2, 'Wed', 3, 'Thu',
+                                             4, 'Fri', 5, 'Sat', 'Sun')
+                            || ' ' || TO_CHAR(a.ts, 'HH24:MI')
+           ELSE TO_CHAR(a.ts, 'YYYY-MM-DD')
+       END                                   AS ts_str,
+       a.n_hist
+FROM   capa_anom a
 LEFT   JOIN capr_container c
   ON   c.dbid = a.dbid AND c.con_dbid = a.con_dbid
-WHERE  a.anomaly_flag IS NOT NULL;
+WHERE  a.kind = 'CPU'
+  AND  a.anomaly_flag IS NOT NULL;
 
 -- --------------------------------------------------------------------
 -- CAPR_CPU_SHIFTS -- report section 5's second block (M10.3). Flagged rows
@@ -525,6 +707,40 @@ CROSS  JOIN cap_cfg cfg
 LEFT   JOIN capr_container c
   ON   c.dbid = s.dbid AND c.con_dbid = s.con_dbid;
 
+-- --------------------------------------------------------------------
+-- CAPR_SERIES_ANOMALIES (M15) -- report section 7b: every flagged (day,
+-- baseline mode) of an M11 series. PROCESSES / SESSIONS / REDO_GB_DAY are
+-- scored on their level, DB_SIZE_GB on its daily growth (value GiB/day,
+-- raw_value the GiB moved since the previous row). unit is CAPA_OBS's
+-- (COUNT / GIB_PER_DAY). days_ago is measured from the last collected
+-- CAPD_SERIES_DAILY day.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capr_series_anomalies AS
+SELECT a.dbid,
+       a.con_dbid,
+       NVL(c.db_pdb, TO_CHAR(a.con_dbid))    AS db_pdb,
+       a.series,
+       a.unit,
+       a.baseline_mode,
+       DECODE(a.baseline_mode, 'TRAILING', 'TRL', 'DOW')  AS mode_short,
+       DECODE(a.baseline_mode, 'TRAILING', 1, 2)          AS mode_rank,
+       a.ts                                  AS day_dt,
+       TO_CHAR(a.ts, 'YYYY-MM-DD')           AS day_str,
+       (SELECT MAX(day_dt) FROM capd_series_daily) - a.ts AS days_ago,
+       a.value,
+       a.raw_value,
+       a.expected,
+       a.threshold,
+       a.robust_z                            AS z,
+       a.n_hist,
+       a.pct_vs_expected                     AS pct_vs_med,
+       a.anomaly_flag
+FROM   capa_anom a
+LEFT   JOIN capr_container c
+  ON   c.dbid = a.dbid AND c.con_dbid = a.con_dbid
+WHERE  a.kind = 'SERIES'
+  AND  a.anomaly_flag IS NOT NULL;
+
 -- ====================================================================
 -- Point feeds for external dashboards (grafana/API.md over ORDS, and
 -- elk/export_capacity.sql). One row per charted point, every kind in one
@@ -538,12 +754,34 @@ LEFT   JOIN capr_container c
 -- CAPR_SERIES_POINTS -- every observed daily point: TBSPC used bytes, the
 -- CPU metrics that CAPF_CPU_TREND fits (BUSY_PCT/BUSY_P95/BUSY_PEAK from
 -- OSSTAT, DB_CPU_PCT/DB_CPU_P95/DB_CPU_SEC from the time model) and the M11
--- series. The CAPA_ flag is joined on, so anomaly = 1 marks a flagged day;
--- CPU anomalies are scored on BUSY_PCT only, so the other CPU metrics carry
--- anomaly NULL. The cpu detail columns ride on the headline rows only
--- (BUSY_PCT, DB_CPU_PCT) so a sum over series does not count them twice.
+-- series. Exactly one row per CAPD row: the anomaly verdict comes from
+-- CAPA_ANOM_DAY (one row per observation by construction) and the hour
+-- verdicts are rolled up to the day first.
+--   anomaly            1 when any DAY baseline mode flagged the point or any
+--                      HOUR_OF_WEEK hour of that day flagged; 0 on a scored
+--                      series; NULL on a series nobody scores (BUSY_P95,
+--                      BUSY_PEAK, DB_CPU_P95, DB_CPU_SEC).
+--   anomaly_flag / z / expected / threshold
+--                      the HEADLINE mode's numbers (CAPA_OBS.headline_bit:
+--                      the lowest DAY mode the family alerts on, so TRAILING
+--                      for tablespaces and SAME_DOW for CPU by default).
+--   anomaly_modes      the DAY modes that flagged, comma-separated.
+--   how_hours_flagged  HOUR_OF_WEEK hours flagged that day (CPU only).
+--   doc_key            the stable id input for exporters (unique).
+-- The cpu detail columns ride on the headline rows only (BUSY_PCT,
+-- DB_CPU_PCT) so a sum over series does not count them twice.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_series_points AS
+WITH hm AS (
+        SELECT a.dbid, a.con_dbid, a.series, h.day_dt,
+               COUNT(a.anomaly_flag) AS how_hours_flagged
+        FROM   capa_anom a
+        JOIN   capd_cpu_hourly h
+          ON   h.dbid = a.dbid AND h.con_dbid = a.con_dbid
+         AND   h.metric = a.series AND h.hour_ts = a.ts
+        WHERE  a.baseline_mode = 'HOUR_OF_WEEK'
+        GROUP  BY a.dbid, a.con_dbid, a.series, h.day_dt
+     )
 SELECT p.dbid,
        p.con_dbid,
        NVL(c.db_pdb, TO_CHAR(p.con_dbid))  AS db,
@@ -557,11 +795,13 @@ SELECT p.dbid,
        p.limit_value,
        p.pct,
        p.gap,
-       p.anomaly,
-       p.anomaly_flag,
-       p.z,
-       p.expected,
-       p.threshold,
+       CASE WHEN d.anomaly = 1 OR p.how_hours_flagged > 0 THEN 1
+            WHEN p.scored = 1                              THEN 0
+       END                                 AS anomaly,
+       d.anomaly_flag,
+       d.robust_z                          AS z,
+       d.expected,
+       d.threshold,
        p.used_bytes,
        p.size_bytes,
        p.limit_bytes,
@@ -580,7 +820,11 @@ SELECT p.dbid,
        p.db_time_sec,
        p.db_cpu_pct,
        p.db_cpu_p95_pct,
-       p.db_cpu_per_core
+       p.db_cpu_per_core,
+       d.anomaly_modes,
+       p.how_hours_flagged,
+       'obs|' || p.dbid || '|' || p.con_dbid || '|' || p.kind || '|' || p.series
+         || '|' || TO_CHAR(p.ts, 'YYYY-MM-DD') AS doc_key
 FROM  (
         SELECT t.dbid, t.con_dbid, 'TBSPC' AS kind, t.tablespace_name AS series, t.day_dt AS ts,
                'bytes'                                          AS unit,
@@ -588,11 +832,8 @@ FROM  (
                t.limit_bytes                                    AS limit_value,
                ROUND(100 * t.used_bytes / NULLIF(t.limit_bytes, 0), 2) AS pct,
                CAST(NULL AS NUMBER)                             AS gap,
-               CASE WHEN a.anomaly_flag IN ('HIGH', 'LOW') THEN 1 ELSE 0 END AS anomaly,
-               a.anomaly_flag,
-               a.robust_z                                       AS z,
-               a.median_rate_bpd                                AS expected,
-               a.threshold_bpd                                  AS threshold,
+               1                                                AS scored,
+               CAST(NULL AS NUMBER)                             AS how_hours_flagged,
                t.used_bytes, t.size_bytes, t.limit_bytes, t.limit_source, t.contents,
                x.used_delta_bytes                               AS delta_bytes,
                x.used_rate_bpd                                  AS rate_bpd,
@@ -607,16 +848,12 @@ FROM  (
         LEFT   JOIN capd_tbspc_delta x
           ON   x.dbid = t.dbid AND x.con_dbid = t.con_dbid
          AND   x.tablespace_name = t.tablespace_name AND x.day_dt = t.day_dt
-        LEFT   JOIN capa_tbspc_anom a
-          ON   a.dbid = t.dbid AND a.con_dbid = t.con_dbid
-         AND   a.tablespace_name = t.tablespace_name AND a.day_dt = t.day_dt
         UNION ALL
         SELECT t.dbid, t.con_dbid, 'CPU', m.metric, t.day_dt,
                'pct', m.val, 100, m.val,
                CASE t.gap_flag WHEN 'Y' THEN 1 ELSE 0 END,
-               CASE WHEN m.metric <> 'BUSY_PCT' THEN NULL
-                    WHEN a.anomaly_flag IN ('HIGH', 'LOW') THEN 1 ELSE 0 END,
-               a.anomaly_flag, a.robust_z, a.median_pct, a.threshold_pct,
+               CASE WHEN m.metric = 'BUSY_PCT' THEN 1 ELSE 0 END,
+               CASE WHEN m.metric = 'BUSY_PCT' THEN NVL(h.how_hours_flagged, 0) END,
                NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                CASE WHEN m.metric = 'BUSY_PCT' THEN t.busy_pct      END,
                CASE WHEN m.metric = 'BUSY_PCT' THEN t.busy_p95      END,
@@ -630,9 +867,9 @@ FROM  (
         CROSS  APPLY (SELECT 'BUSY_PCT'  AS metric, t.busy_pct      AS val FROM dual UNION ALL
                       SELECT 'BUSY_P95',            t.busy_p95             FROM dual UNION ALL
                       SELECT 'BUSY_PEAK',           t.busy_peak_pct        FROM dual) m
-        LEFT   JOIN capa_cpu_anom a
-          ON   a.dbid = t.dbid AND a.con_dbid = t.con_dbid AND a.day_dt = t.day_dt
-         AND   m.metric = 'BUSY_PCT'
+        LEFT   JOIN hm h
+          ON   h.dbid = t.dbid AND h.con_dbid = t.con_dbid
+         AND   h.series = m.metric AND h.day_dt = t.day_dt
         WHERE  m.val IS NOT NULL
         UNION ALL
         SELECT t.dbid, t.con_dbid, 'CPU', m.metric, t.day_dt,
@@ -640,7 +877,8 @@ FROM  (
                CASE WHEN m.unit = 'pct' THEN 100 END,
                CASE WHEN m.unit = 'pct' THEN m.val END,
                CASE t.gap_flag WHEN 'Y' THEN 1 ELSE 0 END,
-               NULL, NULL, NULL, NULL, NULL,
+               CASE WHEN m.metric = 'DB_CPU_PCT' THEN 1 ELSE 0 END,
+               CASE WHEN m.metric = 'DB_CPU_PCT' THEN NVL(h.how_hours_flagged, 0) END,
                NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                CASE WHEN m.metric = 'DB_CPU_PCT' THEN t.db_cpu_sec      END,
@@ -652,19 +890,66 @@ FROM  (
         CROSS  APPLY (SELECT 'DB_CPU_PCT' AS metric, 'pct' AS unit, t.db_cpu_pct     AS val FROM dual UNION ALL
                       SELECT 'DB_CPU_P95',           'pct',         t.db_cpu_p95_pct        FROM dual UNION ALL
                       SELECT 'DB_CPU_SEC',           'sec',         t.db_cpu_sec            FROM dual) m
+        LEFT   JOIN hm h
+          ON   h.dbid = t.dbid AND h.con_dbid = t.con_dbid
+         AND   h.series = m.metric AND h.day_dt = t.day_dt
         WHERE  m.val IS NOT NULL
         UNION ALL
         SELECT t.dbid, t.con_dbid, 'SERIES', t.series, t.day_dt,
                LOWER(t.unit), t.value, t.limit_value,
                ROUND(100 * t.value / NULLIF(t.limit_value, 0), 2),
-               NULL, NULL, NULL, NULL, NULL, NULL,
+               CASE t.gap_flag WHEN 'Y' THEN 1 ELSE 0 END,
+               1, CAST(NULL AS NUMBER),
                NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                NULL, NULL, NULL, NULL, NULL
         FROM   capd_series_daily t
       ) p
+LEFT   JOIN capa_anom_day d
+  ON   d.dbid = p.dbid AND d.con_dbid = p.con_dbid
+ AND   d.kind = p.kind AND d.series = p.series AND d.ts = p.ts
 LEFT   JOIN capr_container c
   ON   c.dbid = p.dbid AND c.con_dbid = p.con_dbid;
+
+-- --------------------------------------------------------------------
+-- CAPR_HOURLY_POINTS (M15) -- one row per CAPD_CPU_HOURLY row: host
+-- BUSY_PCT and per-container DB_CPU_PCT per END-hour bucket, with that
+-- hour's HOUR_OF_WEEK verdict. ts is the DB wall clock (exporters stamp it
+-- with a Z, a label, not an instant); dow is 0 = Monday (NLS-proof);
+-- hour_of_day is the END hour. how_* are NULL when the hour was never
+-- scored. doc_key is the stable id input for exporters (unique).
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capr_hourly_points AS
+SELECT h.dbid,
+       h.con_dbid,
+       NVL(c.db_pdb, TO_CHAR(h.con_dbid))                     AS db,
+       c.db_name,
+       c.con_name,
+       'CPU'                                                  AS kind,
+       h.metric                                               AS series,
+       h.hour_ts                                              AS ts,
+       h.day_dt,
+       MOD(TRUNC(h.hour_ts) - DATE '2020-01-06', 7)           AS dow,
+       TO_NUMBER(TO_CHAR(h.hour_ts, 'HH24'))                  AS hour_of_day,
+       'pct'                                                  AS unit,
+       h.value,
+       CASE h.gap_flag WHEN 'Y' THEN 1 ELSE 0 END             AS gap,
+       h.ivl_hours,
+       h.n_intervals,
+       CASE WHEN a.anomaly_flag IS NOT NULL THEN 1 ELSE 0 END AS anomaly,
+       a.expected                                             AS how_expected,
+       a.threshold                                            AS how_threshold,
+       a.robust_z                                             AS how_z,
+       a.anomaly_flag                                         AS how_flag,
+       a.n_hist                                               AS how_n_hist,
+       'obsh|' || h.dbid || '|' || h.con_dbid || '|' || h.metric || '|'
+         || TO_CHAR(h.hour_ts, 'YYYY-MM-DD"T"HH24')           AS doc_key
+FROM   capd_cpu_hourly h
+LEFT   JOIN capa_anom a
+  ON   a.dbid = h.dbid AND a.con_dbid = h.con_dbid AND a.kind = 'CPU'
+ AND   a.series = h.metric AND a.baseline_mode = 'HOUR_OF_WEEK' AND a.ts = h.hour_ts
+LEFT   JOIN capr_container c
+  ON   c.dbid = h.dbid AND c.con_dbid = h.con_dbid;
 
 -- --------------------------------------------------------------------
 -- CAPR_FIT -- the current fit, one row per (container, kind, series), with
@@ -773,106 +1058,3 @@ FROM  (
       ) f
 LEFT   JOIN capr_container c
   ON   c.dbid = f.dbid AND c.con_dbid = f.con_dbid;
-
--- --------------------------------------------------------------------
--- CAPR_ANOMALIES -- one row per flagged event over the whole history (no
--- alert window): TBSPC_GROWTH and CPU_BUSY days, and the current CPU_SHIFT
--- of each series. sev comes from the matching CAPR_ALERTS row (WARN for a
--- HIGH/UP, INFO for a LOW/DOWN); events older than the alert window have no
--- alert row and default to INFO.
--- A level shift is dated (ts) at the START of its recent window, the day
--- the level moved, with the window's last day in obs_day; for the per-day
--- kinds ts = obs_day.
--- pct_vs_expected = the move as a percentage of expected (the baseline
--- median for TBSPC_GROWTH / CPU_BUSY, base_med for CPU_SHIFT); pct_vs_avg =
--- TBSPC_GROWTH's rate vs its train_days average. NULL when the baseline is
--- not positive. Both sit at the END of the select list so the explicit
--- column lists in elk/export_capacity.sql and grafana/ords keep working.
--- --------------------------------------------------------------------
-CREATE OR REPLACE VIEW capr_anomalies AS
-SELECT e.dbid,
-       e.con_dbid,
-       NVL(c.db_pdb, TO_CHAR(e.con_dbid))  AS db,
-       c.db_name,
-       c.con_name,
-       e.ts,
-       e.kind,
-       e.series,
-       e.anomaly_kind,
-       e.anomaly_flag,
-       e.value,
-       e.expected,
-       e.threshold,
-       e.z,
-       e.shift_pct,
-       e.unit,
-       e.sev,
-       e.sev_rank,
-       e.message,
-       e.obs_day,
-       e.rate_bpd,
-       e.pct_vs_expected,
-       e.pct_vs_avg
-FROM  (
-        SELECT t.dbid, t.con_dbid, t.day_dt AS ts, 'TBSPC' AS kind, t.tablespace_name AS series,
-               'TBSPC_GROWTH' AS anomaly_kind, t.anomaly_flag,
-               t.used_delta_bytes AS value, t.median_rate_bpd AS expected,
-               t.threshold_bpd AS threshold, t.robust_z AS z,
-               CAST(NULL AS NUMBER) AS shift_pct, 'bytes' AS unit,
-               NVL(TRIM(al.severity), 'INFO') AS sev, NVL(al.sev_rank, 3) AS sev_rank,
-               t.tablespace_name
-                 || CASE t.anomaly_flag WHEN 'HIGH' THEN ' grew ' ELSE ' shrank ' END
-                 || TO_CHAR(ABS(t.used_delta_bytes) / 1073741824, 'FM999999990.0')
-                 || ' GiB on ' || TO_CHAR(t.day_dt, 'YYYY-MM-DD')
-                 || ' (median ' || TO_CHAR(t.median_rate_bpd / 1073741824, 'FM999999990.0')
-                 || ' GiB/day, z=' || NVL(TO_CHAR(t.robust_z, 'FM999999990.0'), 'off-scale') || ')'
-                 || CASE WHEN t.pct_vs_avg IS NOT NULL
-                         THEN ', ' || TO_CHAR(t.pct_vs_avg, 'FMS999999999990') || '% vs long-term avg rate' END AS message,
-               t.day_dt AS obs_day, t.used_rate_bpd AS rate_bpd,
-               t.pct_vs_median AS pct_vs_expected, t.pct_vs_avg AS pct_vs_avg
-        FROM   capa_tbspc_anom t
-        LEFT   JOIN capr_alerts al
-          ON   al.kind = 'TBSPC_ANOM' AND al.dbid = t.dbid AND al.con_dbid = t.con_dbid
-         AND   al.series_key = t.tablespace_name AND al.day_dt = t.day_dt
-        WHERE  t.anomaly_flag IN ('HIGH', 'LOW')
-        UNION ALL
-        SELECT t.dbid, t.con_dbid, t.day_dt, 'CPU', 'BUSY_PCT',
-               'CPU_BUSY', t.anomaly_flag,
-               t.busy_pct, t.median_pct, t.threshold_pct, t.robust_z,
-               NULL, 'pct',
-               NVL(TRIM(al.severity), 'INFO'), NVL(al.sev_rank, 3),
-               'Host CPU ' || TO_CHAR(t.busy_pct, 'FM990.0') || '% busy on '
-                 || TO_CHAR(t.day_dt, 'YYYY-MM-DD')
-                 || ' (median ' || TO_CHAR(t.median_pct, 'FM990.0')
-                 || '% for that weekday, z=' || NVL(TO_CHAR(t.robust_z, 'FM999999990.0'), 'off-scale') || ')'
-                 || CASE WHEN t.pct_vs_median IS NOT NULL
-                         THEN ' (' || TO_CHAR(t.pct_vs_median, 'FMS999999999990') || '% vs median)' END,
-               t.day_dt, NULL,
-               t.pct_vs_median, NULL
-        FROM   capa_cpu_anom t
-        LEFT   JOIN capr_alerts al
-          ON   al.kind = 'CPU_ANOM' AND al.dbid = t.dbid AND al.con_dbid = t.con_dbid
-         AND   al.series_key = 'BUSY_PCT' AND al.day_dt = t.day_dt
-        WHERE  t.anomaly_flag IN ('HIGH', 'LOW')
-        UNION ALL
-        SELECT t.dbid, t.con_dbid, t.last_day - t.recent_days + 1, 'CPU', t.metric,
-               'CPU_SHIFT', t.shift_flag,
-               t.recent_med, t.base_med, t.threshold_pct, NULL,
-               t.shift_pct, LOWER(TRIM(t.unit)),
-               NVL(TRIM(al.severity), 'INFO'), NVL(al.sev_rank, 3),
-               t.metric || ' shifted ' || t.shift_flag || ' '
-                 || TO_CHAR(t.shift_pct, 'FMS9999990.0') || ' pts: last '
-                 || TO_CHAR(t.recent_days, 'FM9999990') || ' days median '
-                 || TO_CHAR(t.recent_med, 'FM99999990.0') || '% vs prior '
-                 || TO_CHAR(t.base_days, 'FM9999990') || ' days '
-                 || TO_CHAR(t.base_med, 'FM99999990.0') || '%',
-               t.last_day, NULL,
-               CASE WHEN t.base_med > 0 THEN 100 * t.shift_pct / t.base_med END, NULL
-        FROM   capa_cpu_shift t
-        LEFT   JOIN capr_alerts al
-          ON   al.kind = 'CPU_SHIFT' AND al.dbid = t.dbid AND al.con_dbid = t.con_dbid
-         AND   al.series_key = t.metric AND al.day_dt = t.last_day
-        WHERE  t.shift_flag IN ('UP', 'DOWN')
-      ) e
-LEFT   JOIN capr_container c
-  ON   c.dbid = e.dbid AND c.con_dbid = e.con_dbid;

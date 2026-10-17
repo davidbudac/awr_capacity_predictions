@@ -8,8 +8,8 @@
 # hours instead, which is what actually builds day-shaped AWR history.
 #
 #   --short    quarter-length phases, for a smoke run
-#   --anomaly  append the anomaly phase + a bulk load, so CAPA_TBSPC_ANOM and
-#              CAPA_CPU_ANOM have a genuine outlier for today
+#   --anomaly  append the anomaly phase + a bulk load, so CAPA_ANOM (TBSPC and
+#              CPU) has a genuine outlier for today
 #   --force    run weekday phases even at the weekend
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 

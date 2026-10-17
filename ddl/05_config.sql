@@ -51,6 +51,27 @@ COMMENT ON COLUMN cap_config.cfg_value   IS 'Numeric value. Units per cfg_desc (
 COMMENT ON COLUMN cap_config.cfg_desc    IS 'Human description incl. units.';
 COMMENT ON COLUMN cap_config.cfg_default IS 'Shipped default, refreshed on every install. Reset a knob with UPDATE cap_config SET cfg_value = cfg_default.';
 
+-- M15 renames: the min-history knobs belong to the baseline MODE now, not to
+-- the series family. Carry an operator's value over to the new name BEFORE
+-- the seed MERGE (which would otherwise insert the shipped default), then
+-- retire the old key. Re-runnable: once the old keys are gone the scalar
+-- subqueries return NULL and the INSERT's WHERE makes the MERGE a no-op.
+MERGE INTO cap_config c
+USING (
+    SELECT 'trailing_min_hist' AS cfg_name,
+           (SELECT cfg_value FROM cap_config WHERE cfg_name = 'tbspc_min_hist') AS v
+    FROM   dual
+    UNION ALL
+    SELECT 'weekly_min_hist',
+           (SELECT cfg_value FROM cap_config WHERE cfg_name = 'cpu_min_dow_hist')
+    FROM   dual
+) s
+ON (c.cfg_name = s.cfg_name)
+WHEN NOT MATCHED THEN
+    INSERT (cfg_name, cfg_value, cfg_desc) VALUES (s.cfg_name, s.v, 'carried over')
+    WHERE s.v IS NOT NULL;
+DELETE FROM cap_config WHERE cfg_name IN ('tbspc_min_hist', 'cpu_min_dow_hist');
+
 -- Idempotent seed. A missing key is inserted with cfg_value = cfg_default =
 -- the shipped value. An existing key gets only cfg_default and cfg_desc
 -- refreshed, so an operator's cfg_value survives every re-install.
@@ -65,12 +86,12 @@ USING (
     UNION ALL SELECT 'anomaly_report_days',  14,        'Trailing-days window of anomalies CAPR_ALERTS raises (the report''s own window is the anomaly_days DEFINE).' FROM dual
     UNION ALL SELECT 'cpu_sat_pct',          80,        'CPU busy percent treated as saturated for days-to-saturation.'                                        FROM dual
     UNION ALL SELECT 'abs_floor_bytes',      104857600, 'Absolute floor (100 MiB) for tablespace-delta anomaly threshold; guards flat baselines (MAD=0).'      FROM dual
-    UNION ALL SELECT 'dow_weeks',            8,         'Number of prior same-weekday observations forming the CPU seasonal baseline.'                          FROM dual
+    UNION ALL SELECT 'dow_weeks',            8,         'Weeks of history (ts - 7k, k = 1..dow_weeks) forming the SAME_DOW and HOUR_OF_WEEK anomaly baselines.' FROM dual
     UNION ALL SELECT 'dtf_warn',             90,        'days_to_full at/below this = WARN in the report.'                                                      FROM dual
     UNION ALL SELECT 'dtf_crit',             30,        'days_to_full at/below this = CRIT in the report.'                                                      FROM dual
-    UNION ALL SELECT 'tbspc_min_hist',       7,         'Minimum trailing observations before a tablespace anomaly can flag.'                                   FROM dual
+    UNION ALL SELECT 'trailing_min_hist',    7,         'M15: minimum baseline observations before a TRAILING anomaly can flag (any series).'                   FROM dual
     UNION ALL SELECT 'cpu_min_mad_pct',      3,         'Floor (whole percent) on CPU MAD_sigma so an exactly-flat seasonal baseline still flags a real jump.' FROM dual
-    UNION ALL SELECT 'cpu_min_dow_hist',     3,         'Minimum prior same-weekday observations before a CPU anomaly can flag.'                                FROM dual
+    UNION ALL SELECT 'weekly_min_hist',      3,         'M15: minimum baseline observations before a SAME_DOW or HOUR_OF_WEEK anomaly can flag.'                FROM dual
     UNION ALL SELECT 'esm_prediction_step',  30,        'OML ESM forecast horizon in steps (days). Oracle 19c hard-caps this at 30.'                            FROM dual
     UNION ALL SELECT 'esm_tbspc_model',       2,        'ESM model type for tablespaces: 0=EXSM_HOLT, 1=EXSM_ADDWINTERS(7), 2=AUTO (pick by backtest MAPE).'     FROM dual
     UNION ALL SELECT 'esm_select_by_backtest',1,        '1 = AUTO trains both candidate backtest twins per tablespace and keeps the lower-MAPE one; 0 = AUTO falls back to EXSM_HOLT.' FROM dual
@@ -98,6 +119,13 @@ USING (
     UNION ALL SELECT 'cpu_deseason',            1,        'CAPF_CPU_TREND: 1 = subtract the weekday / weekend mean (and add back the window mean) before the fit, 0 = fit the raw daily values.' FROM dual
     UNION ALL SELECT 'stale_days',              3,        'A CAPF_* series whose last_day is more than this many days before the newest day of its daily source (same dbid) reads is_current = N: dropped tablespace, retired DBID, stopped collection.' FROM dual
     UNION ALL SELECT 'suite_version',          13,        'Suite release that built these objects (latest PLAN.md milestone). Set by every install; not a tuning knob.' FROM dual
+    UNION ALL SELECT 'cpu_min_mad_pct_hour',    5,        'M15: cpu_min_mad_pct for HOUR-grain CPU (HOUR_OF_WEEK): hourly values are noisier than daily averages.' FROM dual
+    UNION ALL SELECT 'hour_gap_ratio',        1.5,        'M15: an interval <= 0 h or longer than LEAST(cpu_gap_hours, this x the instance''s median interval) is a gap at HOUR grain.' FROM dual
+    UNION ALL SELECT 'series_floor_count',     10,        'M15: anomaly threshold floor for COUNT series (PROCESSES/SESSIONS), in sessions/processes.' FROM dual
+    UNION ALL SELECT 'series_floor_gib',      0.5,        'M15: anomaly threshold floor (GiB/day) for GIB_PER_DAY series (REDO_GB_DAY level, DB_SIZE_GB growth).' FROM dual
+    UNION ALL SELECT 'alert_modes_tbspc',       1,        'M15 BITMASK of baseline modes raising TBSPC_ANOM: 1=TRAILING 2=SAME_DOW 4=HOUR_OF_WEEK (sum them), 0=none.' FROM dual
+    UNION ALL SELECT 'alert_modes_cpu',         2,        'M15 BITMASK of baseline modes raising CPU_ANOM and DBCPU_ANOM: 1=TRAILING 2=SAME_DOW 4=HOUR_OF_WEEK, 0=none.' FROM dual
+    UNION ALL SELECT 'alert_modes_series',      1,        'M15 BITMASK of baseline modes raising SERIES_ANOM: 1=TRAILING 2=SAME_DOW (4 has no effect: day grain only).' FROM dual
 ) s
 ON (c.cfg_name = s.cfg_name)
 WHEN MATCHED THEN
@@ -134,9 +162,9 @@ SELECT MAX(CASE WHEN cfg_name = 'train_days'             THEN cfg_value END) AS 
        MAX(CASE WHEN cfg_name = 'dow_weeks'              THEN cfg_value END) AS dow_weeks,
        MAX(CASE WHEN cfg_name = 'dtf_warn'               THEN cfg_value END) AS dtf_warn,
        MAX(CASE WHEN cfg_name = 'dtf_crit'               THEN cfg_value END) AS dtf_crit,
-       MAX(CASE WHEN cfg_name = 'tbspc_min_hist'         THEN cfg_value END) AS tbspc_min_hist,
+       MAX(CASE WHEN cfg_name = 'trailing_min_hist'      THEN cfg_value END) AS trailing_min_hist,
        MAX(CASE WHEN cfg_name = 'cpu_min_mad_pct'        THEN cfg_value END) AS cpu_min_mad_pct,
-       MAX(CASE WHEN cfg_name = 'cpu_min_dow_hist'       THEN cfg_value END) AS cpu_min_dow_hist,
+       MAX(CASE WHEN cfg_name = 'weekly_min_hist'        THEN cfg_value END) AS weekly_min_hist,
        MAX(CASE WHEN cfg_name = 'esm_prediction_step'    THEN cfg_value END) AS esm_prediction_step,
        MAX(CASE WHEN cfg_name = 'esm_tbspc_model'        THEN cfg_value END) AS esm_tbspc_model,
        MAX(CASE WHEN cfg_name = 'esm_select_by_backtest' THEN cfg_value END) AS esm_select_by_backtest,
@@ -163,7 +191,14 @@ SELECT MAX(CASE WHEN cfg_name = 'train_days'             THEN cfg_value END) AS 
        MAX(CASE WHEN cfg_name = 'cyclic_min_cliffs'      THEN cfg_value END) AS cyclic_min_cliffs,
        MAX(CASE WHEN cfg_name = 'cpu_quality_gate'       THEN cfg_value END) AS cpu_quality_gate,
        MAX(CASE WHEN cfg_name = 'cpu_deseason'           THEN cfg_value END) AS cpu_deseason,
-       MAX(CASE WHEN cfg_name = 'suite_version'          THEN cfg_value END) AS suite_version
+       MAX(CASE WHEN cfg_name = 'suite_version'          THEN cfg_value END) AS suite_version,
+       MAX(CASE WHEN cfg_name = 'cpu_min_mad_pct_hour'   THEN cfg_value END) AS cpu_min_mad_pct_hour,
+       MAX(CASE WHEN cfg_name = 'hour_gap_ratio'         THEN cfg_value END) AS hour_gap_ratio,
+       MAX(CASE WHEN cfg_name = 'series_floor_count'     THEN cfg_value END) AS series_floor_count,
+       MAX(CASE WHEN cfg_name = 'series_floor_gib'       THEN cfg_value END) AS series_floor_gib,
+       MAX(CASE WHEN cfg_name = 'alert_modes_tbspc'      THEN cfg_value END) AS alert_modes_tbspc,
+       MAX(CASE WHEN cfg_name = 'alert_modes_cpu'        THEN cfg_value END) AS alert_modes_cpu,
+       MAX(CASE WHEN cfg_name = 'alert_modes_series'     THEN cfg_value END) AS alert_modes_series
 FROM   cap_config;
 
 COMMENT ON TABLE cap_cfg IS 'One row, one NUMBER column per CAP_CONFIG knob (column name = knob name). NULL = the knob row is missing.';
@@ -179,15 +214,18 @@ WITH u AS (
         UNPIVOT INCLUDE NULLS (value FOR knob IN (
                train_days, recent_days, min_train_days, r2_gate, mad_k,
                mad_window_days, anomaly_report_days, cpu_sat_pct, abs_floor_bytes,
-               dow_weeks, dtf_warn, dtf_crit, tbspc_min_hist, cpu_min_mad_pct,
-               cpu_min_dow_hist, esm_prediction_step, esm_tbspc_model,
+               dow_weeks, dtf_warn, dtf_crit, trailing_min_hist, cpu_min_mad_pct,
+               weekly_min_hist, esm_prediction_step, esm_tbspc_model,
                esm_select_by_backtest, nearfull_warn_pct, nearfull_crit_pct,
                peak_hour_from, peak_hour_to, cpu_sat_on_p95, backtest_holdout_days,
                report_min_gb, accel_slope_floor_bpd, slope_method, reset_on_shrink,
                shrink_mad_k, cpu_gap_hours, shift_days, shift_baseline_days,
                shift_min_pct, series_sat_pct, esm_max_age_days, esm_auto_tie_pct,
                complete_day_pct, stale_days, cyclic_min_cliffs, cpu_quality_gate,
-               cpu_deseason, suite_version))
+               cpu_deseason, suite_version,
+               cpu_min_mad_pct_hour, hour_gap_ratio,
+               series_floor_count, series_floor_gib, alert_modes_tbspc,
+               alert_modes_cpu, alert_modes_series))
      ),
      r AS (
         SELECT u.knob, u.value,
@@ -204,8 +242,15 @@ WITH u AS (
                         THEN 'must be <= dtf_warn (' || c.dtf_warn || ')'
                    WHEN u.knob = 'nearfull_warn_pct'   AND u.value > c.nearfull_crit_pct
                         THEN 'must be <= nearfull_crit_pct (' || c.nearfull_crit_pct || ')'
-                   WHEN u.knob = 'mad_window_days'     AND u.value < c.tbspc_min_hist
-                        THEN 'must be >= tbspc_min_hist (' || c.tbspc_min_hist || ')'
+                   WHEN u.knob = 'trailing_min_hist'   AND u.value > c.mad_window_days
+                        THEN 'must be <= mad_window_days (' || c.mad_window_days || '): the TRAILING window holds at most that many days'
+                   WHEN u.knob = 'weekly_min_hist'     AND u.value > c.dow_weeks
+                        THEN 'must be <= dow_weeks (' || c.dow_weeks || '): the weekly baselines hold at most that many observations'
+                   WHEN u.knob = 'hour_gap_ratio'      AND u.value <= 0
+                        THEN 'must be > 0'
+                   WHEN u.knob IN ('alert_modes_tbspc', 'alert_modes_cpu', 'alert_modes_series')
+                        AND (u.value <> TRUNC(u.value) OR u.value NOT BETWEEN 0 AND 7)
+                        THEN 'must be a bitmask 0..7: 1=TRAILING 2=SAME_DOW 4=HOUR_OF_WEEK'
                    WHEN u.knob = 'shift_days'          AND u.value > c.shift_baseline_days
                         THEN 'must be <= shift_baseline_days (' || c.shift_baseline_days || ')'
                    WHEN u.knob = 'esm_prediction_step' AND u.value NOT BETWEEN 1 AND 30

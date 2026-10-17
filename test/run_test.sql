@@ -73,6 +73,36 @@ DECLARE
         IF actual = expected THEN pass(label || ' = ' || expected);
         ELSE fail(label || ' expected ' || expected || ' got ' || NVL(actual,'<null>')); END IF;
     END;
+
+    -- CAPA_ANOM lookups always name the FULL key (kind, series, baseline mode,
+    -- ts, container): a bare day lookup matches one row per mode, and d_inj
+    -- is also a FIXPDB1 DB_CPU_PCT step day, so it would match several.
+    -- 'NOROW' (not NULL) when the key has no row, so a missing row can never
+    -- pass as "not flagged".
+    FUNCTION anom_flag(p_kind VARCHAR2, p_series VARCHAR2, p_mode VARCHAR2,
+                       p_ts DATE, p_con NUMBER) RETURN VARCHAR2 IS
+        x VARCHAR2(5);
+    BEGIN
+        SELECT anomaly_flag INTO x FROM capa_anom
+         WHERE dbid = v_dbid AND con_dbid = p_con AND kind = p_kind
+           AND series = p_series AND baseline_mode = p_mode AND ts = p_ts;
+        RETURN x;
+    EXCEPTION
+        WHEN NO_DATA_FOUND THEN RETURN 'NOROW';
+    END;
+    -- Flagged rows of one series under one mode; p_flag HIGH / LOW / ANY.
+    FUNCTION anom_n(p_kind VARCHAR2, p_series VARCHAR2, p_mode VARCHAR2,
+                    p_flag VARCHAR2, p_con NUMBER) RETURN NUMBER IS
+        x NUMBER;
+    BEGIN
+        SELECT COUNT(*) INTO x FROM capa_anom
+         WHERE dbid = v_dbid AND con_dbid = p_con AND kind = p_kind
+           AND series = p_series AND baseline_mode = p_mode
+           AND anomaly_flag = DECODE(p_flag, 'ANY', anomaly_flag, p_flag);
+        RETURN x;
+    END;
+    PROCEDURE knob(p_name VARCHAR2, p_val NUMBER) IS
+    BEGIN UPDATE cap_config SET cfg_value = p_val WHERE cfg_name = p_name; END;
 BEGIN
     v_dbid    := meta_n('DBID');
     d_spike   := meta_d('SPIKE_DAY');
@@ -91,34 +121,22 @@ BEGIN
     chk_true ('LINEAR r2 > 0.999', v_r2 > 0.999);
     chk_int  ('LINEAR days_to_full',  v_n, n_dtf);
     chk_str  ('LINEAR quality', v_str, 'OK');
-    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
-      WHERE tablespace_name = 'FIX_LINEAR' AND anomaly_flag IS NOT NULL;
-    chk_int('LINEAR anomaly count', v_n, 0);
+    chk_int('LINEAR anomaly count (TRAILING)', anom_n('TBSPC', 'FIX_LINEAR', 'TRAILING', 'ANY', v_dbid), 0);
 
     DBMS_OUTPUT.PUT_LINE('=== FIX_SPIKE anomaly ===');
-    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
-      WHERE tablespace_name = 'FIX_SPIKE' AND anomaly_flag = 'HIGH';
-    chk_int('SPIKE HIGH count (total)', v_n, 1);
-    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
-      WHERE tablespace_name = 'FIX_SPIKE' AND anomaly_flag = 'HIGH' AND day_dt = d_spike;
-    chk_int('SPIKE HIGH on spike day', v_n, 1);
-    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
-      WHERE tablespace_name = 'FIX_SPIKE' AND anomaly_flag = 'LOW';
-    chk_int('SPIKE LOW count', v_n, 0);
+    chk_int('SPIKE HIGH count (total, TRAILING)', anom_n('TBSPC', 'FIX_SPIKE', 'TRAILING', 'HIGH', v_dbid), 1);
+    chk_str('SPIKE HIGH on spike day (TRAILING)', anom_flag('TBSPC', 'FIX_SPIKE', 'TRAILING', d_spike, v_dbid), 'HIGH');
+    chk_int('SPIKE LOW count (TRAILING)', anom_n('TBSPC', 'FIX_SPIKE', 'TRAILING', 'LOW', v_dbid), 0);
 
     DBMS_OUTPUT.PUT_LINE('=== FIX_FLAT ===');
     SELECT quality INTO v_str FROM capf_tbspc_forecast WHERE tablespace_name = 'FIX_FLAT';
     chk_str('FLAT quality', v_str, 'FLAT');
-    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
-      WHERE tablespace_name = 'FIX_FLAT' AND anomaly_flag IS NOT NULL;
-    chk_int('FLAT anomaly count', v_n, 0);
+    chk_int('FLAT anomaly count (TRAILING)', anom_n('TBSPC', 'FIX_FLAT', 'TRAILING', 'ANY', v_dbid), 0);
 
     DBMS_OUTPUT.PUT_LINE('=== FIX_GAP (AWR-gap rate normalization) ===');
     SELECT MAX(day_gap) INTO v_n FROM capd_tbspc_delta WHERE tablespace_name = 'FIX_GAP';
     chk_int('GAP recorded (max day_gap)', v_n, 4);
-    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
-      WHERE tablespace_name = 'FIX_GAP' AND anomaly_flag IS NOT NULL;
-    chk_int('GAP no false anomaly (rate-normalized)', v_n, 0);
+    chk_int('GAP no false anomaly (rate-normalized, TRAILING)', anom_n('TBSPC', 'FIX_GAP', 'TRAILING', 'ANY', v_dbid), 0);
 
     DBMS_OUTPUT.PUT_LINE('=== FIX_NEARFULL (M7.1: near-full now, unreliable fit) ===');
     SELECT pct_used, quality INTO v_num, v_str
@@ -211,9 +229,7 @@ BEGIN
     chk_int('ZIGZAG days_to_full',    v_num,  meta_n('ZZ_DTF'));
     chk_int('ZIGZAG days_to_full_lo', v_num2, meta_n('ZZ_DTF_LO'));
     chk_int('ZIGZAG days_to_full_hi', v_num3, meta_n('ZZ_DTF_HI'));
-    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
-      WHERE tablespace_name = 'FIX_ZIGZAG' AND anomaly_flag IS NOT NULL;
-    chk_int('ZIGZAG anomaly count', v_n, 0);
+    chk_int('ZIGZAG anomaly count (TRAILING)', anom_n('TBSPC', 'FIX_ZIGZAG', 'TRAILING', 'ANY', v_dbid), 0);
 
     DBMS_OUTPUT.PUT_LINE('=== M9.4 backtest (REGR engine, pure SQL) ===');
     SELECT n_train, n_days, mape_pct, bias_pct INTO v_n, v_num, v_num2, v_num3
@@ -285,7 +301,7 @@ BEGIN
     -- Section 3: flagged rows only; days_ago is measured from the last
     -- collected day, so the report window is a plain WHERE days_ago < N.
     SELECT days_ago INTO v_num FROM capr_tbspc_anomalies
-      WHERE tablespace_name = 'FIX_SPIKE' AND day_dt = d_spike;
+      WHERE tablespace_name = 'FIX_SPIKE' AND day_dt = d_spike AND baseline_mode = 'TRAILING';
     chk_int('CAPR_TBSPC_ANOMALIES SPIKE days_ago', v_num, meta_d('LAST_DAY') - d_spike);
     SELECT COUNT(*) INTO v_n FROM capr_tbspc_anomalies WHERE anomaly_flag IS NULL;
     chk_int('CAPR_TBSPC_ANOMALIES holds flagged rows only', v_n, 0);
@@ -298,7 +314,9 @@ BEGIN
     chk_int('CAPR_CPU_TREND metric count', v_n, 6);
 
     -- Section 5: the injected Tuesday, same days_ago contract.
-    SELECT days_ago INTO v_num FROM capr_cpu_anomalies WHERE day_dt = d_inj;
+    SELECT days_ago INTO v_num FROM capr_cpu_anomalies
+      WHERE dbid = v_dbid AND con_dbid = v_dbid AND metric = 'BUSY_PCT'
+        AND baseline_mode = 'SAME_DOW' AND ts = d_inj;
     chk_int('CAPR_CPU_ANOMALIES injected day days_ago', v_num, meta_d('LAST_DAY') - d_inj);
 
     -- Section 6: the Tier 2 report views compile and answer even with no
@@ -351,12 +369,8 @@ BEGIN
     chk_int('no DBCPU_SAT alert (flat DB CPU)', v_n, 0);
 
     DBMS_OUTPUT.PUT_LINE('=== CPU same-DOW anomaly ===');
-    SELECT anomaly_flag INTO v_str FROM capa_cpu_anom
-      WHERE dbid = v_dbid AND day_dt = d_inj;
-    chk_str('CPU injected Tuesday flag', v_str, 'HIGH');
-    SELECT COUNT(*) INTO v_n FROM capa_cpu_anom
-      WHERE dbid = v_dbid AND anomaly_flag = 'HIGH';
-    chk_int('CPU HIGH count (only injected)', v_n, 1);
+    chk_str('CPU injected Tuesday flag (SAME_DOW)', anom_flag('CPU', 'BUSY_PCT', 'SAME_DOW', d_inj, v_dbid), 'HIGH');
+    chk_int('CPU HIGH count (only injected, SAME_DOW)', anom_n('CPU', 'BUSY_PCT', 'SAME_DOW', 'HIGH', v_dbid), 1);
 
     DBMS_OUTPUT.PUT_LINE('=== M9.5 overrides (CAP_TBSPC_OVERRIDE) ===');
     -- FIX_OVERRIDE is FIX_LINEAR's data with a 2 GiB override instead of the
@@ -534,12 +548,8 @@ BEGIN
     -- The purge day is a genuine LOW anomaly, but it sits 30 days back --
     -- outside anomaly_report_days (14) -- so it raises no alert, and it stays
     -- confined to its own tablespace (the FIX_SPIKE LOW check above holds).
-    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
-      WHERE tablespace_name = 'FIX_PURGE' AND anomaly_flag = 'LOW' AND day_dt = d_purge;
-    chk_int('PURGE day flags a LOW anomaly', v_n, 1);
-    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
-      WHERE tablespace_name = 'FIX_PURGE' AND anomaly_flag IS NOT NULL;
-    chk_int('PURGE has exactly one anomaly', v_n, 1);
+    chk_str('PURGE day flags a LOW anomaly (TRAILING)', anom_flag('TBSPC', 'FIX_PURGE', 'TRAILING', d_purge, v_dbid), 'LOW');
+    chk_int('PURGE has exactly one anomaly (TRAILING)', anom_n('TBSPC', 'FIX_PURGE', 'TRAILING', 'ANY', v_dbid), 1);
     SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE series_key = 'FIX_PURGE';
     chk_int('PURGE raises no CAPR_ALERTS (cliff predates the alert window)', v_n, 0);
 
@@ -1056,24 +1066,28 @@ BEGIN
         -- gaps, and the window is [day - train_days, day - 1], so it covers
         -- LEAST(train_days, spike index - 1) one-day gaps.
         n_avgd := LEAST(n_train, (d_spike - meta_d('BASE_DAY')) - 1);
-        SELECT avg_rate_bpd, avg_days, pct_vs_median, pct_vs_avg
+        SELECT avg_value, avg_days, pct_vs_expected, pct_vs_avg
           INTO v_num, v_n, v_num2, v_num3
-          FROM capa_tbspc_anom WHERE tablespace_name = 'FIX_SPIKE' AND day_dt = d_spike;
-        chk_close('SPIKE avg_rate_bpd = SPIKE_RATE', v_num, n_rate, 0.000001);
+          FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'TBSPC' AND series = 'FIX_SPIKE'
+            AND baseline_mode = 'TRAILING' AND ts = d_spike;
+        chk_close('SPIKE avg_value = SPIKE_RATE', v_num, n_rate, 0.000001);
         chk_int  ('SPIKE avg_days (calendar days the average covers)', v_n, n_avgd);
-        chk_close('SPIKE pct_vs_median', v_num2, n_pct, 0.000001);
+        chk_close('SPIKE pct_vs_expected (TRAILING)', v_num2, n_pct, 0.000001);
         chk_close('SPIKE pct_vs_avg',    v_num3, n_pct, 0.000001);
 
         -- Injected Tuesday: 70% busy vs the 40% weekday median -> +75%.
-        SELECT pct_vs_median INTO v_num FROM capa_cpu_anom
-          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_inj;
-        chk_close('CPU injected Tuesday pct_vs_median', v_num, 100 * (70 - 40) / 40, 0.000001);
+        SELECT pct_vs_expected INTO v_num FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'CPU' AND series = 'BUSY_PCT'
+            AND baseline_mode = 'SAME_DOW' AND ts = d_inj;
+        chk_close('CPU injected Tuesday pct_vs_expected (SAME_DOW)', v_num, 100 * (70 - 40) / 40, 0.000001);
 
         -- FIX_PURGE cliff: baseline growth LINEAR_SLOPE (1280 blocks = 10
         -- MiB/day); the cliff day's delta is that growth minus the 76800-block
         -- (600 MiB) purge. Closed form 100 * (-76800 * 8192) / LINEAR_SLOPE = -6000.
-        SELECT pct_vs_avg INTO v_num FROM capa_tbspc_anom
-          WHERE tablespace_name = 'FIX_PURGE' AND day_dt = d_purge;
+        SELECT pct_vs_avg INTO v_num FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'TBSPC' AND series = 'FIX_PURGE'
+            AND baseline_mode = 'TRAILING' AND ts = d_purge;
         chk_close('PURGE cliff day pct_vs_avg',
                   v_num, 100 * ((n_slope - 76800 * 8192) - n_slope) / n_slope, 0.000001);
 
@@ -1085,27 +1099,31 @@ BEGIN
                  INSTR(v_msg, '+' || TO_CHAR(n_pct, 'FM999999990') || '% vs '
                               || TO_CHAR(n_train, 'FM9990') || '-day avg rate') > 0);
         SELECT message INTO v_msg FROM capr_alerts
-          WHERE kind = 'CPU_ANOM' AND day_dt = d_inj;
+          WHERE kind = 'CPU_ANOM' AND series_key = 'BUSY_PCT' AND day_dt = d_inj;
         chk_true('CPU_ANOM message has "+75% vs median" (got: ' || v_msg || ')',
                  INSTR(v_msg, '(+75% vs median)') > 0);
 
         -- Report views pass the CAPA numbers through unchanged.
-        SELECT r.avg_mb, r.avg_days, r.pct_vs_med, r.pct_vs_avg, a.pct_vs_median, a.pct_vs_avg
+        SELECT r.avg_mb, r.avg_days, r.pct_vs_med, r.pct_vs_avg, a.pct_vs_expected, a.pct_vs_avg
           INTO v_num, v_n, v_num2, v_num3, v_r2, n_capa
           FROM capr_tbspc_anomalies r
-          JOIN capa_tbspc_anom a
-            ON a.dbid = r.dbid AND a.con_dbid = r.con_dbid
-           AND a.tablespace_name = r.tablespace_name AND a.day_dt = r.day_dt
-          WHERE r.tablespace_name = 'FIX_SPIKE' AND r.day_dt = d_spike;
+          JOIN capa_anom a
+            ON a.dbid = r.dbid AND a.con_dbid = r.con_dbid AND a.kind = 'TBSPC'
+           AND a.series = r.tablespace_name AND a.ts = r.day_dt
+           AND a.baseline_mode = r.baseline_mode
+          WHERE r.tablespace_name = 'FIX_SPIKE' AND r.day_dt = d_spike
+            AND r.baseline_mode = 'TRAILING';
         chk_close('CAPR_TBSPC_ANOMALIES SPIKE avg_mb = 5', v_num, n_rate / 1048576, 0.000001);
         chk_int  ('CAPR_TBSPC_ANOMALIES SPIKE avg_days', v_n, n_avgd);
         chk_close('CAPR_TBSPC_ANOMALIES SPIKE pct_vs_med = CAPA', v_num2, v_r2, 0.000001);
         chk_close('CAPR_TBSPC_ANOMALIES SPIKE pct_vs_avg = CAPA', v_num3, n_capa, 0.000001);
-        SELECT r.pct_vs_med, a.pct_vs_median INTO v_num, v_num2
+        SELECT r.pct_vs_med, a.pct_vs_expected INTO v_num, v_num2
           FROM capr_cpu_anomalies r
-          JOIN capa_cpu_anom a
-            ON a.dbid = r.dbid AND a.con_dbid = r.con_dbid AND a.day_dt = r.day_dt
-          WHERE r.dbid = v_dbid AND r.con_dbid = v_dbid AND r.day_dt = d_inj;
+          JOIN capa_anom a
+            ON a.dbid = r.dbid AND a.con_dbid = r.con_dbid AND a.kind = 'CPU'
+           AND a.series = r.metric AND a.baseline_mode = r.baseline_mode AND a.ts = r.ts
+          WHERE r.dbid = v_dbid AND r.con_dbid = v_dbid AND r.metric = 'BUSY_PCT'
+            AND r.baseline_mode = 'SAME_DOW' AND r.ts = d_inj;
         chk_close('CAPR_CPU_ANOMALIES Tuesday pct_vs_med = CAPA', v_num, v_num2, 0.000001);
     EXCEPTION
         WHEN OTHERS THEN
@@ -1263,18 +1281,20 @@ BEGIN
 
         -- The post-gap day deviates by 10 points against a 9-point threshold,
         -- so ONLY the gap guard keeps it unflagged. Assert both halves.
-        SELECT anomaly_flag, gap_flag, ABS(dev_pct), threshold_pct
+        SELECT anomaly_flag, gap_flag, ABS(dev), threshold
           INTO v_str, v_gflag, v_dev, v_thr
-          FROM capa_cpu_anom
-          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_gnext;
+          FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'CPU' AND series = 'BUSY_PCT'
+            AND baseline_mode = 'SAME_DOW' AND ts = d_gnext;
         chk_str ('CPU post-gap day exposes gap_flag', v_gflag, 'Y');
         chk_true('CPU post-gap day WOULD have flagged (|dev| ' || ROUND(v_dev,2)
                  || ' > thr ' || ROUND(v_thr,2) || ')', v_dev > v_thr);
         chk_true('CPU post-gap day anomaly_flag IS NULL (gap guard)', v_str IS NULL);
 
         -- ...and it is not allowed to poison the next week's baseline either.
-        SELECT n_hist INTO v_n FROM capa_cpu_anom
-          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_gnext + 7;
+        SELECT n_hist INTO v_n FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'CPU' AND series = 'BUSY_PCT'
+            AND baseline_mode = 'SAME_DOW' AND ts = d_gnext + 7;
         chk_true('gap day excluded from next-week same-weekday baseline (n_hist '
                  || v_n || ' < 8)', v_n < 8);
         -- ...but the injected Tuesday's own baseline must be untouched. Both
@@ -1285,8 +1305,9 @@ BEGIN
         -- of the injected Tuesday, and that day has no CPU row either.)
         chk_true('gap days are not same-weekday priors of the injected Tuesday',
                  MOD(d_inj - d_gap, 7) <> 0 AND MOD(d_inj - d_gnext, 7) <> 0);
-        SELECT n_hist INTO v_n FROM capa_cpu_anom
-          WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_inj;
+        SELECT n_hist INTO v_n FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'CPU' AND series = 'BUSY_PCT'
+            AND baseline_mode = 'SAME_DOW' AND ts = d_inj;
         chk_true('injected Tuesday n_hist unaffected by the gap (got ' || v_n
                  || ', >= 7)', v_n >= 7);
 
@@ -1323,11 +1344,14 @@ BEGIN
         chk_int  ('PDB shift n_above (N-of-M: all 7)', v_num2, 7);
         chk_close('PDB shift base_mad_sigma', v_num3, meta_n('SHIFT_BASE_SIGMA'), 0.0001);
 
-        -- ...and the step is invisible to the DAILY layers: the PDB has no
-        -- host busy% at all, so no CAPA_CPU_ANOM row, let alone a HIGH.
-        SELECT COUNT(*) INTO v_n FROM capa_cpu_anom
-          WHERE dbid = v_dbid AND con_dbid = n_pdb;
-        chk_int('PDB raises no daily CPU anomalies', v_n, 0);
+        -- The PDB has no host busy% at all (OSSTAT is CDB-level), so no
+        -- BUSY_PCT row; its step days are scored on DB_CPU_PCT instead, where
+        -- each is 18 points over its identical same-weekday priors.
+        SELECT COUNT(*) INTO v_n FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND series = 'BUSY_PCT';
+        chk_int('PDB has no BUSY_PCT anomaly rows', v_n, 0);
+        chk_int('PDB DB_CPU_PCT SAME_DOW HIGH = the 7 step days',
+                anom_n('CPU', 'DB_CPU_PCT', 'SAME_DOW', 'HIGH', n_pdb), 7);
         -- The flat root container must NOT shift (no false positives).
         SELECT COUNT(*) INTO v_n FROM capa_cpu_shift
           WHERE dbid = v_dbid AND con_dbid = v_dbid AND shift_flag IS NOT NULL;
@@ -1588,12 +1612,15 @@ BEGIN
         SELECT COUNT(*) INTO v_n   FROM capr_series_points WHERE kind = 'CPU' AND series = 'BUSY_PCT';
         SELECT COUNT(*) INTO v_num FROM capd_cpu_daily WHERE busy_pct IS NOT NULL;
         chk_int('CAPR_SERIES_POINTS BUSY_PCT rows = CAPD_CPU_DAILY', v_n, v_num);
+        SELECT COUNT(*) INTO v_n   FROM capr_series_points WHERE kind = 'CPU' AND series = 'DB_CPU_PCT';
+        SELECT COUNT(*) INTO v_num FROM capd_dbtime_daily WHERE db_cpu_pct IS NOT NULL;
+        chk_int('CAPR_SERIES_POINTS DB_CPU_PCT rows = CAPD_DBTIME_DAILY', v_n, v_num);
         SELECT COUNT(*) INTO v_n   FROM capr_series_points WHERE kind = 'TBSPC' AND anomaly = 1;
-        SELECT COUNT(*) INTO v_num FROM capa_tbspc_anom WHERE anomaly_flag IN ('HIGH', 'LOW');
-        chk_int('CAPR_SERIES_POINTS anomaly=1 on every flagged TBSPC day', v_n, v_num);
+        SELECT COUNT(*) INTO v_num FROM capa_anom_day WHERE kind = 'TBSPC' AND anomaly = 1;
+        chk_int('CAPR_SERIES_POINTS anomaly=1 on every TBSPC day any day mode flagged', v_n, v_num);
         SELECT COUNT(*) INTO v_n FROM capr_series_points
-          WHERE kind = 'CPU' AND series <> 'BUSY_PCT' AND anomaly IS NOT NULL;
-        chk_int('CPU anomaly is scored on BUSY_PCT only', v_n, 0);
+          WHERE kind = 'CPU' AND series NOT IN ('BUSY_PCT', 'DB_CPU_PCT') AND anomaly IS NOT NULL;
+        chk_int('CPU anomaly is scored on BUSY_PCT and DB_CPU_PCT only', v_n, 0);
 
         SELECT COUNT(*) INTO v_n FROM capr_fit;
         SELECT (SELECT COUNT(*) FROM capf_tbspc_forecast) + (SELECT COUNT(*) FROM capf_cpu_trend)
@@ -1613,8 +1640,8 @@ BEGIN
         chk_int('CAPR_FORECAST_POINTS skips INSUFFICIENT_HISTORY', v_n, 0);
 
         SELECT COUNT(*) INTO v_n   FROM capr_anomalies WHERE anomaly_kind = 'TBSPC_GROWTH';
-        SELECT COUNT(*) INTO v_num FROM capa_tbspc_anom WHERE anomaly_flag IN ('HIGH', 'LOW');
-        chk_int('CAPR_ANOMALIES one TBSPC_GROWTH row per flagged day', v_n, v_num);
+        SELECT COUNT(*) INTO v_num FROM capa_anom WHERE kind = 'TBSPC' AND anomaly_flag IS NOT NULL;
+        chk_int('CAPR_ANOMALIES one TBSPC_GROWTH row per flagged (day, mode)', v_n, v_num);
         SELECT COUNT(*) INTO v_n FROM capr_anomalies a JOIN capa_cpu_shift s
             ON s.dbid = a.dbid AND s.con_dbid = a.con_dbid AND s.metric = a.series
           WHERE a.anomaly_kind = 'CPU_SHIFT'
@@ -1623,7 +1650,8 @@ BEGIN
         chk_int('CPU_SHIFT dated at the start of its recent window, obs_day = last_day', v_n, 1);
         SELECT pct_vs_expected, pct_vs_avg INTO v_num, v_num2
           FROM capr_anomalies
-          WHERE anomaly_kind = 'TBSPC_GROWTH' AND series = 'FIX_SPIKE' AND obs_day = d_spike;
+          WHERE anomaly_kind = 'TBSPC_GROWTH' AND series = 'FIX_SPIKE' AND obs_day = d_spike
+            AND baseline_mode = 'TRAILING';
         chk_close('CAPR_ANOMALIES SPIKE pct_vs_expected', v_num,  100 * 2147483648 / meta_n('SPIKE_RATE'), 0.000001);
         chk_close('CAPR_ANOMALIES SPIKE pct_vs_avg',      v_num2, 100 * 2147483648 / meta_n('SPIKE_RATE'), 0.000001);
         SELECT a.pct_vs_expected, 100 * s.shift_pct / s.base_med INTO v_num, v_num2
@@ -1634,6 +1662,441 @@ BEGIN
     EXCEPTION
         WHEN OTHERS THEN
             fail('CAPR point-feed block raised ' || SQLERRM);
+    END;
+
+    DECLARE
+        d_base  DATE   := meta_d('BASE_DAY');
+        d_last  DATE   := meta_d('LAST_DAY');
+        d_inv   DATE   := meta_d('INVERTED_WED');
+        d_gnext DATE   := meta_d('CPUGAP_NEXT');
+        d_purge DATE   := meta_d('PURGE_DAY');
+        n_pdb   NUMBER := meta_n('PDB_CON_DBID');
+        n_pdb2  NUMBER := meta_n('PDB2_CON_DBID');
+        n_k     NUMBER;
+        v_old   NUMBER;
+        v_flag  VARCHAR2(5);
+        v_gflag VARCHAR2(1);
+        v_mode  VARCHAR2(12);
+    BEGIN
+        SELECT mad_k INTO n_k FROM cap_cfg;
+
+        DBMS_OUTPUT.PUT_LINE('=== M15 CAPD_CPU_HOURLY (END-hour buckets) ===');
+        SELECT COUNT(*) INTO v_n FROM capd_cpu_hourly
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND metric = 'BUSY_PCT';
+        SELECT SUM(n_intervals) INTO v_num FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid;
+        chk_int('root BUSY_PCT hourly rows = SUM(n_intervals) of CAPD_CPU_DAILY', v_n, v_num);
+        SELECT COUNT(*) INTO v_n FROM capd_cpu_hourly
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND metric = 'BUSY_PCT' AND gap_flag = 'Y';
+        chk_int('root BUSY_PCT hourly gap rows', v_n, 1);
+        SELECT gap_flag, ivl_hours, value INTO v_gflag, v_num, v_num2 FROM capd_cpu_hourly
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND metric = 'BUSY_PCT' AND hour_ts = d_gnext + 6/24;
+        chk_str  ('post-gap Monday 06:00 bucket gap_flag', v_gflag, 'Y');
+        chk_close('post-gap Monday 06:00 bucket ivl_hours', v_num, meta_n('CPUGAP_HOURS'), 0.000001);
+        chk_close('post-gap Monday 06:00 bucket value (three half-days 10/30/20)', v_num2, 20, 0.000001);
+        SELECT COUNT(*) INTO v_n FROM capd_cpu_hourly
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND metric = 'DB_CPU_PCT';
+        SELECT SUM(n_intervals) INTO v_num FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND con_dbid = n_pdb;
+        chk_int('PDB DB_CPU_PCT hourly rows = SUM(n_intervals) of CAPD_DBTIME_DAILY', v_n, v_num);
+        SELECT COUNT(*) INTO v_n FROM capd_cpu_hourly
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND metric = 'BUSY_PCT';
+        chk_int('PDB has no hourly BUSY_PCT (OSSTAT is CDB-level)', v_n, 0);
+        SELECT value INTO v_num FROM capd_cpu_hourly
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND metric = 'BUSY_PCT' AND hour_ts = d_probe + 6/24;
+        chk_close('probe 06:00 BUSY_PCT (night interval)', v_num, 20, 0.000001);
+        SELECT value, day_dt INTO v_num, d_tstart FROM capd_cpu_hourly
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND metric = 'BUSY_PCT' AND hour_ts = d_probe + 18/24;
+        chk_close('probe 18:00 BUSY_PCT (day interval)', v_num, 60, 0.000001);
+        chk_true ('probe 18:00 bucket day_dt = probe day', d_tstart = d_probe);
+        SELECT value INTO v_num FROM capd_cpu_hourly
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND metric = 'DB_CPU_PCT' AND hour_ts = d_probe + 6/24;
+        chk_close('probe 06:00 root DB_CPU_PCT = 100*100/(NUM_CPUS*43200)', v_num,
+                  100 * 100 / (meta_n('NUM_CPUS') * 43200), 0.000001);
+        SELECT value INTO v_num FROM capd_cpu_hourly
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND metric = 'DB_CPU_PCT' AND hour_ts = d_probe + 18/24;
+        chk_close('probe 18:00 root DB_CPU_PCT', v_num, meta_n('DBCPU_PROBE_PEAK_PCT'), 0.000001);
+        SELECT MIN(value), MAX(value) INTO v_num, v_num2 FROM capd_cpu_hourly
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND metric = 'DB_CPU_PCT'
+            AND hour_ts IN (d_probe + 6/24, d_probe + 18/24);
+        chk_close('probe PDB DB_CPU_PCT 06:00 = pdb_pct(probe)', v_num,  meta_n('PDB_PROBE_PCT'), 0.000001);
+        chk_close('probe PDB DB_CPU_PCT 18:00 = pdb_pct(probe)', v_num2, meta_n('PDB_PROBE_PCT'), 0.000001);
+
+        DBMS_OUTPUT.PUT_LINE('=== M15 CAPA_ANOM structure ===');
+        SELECT COUNT(*) INTO v_n FROM capa_anom;
+        SELECT 2 * COUNT(CASE WHEN grain = 'DAY' THEN 1 END) + COUNT(CASE WHEN grain = 'HOUR' THEN 1 END)
+          INTO v_num FROM capa_obs;
+        chk_int('CAPA_ANOM rows = 2 x DAY obs + HOUR obs', v_n, v_num);
+        SELECT COUNT(*) INTO v_n FROM (
+            SELECT 1 FROM capa_anom
+            GROUP  BY dbid, con_dbid, kind, series, baseline_mode, ts HAVING COUNT(*) > 1);
+        chk_int('CAPA_ANOM key (dbid, con_dbid, kind, series, baseline_mode, ts) unique', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capa_anom_day;
+        SELECT COUNT(*) INTO v_num FROM capa_obs WHERE grain = 'DAY';
+        chk_int('CAPA_ANOM_DAY one row per DAY observation', v_n, v_num);
+        SELECT COUNT(*) INTO v_n FROM capa_anom
+          WHERE (grain = 'HOUR' AND baseline_mode <> 'HOUR_OF_WEEK')
+             OR (grain = 'DAY'  AND baseline_mode = 'HOUR_OF_WEEK')
+             OR (kind <> 'CPU'  AND grain = 'HOUR');
+        chk_int('modes match grain (HOUR_OF_WEEK = CPU hour rows only)', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capa_anom
+          WHERE anomaly_flag IS NOT NULL
+            AND (ABS(robust_z) <= n_k OR gap_flag = 'Y' OR is_complete = 'N' OR n_hist < min_hist);
+        chk_int('flag => |z| > mad_k, no gap, complete, n_hist >= min_hist', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capa_anom
+          WHERE anomaly_flag IS NULL
+            AND ABS(robust_z) > n_k AND gap_flag = 'N' AND is_complete = 'Y' AND n_hist >= min_hist;
+        chk_int('|z| > mad_k, no gap, complete, n_hist >= min_hist => flag', v_n, 0);
+        -- The partial day (and the first day) read low on a part-day: scored
+        -- as an anomaly they would be instrumentation, not workload.
+        SELECT COUNT(*) INTO v_n FROM capa_anom
+          WHERE is_complete = 'N' AND anomaly_flag IS NOT NULL;
+        chk_int('is_complete = N rows never flag', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM (
+            SELECT doc_key FROM capr_series_points GROUP BY doc_key HAVING COUNT(*) > 1);
+        chk_int('CAPR_SERIES_POINTS doc_key unique', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM (
+            SELECT doc_key FROM capr_hourly_points GROUP BY doc_key HAVING COUNT(*) > 1);
+        chk_int('CAPR_HOURLY_POINTS doc_key unique', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM (
+            SELECT doc_key FROM capr_anomalies GROUP BY doc_key HAVING COUNT(*) > 1);
+        chk_int('CAPR_ANOMALIES doc_key unique', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM (
+            SELECT alert_key FROM capr_alerts GROUP BY alert_key HAVING COUNT(*) > 1);
+        chk_int('CAPR_ALERTS alert_key unique', v_n, 0);
+        SELECT COUNT(*) INTO v_n   FROM capr_hourly_points;
+        SELECT COUNT(*) INTO v_num FROM capd_cpu_hourly;
+        chk_int('CAPR_HOURLY_POINTS rows = CAPD_CPU_HOURLY', v_n, v_num);
+
+        DBMS_OUTPUT.PUT_LINE('=== M15 root BUSY_PCT across the three modes ===');
+        chk_int('SAME_DOW HIGH count', anom_n('CPU', 'BUSY_PCT', 'SAME_DOW', 'HIGH', v_dbid), 1);
+        chk_int('SAME_DOW LOW count',  anom_n('CPU', 'BUSY_PCT', 'SAME_DOW', 'LOW',  v_dbid), 0);
+        chk_int('TRAILING HIGH count', anom_n('CPU', 'BUSY_PCT', 'TRAILING', 'HIGH', v_dbid), 1);
+        chk_str('TRAILING flags the injected Tuesday', anom_flag('CPU', 'BUSY_PCT', 'TRAILING', d_inj, v_dbid), 'HIGH');
+        -- A weekend day reads 20 against a weekday-dominated 28-day median of
+        -- 40 (MAD 0, floored threshold 9), so TRAILING flags EVERY complete,
+        -- non-gap weekend day that has trailing_min_hist such days of history
+        -- -- the reason CPU alerts default to SAME_DOW.
+        SELECT COUNT(*) INTO v_num
+          FROM capd_cpu_daily c CROSS JOIN cap_cfg cfg
+          WHERE c.dbid = v_dbid AND c.con_dbid = v_dbid AND c.gap_flag = 'N' AND c.is_complete = 'Y'
+            AND MOD(c.day_dt - DATE '2020-01-06', 7) >= 5
+            AND (SELECT COUNT(*) FROM capd_cpu_daily h
+                  WHERE h.dbid = c.dbid AND h.con_dbid = c.con_dbid
+                    AND h.gap_flag = 'N' AND h.is_complete = 'Y'
+                    AND h.day_dt BETWEEN c.day_dt - cfg.mad_window_days AND c.day_dt - 1)
+                >= cfg.trailing_min_hist;
+        chk_int('TRAILING LOW = every weekend day with enough history',
+                anom_n('CPU', 'BUSY_PCT', 'TRAILING', 'LOW', v_dbid), v_num);
+        chk_int('HOUR_OF_WEEK HIGH count', anom_n('CPU', 'BUSY_PCT', 'HOUR_OF_WEEK', 'HIGH', v_dbid), 2);
+        chk_int('HOUR_OF_WEEK LOW count',  anom_n('CPU', 'BUSY_PCT', 'HOUR_OF_WEEK', 'LOW',  v_dbid), 1);
+        SELECT anomaly_flag, robust_z, threshold INTO v_flag, v_num, v_num2 FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'CPU' AND series = 'BUSY_PCT'
+            AND baseline_mode = 'HOUR_OF_WEEK' AND ts = d_inj + 6/24;
+        chk_str  ('HOW injected Tuesday 06:00 (70 vs 20)', v_flag, 'HIGH');
+        chk_close('HOW injected Tuesday 06:00 z = 50/5', v_num, 10, 0.000001);
+        chk_close('HOW threshold = mad_k x cpu_min_mad_pct_hour', v_num2, 15, 0.000001);
+        SELECT anomaly_flag, dev, threshold INTO v_flag, v_num, v_num2 FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'CPU' AND series = 'BUSY_PCT'
+            AND baseline_mode = 'HOUR_OF_WEEK' AND ts = d_inj + 18/24;
+        chk_true ('HOW injected Tuesday 18:00 not flagged (70 vs 60)', v_flag IS NULL);
+        chk_true ('HOW injected Tuesday 18:00 dev 10 < threshold 15 (got ' || v_num || ' / ' || v_num2 || ')',
+                  ABS(v_num - 10) < 1e-9 AND ABS(v_num2 - 15) < 1e-9);
+        SELECT anomaly_flag, robust_z INTO v_flag, v_num FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'CPU' AND series = 'BUSY_PCT'
+            AND baseline_mode = 'HOUR_OF_WEEK' AND ts = d_inv + 6/24;
+        chk_str  ('HOW inverted Wednesday 06:00 (40 vs 20)', v_flag, 'HIGH');
+        chk_close('HOW inverted Wednesday 06:00 z = 20/5', v_num, 4, 0.000001);
+        chk_str  ('HOW inverted Wednesday 18:00 (40 vs 60)',
+                  anom_flag('CPU', 'BUSY_PCT', 'HOUR_OF_WEEK', d_inv + 18/24, v_dbid), 'LOW');
+        chk_true ('inverted Wednesday invisible to TRAILING (daily avg 40)',
+                  anom_flag('CPU', 'BUSY_PCT', 'TRAILING', d_inv, v_dbid) IS NULL);
+        chk_true ('inverted Wednesday invisible to SAME_DOW (daily avg 40)',
+                  anom_flag('CPU', 'BUSY_PCT', 'SAME_DOW', d_inv, v_dbid) IS NULL);
+        SELECT anomaly_flag, gap_flag INTO v_flag, v_gflag FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'CPU' AND series = 'BUSY_PCT'
+            AND baseline_mode = 'HOUR_OF_WEEK' AND ts = d_gnext + 6/24;
+        chk_true ('HOW post-gap Monday 06:00 is a gap and unflagged', v_gflag = 'Y' AND v_flag IS NULL);
+        SELECT n_hist INTO v_n FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'CPU' AND series = 'BUSY_PCT'
+            AND baseline_mode = 'HOUR_OF_WEEK' AND ts = d_gnext + 7 + 6/24;
+        chk_true ('HOW gap hour excluded from next Monday 06:00 baseline (n_hist '
+                  || v_n || ' < 8)', v_n < 8);
+        SELECT COUNT(*) INTO v_n FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND series = 'DB_CPU_PCT' AND anomaly_flag IS NOT NULL;
+        chk_int('root DB_CPU_PCT never flags (values far under the 9 / 15 floors)', v_n, 0);
+
+        DBMS_OUTPUT.PUT_LINE('=== M15 FIXPDB1 DB_CPU_PCT step days ===');
+        SELECT COUNT(*) INTO v_n FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND series = 'DB_CPU_PCT'
+            AND baseline_mode = 'SAME_DOW' AND anomaly_flag = 'HIGH' AND ts >= d_last - 6;
+        chk_int('SAME_DOW HIGH exactly on the last 7 (step) days', v_n, 7);
+        SELECT sigma_floored, threshold, robust_z INTO v_gflag, v_num, v_num2 FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND kind = 'CPU' AND series = 'DB_CPU_PCT'
+            AND baseline_mode = 'SAME_DOW' AND ts = d_inj;
+        chk_str  ('SAME_DOW step day sigma_floored (identical priors, MAD 0)', v_gflag, 'Y');
+        chk_close('SAME_DOW step day threshold = mad_k x cpu_min_mad_pct', v_num, 9, 0.000001);
+        chk_close('SAME_DOW step day z = 18/3', v_num2, 6, 0.000001);
+        chk_int('HOUR_OF_WEEK HIGH = both hours of the 7 step days',
+                anom_n('CPU', 'DB_CPU_PCT', 'HOUR_OF_WEEK', 'HIGH', n_pdb), 14);
+        -- TRAILING mixes the sawtooth into its window (sigma 5.93 -> 7.41), so
+        -- only the step days whose deviation clears 3 sigma flag: index 115
+        -- (58 vs 40, thr 17.79), 116 (60 vs 41) and 118 (64 vs 41, thr 22.24).
+        SELECT COUNT(*), COUNT(CASE WHEN ts - d_base IN (115, 116, 118) THEN 1 END)
+          INTO v_n, v_num FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND series = 'DB_CPU_PCT'
+            AND baseline_mode = 'TRAILING' AND anomaly_flag = 'HIGH';
+        chk_int('TRAILING HIGH count', v_n, 3);
+        chk_int('TRAILING HIGH on day indexes 115, 116, 118', v_num, 3);
+
+        DBMS_OUTPUT.PUT_LINE('=== M15 FIXPDB2 DB_CPU_PCT (weekday 60 / weekend 20 + 1/12 pt a day) ===');
+        -- Weekly seasonality with a slow ramp: TRAILING (all weekdays mixed)
+        -- reads every weekend as LOW, exactly like root BUSY_PCT; the weekly
+        -- modes compare a slot with itself 1..8 weeks back, so each sees only
+        -- the ramp, 7/12 point a week, far under the 9 / 15 point floors.
+        SELECT COUNT(*) INTO v_num
+          FROM capd_dbtime_daily c CROSS JOIN cap_cfg cfg
+          WHERE c.dbid = v_dbid AND c.con_dbid = n_pdb2 AND c.gap_flag = 'N' AND c.is_complete = 'Y'
+            AND MOD(c.day_dt - DATE '2020-01-06', 7) >= 5
+            AND (SELECT COUNT(*) FROM capd_dbtime_daily h
+                  WHERE h.dbid = c.dbid AND h.con_dbid = c.con_dbid
+                    AND h.gap_flag = 'N' AND h.is_complete = 'Y'
+                    AND h.day_dt BETWEEN c.day_dt - cfg.mad_window_days AND c.day_dt - 1)
+                >= cfg.trailing_min_hist;
+        chk_int('PDB2 TRAILING LOW = every weekend day with enough history',
+                anom_n('CPU', 'DB_CPU_PCT', 'TRAILING', 'LOW', n_pdb2), v_num);
+        chk_true('PDB2 TRAILING LOW count is the weekend set (' || v_num || ' > 20)', v_num > 20);
+        chk_int('PDB2 TRAILING HIGH',     anom_n('CPU', 'DB_CPU_PCT', 'TRAILING',     'HIGH', n_pdb2), 0);
+        chk_int('PDB2 SAME_DOW flags',    anom_n('CPU', 'DB_CPU_PCT', 'SAME_DOW',     'ANY',  n_pdb2), 0);
+        chk_int('PDB2 HOUR_OF_WEEK flags', anom_n('CPU', 'DB_CPU_PCT', 'HOUR_OF_WEEK', 'ANY', n_pdb2), 0);
+        -- Last day: its 8 same-weekday priors sit 7k/12 points lower (k = 1..8),
+        -- so the median is value - (7/12) * 4.5 and the MAD sigma
+        -- 1.4826 * 7/12 * 1.5 = 1.30 is floored to cpu_min_mad_pct.
+        SELECT dev, n_hist, sigma_floored, threshold INTO v_num, v_n, v_gflag, v_num2 FROM capa_anom
+          WHERE dbid = v_dbid AND con_dbid = n_pdb2 AND kind = 'CPU' AND series = 'DB_CPU_PCT'
+            AND baseline_mode = 'SAME_DOW' AND ts = d_last;
+        chk_close('PDB2 last-day SAME_DOW dev = (7/12) x 4.5', v_num, 7 / 12 * 4.5, 0.000001);
+        chk_int  ('PDB2 last-day SAME_DOW n_hist', v_n, 8);
+        chk_str  ('PDB2 last-day SAME_DOW sigma_floored', v_gflag, 'Y');
+        chk_close('PDB2 last-day SAME_DOW threshold', v_num2, 9, 0.000001);
+
+        DBMS_OUTPUT.PUT_LINE('=== M15 tablespaces and M11 series under SAME_DOW ===');
+        chk_str('SPIKE SAME_DOW HIGH on the spike day', anom_flag('TBSPC', 'FIX_SPIKE', 'SAME_DOW', d_spike, v_dbid), 'HIGH');
+        chk_str('PURGE SAME_DOW LOW on the purge day', anom_flag('TBSPC', 'FIX_PURGE', 'SAME_DOW', d_purge, v_dbid), 'LOW');
+        -- FIX_CYCLIC / FIX_CYCLIC_UP: every retention cliff (CYC0_DAYS apart,
+        -- the last on CYC0_LAST_CLIFF) is a -72 GiB day against +2.5 GiB/day
+        -- priors, so both modes flag it LOW; the rising days never flag. The
+        -- first cliff (day 5) has too little history for either mode.
+        FOR t IN (SELECT 'FIX_CYCLIC' AS ts_name FROM dual UNION ALL SELECT 'FIX_CYCLIC_UP' FROM dual) LOOP
+            FOR m IN (SELECT 'TRAILING' AS md FROM dual UNION ALL SELECT 'SAME_DOW' FROM dual) LOOP
+                SELECT COUNT(*),
+                       COUNT(CASE WHEN anomaly_flag = 'LOW'
+                                   AND MOD(meta_last_cliff - (ts - d_base), meta_cyc_days) = 0 THEN 1 END)
+                  INTO v_n, v_num
+                  FROM capa_anom
+                       CROSS JOIN (SELECT MAX(CASE WHEN mkey = 'CYC0_LAST_CLIFF' THEN nval END) AS meta_last_cliff,
+                                          MAX(CASE WHEN mkey = 'CYC0_DAYS'       THEN nval END) AS meta_cyc_days
+                                   FROM   cap_fixture_meta)
+                  WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'TBSPC'
+                    AND series = t.ts_name AND baseline_mode = m.md AND anomaly_flag IS NOT NULL;
+                chk_int(t.ts_name || ' ' || m.md || ' flags', v_n, meta_n('CYC0_N'));
+                chk_int(t.ts_name || ' ' || m.md || ' LOW on the retention cliffs', v_num, meta_n('CYC0_N'));
+            END LOOP;
+        END LOOP;
+        SELECT COUNT(*) INTO v_n FROM capa_anom
+          WHERE kind = 'TBSPC' AND baseline_mode = 'SAME_DOW' AND anomaly_flag IS NOT NULL
+            AND series NOT IN ('FIX_CYCLIC', 'FIX_CYCLIC_UP');
+        chk_int('other TBSPC SAME_DOW flags: the spike and the purge only', v_n, 2);
+        SELECT COUNT(*) INTO v_n FROM capa_anom
+          WHERE kind = 'SERIES' AND series IN ('SESSIONS', 'PROCESSES', 'REDO_GB_DAY')
+            AND anomaly_flag IS NOT NULL;
+        chk_int('SESSIONS / PROCESSES / REDO_GB_DAY never flag', v_n, 0);
+        FOR m IN (SELECT 'TRAILING' AS md FROM dual UNION ALL SELECT 'SAME_DOW' FROM dual) LOOP
+            chk_str('DB_SIZE_GB ' || m.md || ' HIGH on the spike day',
+                    anom_flag('SERIES', 'DB_SIZE_GB', m.md, d_spike, v_dbid), 'HIGH');
+            chk_str('DB_SIZE_GB ' || m.md || ' LOW on the purge day',
+                    anom_flag('SERIES', 'DB_SIZE_GB', m.md, d_purge, v_dbid), 'LOW');
+            chk_int('DB_SIZE_GB ' || m.md || ' flags nothing else (spike, purge, the CYC0_N cliffs)',
+                    anom_n('SERIES', 'DB_SIZE_GB', m.md, 'ANY', v_dbid), 2 + meta_n('CYC0_N'));
+        END LOOP;
+        -- The tablespace SET changes three times: FIX_DROPPED leaves the day
+        -- after its last row, FIX_GAP leaves on day 100 and rejoins on 103.
+        SELECT COUNT(*), COUNT(CASE WHEN day_dt - d_base IN (meta_n_dropped + 1, 100, 103) THEN 1 END)
+          INTO v_n, v_num
+          FROM capd_series_daily
+               CROSS JOIN (SELECT nval AS meta_n_dropped FROM cap_fixture_meta WHERE mkey = 'DROPPED_LAST_DAY')
+          WHERE dbid = v_dbid AND series = 'DB_SIZE_GB' AND gap_flag = 'Y';
+        chk_int('DB_SIZE_GB gap_flag days (tablespace set changed)', v_n, 3);
+        chk_int('DB_SIZE_GB gap_flag on DROPPED_LAST_DAY + 1, 100 and 103', v_num, 3);
+        SELECT COUNT(*) INTO v_n FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'REDO_GB_DAY' AND gap_flag = 'Y';
+        chk_int('REDO_GB_DAY gap_flag never Y (12 h intervals)', v_n, 0);
+        SELECT day_gap INTO v_n FROM capd_series_daily
+          WHERE dbid = v_dbid AND series = 'REDO_GB_DAY' AND day_dt = d_base + 61;
+        chk_int('REDO_GB_DAY day_gap after the restart day', v_n, 2);
+
+        DBMS_OUTPUT.PUT_LINE('=== M15 point feeds ===');
+        SELECT anomaly_flag, how_hours_flagged, anomaly INTO v_flag, v_n, v_num
+          FROM capr_series_points
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'CPU' AND series = 'BUSY_PCT' AND ts = d_inv;
+        chk_true('inverted Wednesday point: headline flag NULL', v_flag IS NULL);
+        chk_int ('inverted Wednesday point: how_hours_flagged', v_n, 2);
+        chk_int ('inverted Wednesday point: anomaly', v_num, 1);
+        SELECT anomaly_flag, anomaly_modes INTO v_flag, v_msg
+          FROM capr_series_points
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND kind = 'TBSPC' AND series = 'FIX_SPIKE' AND ts = d_spike;
+        chk_str('SPIKE point headline flag (TRAILING)', v_flag, 'HIGH');
+        chk_str('SPIKE point anomaly_modes', v_msg, 'TRAILING,SAME_DOW');
+        SELECT how_flag, how_z INTO v_flag, v_num FROM capr_hourly_points
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND series = 'BUSY_PCT' AND ts = d_inj + 6/24;
+        chk_str  ('CAPR_HOURLY_POINTS injected Tuesday 06:00 how_flag', v_flag, 'HIGH');
+        chk_close('CAPR_HOURLY_POINTS injected Tuesday 06:00 how_z', v_num, 10, 0.000001);
+
+        DBMS_OUTPUT.PUT_LINE('=== M15 alerts with the shipped alert_modes ===');
+        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_ANOM';
+        chk_int('CPU_ANOM alerts', v_n, 1);
+        SELECT baseline_mode INTO v_mode FROM capr_alerts WHERE kind = 'CPU_ANOM';
+        chk_str('CPU_ANOM baseline_mode', v_mode, 'SAME_DOW');
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+          WHERE kind = 'DBCPU_ANOM' AND severity = 'WARN' AND baseline_mode = 'SAME_DOW'
+            AND db_pdb = 'FIXCDB/FIXPDB1' AND series_key = 'DB_CPU_PCT';
+        chk_int('DBCPU_ANOM WARN alerts (the 7 FIXPDB1 step days)', v_n, 7);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'DBCPU_ANOM';
+        chk_int('DBCPU_ANOM alerts in total', v_n, 7);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'TBSPC_ANOM';
+        chk_int('TBSPC_ANOM alerts (the spike; the purge predates the window)', v_n, 1);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+          WHERE kind = 'SERIES_ANOM' AND series_key = 'DB_SIZE_GB' AND day_dt = d_spike
+            AND severity = 'WARN' AND baseline_mode = 'TRAILING';
+        chk_int('SERIES_ANOM WARN for DB_SIZE_GB on the spike day', v_n, 1);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'SERIES_ANOM';
+        chk_int('SERIES_ANOM alerts in total', v_n, 1);
+        SELECT value, threshold INTO v_num, v_num2 FROM capr_alerts
+          WHERE kind = 'TBSPC_ANOM' AND series_key = 'FIX_SPIKE';
+        chk_close('TBSPC_ANOM value = the scored rate (bytes/day)', v_num, meta_n('SPIKE_RATE') + 2147483648, 0.000001);
+        chk_close('TBSPC_ANOM threshold = the bound crossed (median + floor)', v_num2,
+                  meta_n('SPIKE_RATE') + 104857600, 0.000001);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+          WHERE (kind IN ('TBSPC_ANOM', 'CPU_ANOM', 'DBCPU_ANOM', 'SERIES_ANOM') AND baseline_mode IS NULL)
+             OR (kind NOT IN ('TBSPC_ANOM', 'CPU_ANOM', 'DBCPU_ANOM', 'SERIES_ANOM') AND baseline_mode IS NOT NULL);
+        chk_int('baseline_mode set on anomaly kinds only', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SHIFT';
+        chk_int('CPU_SHIFT alerts unchanged', v_n, 1);
+
+        DBMS_OUTPUT.PUT_LINE('=== M15 knob flips ===');
+        SELECT cfg_value INTO v_old FROM cap_config WHERE cfg_name = 'alert_modes_cpu';
+        knob('alert_modes_cpu', 6);
+        BEGIN
+            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_ANOM';
+            chk_int('alert_modes_cpu=6: CPU_ANOM (SAME_DOW + HOW Tue + HOW Wed)', v_n, 3);
+            SELECT severity, value, threshold, message INTO v_str, v_num, v_num2, v_msg
+              FROM capr_alerts
+              WHERE kind = 'CPU_ANOM' AND baseline_mode = 'HOUR_OF_WEEK' AND day_dt = d_inv;
+            chk_str  ('alert_modes_cpu=6: HOW inverted Wednesday severity', v_str, 'WARN');
+            chk_close('alert_modes_cpu=6: HOW inverted Wednesday carries 06:00 (value 40)', v_num, 40, 0.000001);
+            chk_close('alert_modes_cpu=6: HOW inverted Wednesday bound 20 + 15', v_num2, 35, 0.000001);
+            chk_true ('alert_modes_cpu=6: message says "2 hours flagged that day" (got: ' || v_msg || ')',
+                      INSTR(v_msg, '; 2 hours flagged that day') > 0 AND INSTR(v_msg, 'for Wed 06:00') > 0);
+            SELECT value, threshold INTO v_num, v_num2 FROM capr_alerts
+              WHERE kind = 'CPU_ANOM' AND baseline_mode = 'HOUR_OF_WEEK' AND day_dt = d_inj;
+            chk_true('alert_modes_cpu=6: HOW injected Tuesday carries 06:00 (70 vs bound 35, got '
+                     || v_num || ' / ' || v_num2 || ')',
+                     ABS(v_num - 70) < 1e-9 AND ABS(v_num2 - 35) < 1e-9);
+            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'DBCPU_ANOM';
+            chk_int('alert_modes_cpu=6: DBCPU_ANOM (7 SAME_DOW + 7 HOW days)', v_n, 14);
+            SELECT COUNT(*) INTO v_n FROM (
+                SELECT alert_key FROM capr_alerts GROUP BY alert_key HAVING COUNT(*) > 1);
+            chk_int('alert_modes_cpu=6: alert_key still unique', v_n, 0);
+        EXCEPTION
+            WHEN OTHERS THEN knob('alert_modes_cpu', v_old); COMMIT; RAISE;
+        END;
+        knob('alert_modes_cpu', 0);
+        BEGIN
+            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind IN ('CPU_ANOM', 'DBCPU_ANOM');
+            chk_int('alert_modes_cpu=0: no CPU_ANOM / DBCPU_ANOM', v_n, 0);
+            SELECT alerting, sev INTO v_gflag, v_str FROM capr_anomalies
+              WHERE dbid = v_dbid AND con_dbid = v_dbid AND anomaly_kind = 'CPU_BUSY'
+                AND baseline_mode = 'SAME_DOW' AND ts = d_inj;
+            chk_true('alert_modes_cpu=0: CAPR_ANOMALIES still lists it, alerting N, sev INFO',
+                     v_gflag = 'N' AND v_str = 'INFO');
+        EXCEPTION
+            WHEN OTHERS THEN knob('alert_modes_cpu', v_old); COMMIT; RAISE;
+        END;
+        knob('alert_modes_cpu', v_old);
+        COMMIT;
+
+        SELECT cfg_value INTO v_old FROM cap_config WHERE cfg_name = 'alert_modes_tbspc';
+        knob('alert_modes_tbspc', 3);
+        BEGIN
+            SELECT COUNT(*), COUNT(DISTINCT alert_key) INTO v_n, v_num FROM capr_alerts
+              WHERE kind = 'TBSPC_ANOM' AND series_key = 'FIX_SPIKE' AND day_dt = d_spike;
+            chk_int('alert_modes_tbspc=3: SPIKE TBSPC_ANOM rows (TRAILING + SAME_DOW)', v_n, 2);
+            chk_int('alert_modes_tbspc=3: distinct alert_key', v_num, 2);
+        EXCEPTION
+            WHEN OTHERS THEN knob('alert_modes_tbspc', v_old); COMMIT; RAISE;
+        END;
+        knob('alert_modes_tbspc', v_old);
+        COMMIT;
+
+        SELECT cfg_value INTO v_old FROM cap_config WHERE cfg_name = 'weekly_min_hist';
+        SELECT COUNT(*) INTO v_num FROM capa_anom
+          WHERE baseline_mode = 'TRAILING' AND anomaly_flag IS NOT NULL;
+        knob('weekly_min_hist', 9);
+        BEGIN
+            SELECT COUNT(*) INTO v_n FROM capa_anom
+              WHERE baseline_mode IN ('SAME_DOW', 'HOUR_OF_WEEK') AND anomaly_flag IS NOT NULL;
+            chk_int('weekly_min_hist=9 (> dow_weeks): no weekly flags', v_n, 0);
+            SELECT COUNT(*) INTO v_n FROM capa_anom
+              WHERE baseline_mode = 'TRAILING' AND anomaly_flag IS NOT NULL;
+            chk_int('weekly_min_hist=9: TRAILING flags unchanged', v_n, v_num);
+            SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'weekly_min_hist';
+            chk_str('weekly_min_hist=9: CAP_CFG_CHECK', v_str, 'BAD');
+        EXCEPTION
+            WHEN OTHERS THEN knob('weekly_min_hist', v_old); COMMIT; RAISE;
+        END;
+        knob('weekly_min_hist', v_old);
+        COMMIT;
+
+        SELECT cfg_value INTO v_old FROM cap_config WHERE cfg_name = 'hour_gap_ratio';
+        knob('hour_gap_ratio', 0.5);
+        BEGIN
+            SELECT COUNT(*) INTO v_n FROM capd_cpu_hourly WHERE gap_flag = 'N';
+            chk_int('hour_gap_ratio=0.5: every 12 h bucket is an hour-grain gap', v_n, 0);
+            SELECT COUNT(*) INTO v_n FROM capa_anom
+              WHERE baseline_mode = 'HOUR_OF_WEEK' AND anomaly_flag IS NOT NULL;
+            chk_int('hour_gap_ratio=0.5: no HOUR_OF_WEEK flags', v_n, 0);
+            SELECT COUNT(*) INTO v_n FROM capd_cpu_daily
+              WHERE dbid = v_dbid AND con_dbid = v_dbid AND gap_flag = 'Y';
+            chk_int('hour_gap_ratio=0.5: daily gap days unchanged', v_n, 1);
+        EXCEPTION
+            WHEN OTHERS THEN knob('hour_gap_ratio', v_old); COMMIT; RAISE;
+        END;
+        knob('hour_gap_ratio', v_old);
+        COMMIT;
+
+        SELECT cfg_value INTO v_old FROM cap_config WHERE cfg_name = 'cpu_min_mad_pct_hour';
+        knob('cpu_min_mad_pct_hour', 3);
+        BEGIN
+            chk_str('cpu_min_mad_pct_hour=3: injected Tuesday 18:00 flips HIGH (10 > 9)',
+                    anom_flag('CPU', 'BUSY_PCT', 'HOUR_OF_WEEK', d_inj + 18/24, v_dbid), 'HIGH');
+        EXCEPTION
+            WHEN OTHERS THEN knob('cpu_min_mad_pct_hour', v_old); COMMIT; RAISE;
+        END;
+        knob('cpu_min_mad_pct_hour', v_old);
+        COMMIT;
+
+        SELECT COUNT(*) INTO v_n FROM cap_config WHERE cfg_name IN ('tbspc_min_hist', 'cpu_min_dow_hist');
+        chk_int('retired knobs tbspc_min_hist / cpu_min_dow_hist gone', v_n, 0);
+        SELECT trailing_min_hist, weekly_min_hist INTO v_num, v_num2 FROM cap_cfg;
+        chk_true('CAP_CFG trailing_min_hist = 7, weekly_min_hist = 3', v_num = 7 AND v_num2 = 3);
+        SELECT COUNT(*) INTO v_n FROM cap_cfg
+          WHERE cpu_min_mad_pct_hour = 5 AND hour_gap_ratio = 1.5 AND series_floor_count = 10
+            AND series_floor_gib = 0.5 AND alert_modes_tbspc = 1 AND alert_modes_cpu = 2
+            AND alert_modes_series = 1;
+        chk_int('CAP_CFG new M15 knobs at their shipped values', v_n, 1);
+    EXCEPTION
+        WHEN OTHERS THEN
+            fail('M15 anomaly-modes block raised ' || SQLERRM);
     END;
 
     DBMS_OUTPUT.PUT_LINE('=== CAP_CFG: the one config access path ===');
@@ -1713,9 +2176,9 @@ BEGIN
             SELECT status, value INTO v_str, v_num FROM cap_cfg_check WHERE knob = 'mad_k';
             chk_str ('CAP_CFG_CHECK mad_k after DELETE', v_str, 'MISSING');
             chk_true('CAP_CFG.mad_k is NULL after DELETE', v_num IS NULL);
-            SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
-              WHERE tablespace_name = 'FIX_SPIKE' AND anomaly_flag IS NOT NULL;
-            chk_int('SPIKE flagged rows with mad_k deleted', v_n, 0);
+            SELECT COUNT(*) INTO v_n FROM capa_anom
+              WHERE kind = 'TBSPC' AND series = 'FIX_SPIKE' AND anomaly_flag IS NOT NULL;
+            chk_int('SPIKE flagged rows (any mode) with mad_k deleted', v_n, 0);
         EXCEPTION
             WHEN OTHERS THEN
                 INSERT INTO cap_config (cfg_name, cfg_value, cfg_default, cfg_desc)
@@ -1729,9 +2192,8 @@ BEGIN
     END;
     SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'mad_k';
     chk_str('CAP_CFG_CHECK mad_k after re-INSERT', v_str, 'OK');
-    SELECT COUNT(*) INTO v_n FROM capa_tbspc_anom
-      WHERE tablespace_name = 'FIX_SPIKE' AND anomaly_flag = 'HIGH' AND day_dt = d_spike;
-    chk_int('SPIKE HIGH on spike day after mad_k re-INSERT', v_n, 1);
+    chk_str('SPIKE HIGH on spike day after mad_k re-INSERT (TRAILING)',
+            anom_flag('TBSPC', 'FIX_SPIKE', 'TRAILING', d_spike, v_dbid), 'HIGH');
 
     DBMS_OUTPUT.PUT_LINE('----------------------------------------');
     DBMS_OUTPUT.PUT_LINE('RESULT: ' || g_pass || ' passed, ' || g_fail || ' failed');

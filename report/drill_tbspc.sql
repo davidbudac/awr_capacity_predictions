@@ -79,7 +79,7 @@ SELECT TO_CHAR(c.train_days,                'FM9999990')         AS k_train,
        RTRIM(TO_CHAR(c.mad_k,               'FM9999990.9'), '.') AS k_madk,
        TO_CHAR(c.mad_window_days,           'FM9999990')         AS k_madw,
        TO_CHAR(c.abs_floor_bytes / 1048576, 'FM99999990.0')      AS k_floor,
-       TO_CHAR(c.tbspc_min_hist,            'FM9999990')         AS k_hist
+       TO_CHAR(c.trailing_min_hist,         'FM9999990')         AS k_hist
 FROM   cap_cfg c;
 SET TERMOUT ON
 
@@ -269,7 +269,7 @@ ORDER  BY con_dbid;
 PROMPT
 PROMPT == 3. ANOMALY ARITHMETIC (CAPA_TBSPC_ANOM, flagged days in the fit window) ==
 PROMPT    Knobs: mad_k=&k_madk, mad_window_days=&k_madw, abs_floor_bytes=&k_floor MiB,
-PROMPT    tbspc_min_hist=&k_hist (min trailing obs). Baseline EXCLUDES the day itself, so a spike
+PROMPT    trailing_min_hist=&k_hist (min trailing obs). Baseline EXCLUDES the day itself, so a spike
 PROMPT    can never inflate its own threshold. All values in MiB/day.
 
 COLUMN arith FORMAT A190 HEADING 'FLAGGED DAY'
