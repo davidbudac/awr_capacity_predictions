@@ -12,6 +12,8 @@ Tailscale address of this workstation, **100.108.246.57**, not on localhost.
 | Grafana (route B) | http://100.108.246.57:3001 | admin / admin, anonymous = viewer |
 | Grafana boards | /d/awrcap-tablespaces, /d/awrcap-cpu-series, /d/awrcap-fleet-anomalies | |
 | ORDS module (route B) | http://100.108.246.57:8181/ords/capdemo/awrcap/{containers,series,forecast,fit,anomalies,alerts} | none (public, lab only) |
+| APEX app (route C) | http://100.108.246.57:8023/ords/r/awrcap/awrcap/overview | AWRCAP_VIEWER (password handed over in chat, not in the repo); App Builder: ADMIN |
+| APEX workspace sign-in | http://100.108.246.57:8023/ords/r/apex/workspace-sign-in/ (workspace AWRCAP) | ADMIN |
 | Kibana (ELK path) | http://100.108.246.57:5601 | elastic / changeme |
 | Kibana boards | /app/dashboards#/view/awrcap-dashboard-tablespaces, …-cpu-series, …-fleet-anomalies | |
 | Elasticsearch | http://100.108.246.57:9200 (index `awrcap-capacity`) | elastic / changeme |
@@ -77,6 +79,29 @@ curl -s -u elastic:changeme 'http://100.108.246.57:9200/awrcap-capacity/_count'
 docker logs --since 10m docker-elk-logstash-1 2>&1 | grep -ci error
 ssh -p 2200 oracle@dbmint 'pgrep -x filebeat; ls -t /u01/app/oracle/filebeat/generated | head -3'
 ```
+
+## APEX app (route C)
+
+Lives in the docker container `23cfree` on this workstation (Oracle 23ai Free
++ APEX 26.2 + ORDS, built per Matt Mulvaney's single-step 23c/APEX container;
+host port 8023, PDB `FREEPDB1`). It shares the instance with the
+`orastats_gather_dashboard` project (workspace MONITORING, apps 100/101): do
+not touch those. Ours: workspace **AWRCAP**, parsing schema **AWRCAP**, app
+**110**, alias `awrcap`, users ADMIN (developer) and AWRCAP_VIEWER (end user).
+
+The data is the demo story installed INTO FREEPDB1 (schema AWRCAP, fixture
+mode, `test/demo_fixture.sql`, ESM models trained), not the dbmint VM, so the
+app works with the VM down. Re-anchor it to today with the same four steps
+as on the VM (fixture, `DEFINE seam_mode = fixture`, `@install.sql`,
+`EXEC cap_forecast_ml.train_all`) connected as AWRCAP, then press **Refresh
+data** in the app.
+
+Start order: `docker start 23cfree`, wait for
+`curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8023/ords/` to answer
+302, then open the URL above. Re-publish the app after a builder change with
+`apex/publish.sh` (it reads the SYS password from the container's `ORACLE_PWD`
+and never prints it). The AWRCAP schema password is not in the repo either;
+reset it as SYSTEM if needed (`alter user awrcap identified by ...`).
 
 ## Gotchas collected while building this
 

@@ -61,6 +61,14 @@ for both visual paths; read it before touching the lab.
 selects from the same views, so change the view, not the consumers) and
 `grafana/build_*.py` generate the provisioned Grafana boards. ORDS install
 state and passwords under `grafana/` are gitignored.
+`apex/` is the third optional path (nothing outside the database): `apex/build.py`
+generates `apex/awrcap_app.sql`, an APEX 26.2 application export (Oracle JET
+charts + Interactive Reports, no external JS) that reads the same CAPR point
+feeds plus `CAP_CONFIG` from its parsing schema, loading each view once per
+session into `AWRCAP_*` APEX collections. `apex/install.sql` imports it into
+a given workspace/schema/app id; `apex/workspace.sql` creates the workspace
+and accounts; `apex/publish.sh` is the lab wrapper for the `23cfree` docker
+instance (see `LAB.md`). Edit the builder, never the generated export.
 Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomaly →
 `CAPR_` integration (display labels + pollable alerts).
 

@@ -409,6 +409,76 @@
         <a href="https://github.com/davidbudac/awr_capacity_predictions/blob/main/grafana/README.md">grafana/README.md</a>.</p>
       </div>
 
+      <!-- ===================== APEX ===================== -->
+      <div class="section-head" id="apex">
+        <span class="eyebrow">Integrate · optional</span>
+        <h2>Oracle APEX application (nothing outside the database)</h2>
+        <p>The third visual path needs no Elastic stack, no Grafana and no REST module. An APEX
+          application imported into a workspace on the suite's schema reads the same
+          <span class="inline">CAPR_</span> views with APEX's own Oracle JET charts and Interactive
+          Reports. Every view is loaded once per session into an APEX collection, so the pages stay
+          fast while the data stays live; a <strong>Refresh data</strong> button reloads it and a
+          freshness badge shows the latest observed day per database.</p>
+      </div>
+
+      <div class="tablewrap">
+        <table>
+          <caption>The four pages and the filters that apply to them</caption>
+          <thead><tr><th scope="col">Page</th><th scope="col">Shows</th><th scope="col">Filters</th></tr></thead>
+          <tbody>
+            <tr><td><span class="k">Overview</span></td><td class="def">alert counts by severity, the live alert list, worst days to full, total database size, data freshness</td><td class="def">database</td></tr>
+            <tr><td><span class="k">Tablespaces</span></td><td class="def">days-to-full ranking; used space with the dashed REGR projection, its band, the ceiling and red anomaly days; daily growth; growth anomalies; tablespace alerts</td><td class="def">database, tablespace, date range</td></tr>
+            <tr><td><span class="k">CPU and workload</span></td><td class="def">host busy % and p95 against the saturation line, DB CPU per container with level-shift windows, the fixed-ceiling series against their limits, fits, alerts</td><td class="def">database, date range</td></tr>
+            <tr><td><span class="k">Fleet anomalies</span></td><td class="def">anomalies per day by kind, most anomalous series, the per-series timeline, the anomaly list with drill-downs, every alert</td><td class="def">database, kind, severity, date range</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <figure class="figure">
+        <img src="assets/apex-tablespaces.png" alt="The APEX Tablespaces page: filter bar and data-freshness badges, days-to-full ranking with severity badges, used space with the dashed projection, band, ceiling and red anomaly days, daily growth bars, growth anomalies and tablespace alerts" loading="lazy">
+        <figcaption>The Tablespaces page of the APEX app over the demo database.</figcaption>
+      </figure>
+
+      <p><strong>Prerequisites.</strong> APEX 26.2 or later with ORDS, the suite installed in a schema
+        (any seam mode; the <span class="inline">CAPR_</span> views come with
+        <span class="inline">install.sql</span>), and a workspace whose parsing schema is that schema.
+        Nothing else: no plug-ins, no static files, no grants beyond what the suite already has. The
+        app signs users in with APEX accounts; the viewer account it creates has no App Builder or
+        SQL Workshop access.</p>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">sqlplus</span><span class="term__tag in">install</span></div>
+<pre><span class="c-cmt"># 1. workspace on the suite's schema + ADMIN and viewer accounts (as SYSTEM, passwords prompted)</span>
+<span class="c-prompt">SQL&gt;</span> @apex/workspace.sql AWRCAP AWRCAP
+<span class="c-cmt"># 2. the application, from the apex/ directory (workspace, parsing schema, app id)</span>
+<span class="c-prompt">$</span> cd apex &amp;&amp; sqlplus awrcap@//host:1521/pdb @install.sql AWRCAP AWRCAP 110
+<span class="c-cmt"># 3. open http://&lt;ords-host&gt;/ords/r/awrcap/awrcap/overview and sign in as AWRCAP_VIEWER</span>
+<span class="c-cmt"># 4. optional: run every region query inside a scripted APEX session (about 90 s)</span>
+<span class="c-prompt">$</span> cd apex &amp;&amp; sqlplus awrcap@//host:1521/pdb @test/apex_smoke.sql 110</pre>
+      </div>
+
+      <p>The first page of a session loads the views it needs into APEX collections (about 15 s on
+        the demo schema, most of it the anomalies view); every later page is a couple of seconds.
+        <strong>Refresh data</strong> reloads them, and the <strong>Data</strong> badges show the
+        latest observed day per database and the load time, so an empty alert list is never
+        mistaken for missing data. Re-running <span class="inline">install.sql</span> replaces the
+        application in place; it refuses an application id that belongs to another app.</p>
+
+      <figure class="figure">
+        <img src="assets/apex-overview.png" alt="The APEX Overview page: alert counts by severity, worst days to full, recent anomalies and database size as badges, the live alert list with severity badges, the worst-days-to-full table and a used-percent bar chart" loading="lazy">
+        <figcaption>The Overview page: what pages right now, and how much headroom is left.</figcaption>
+      </figure>
+
+      <div class="callout">
+        <span class="ico">i</span>
+        <p><strong>Generated, like the other two.</strong> <span class="inline">apex/build.py</span>
+        writes the export; edit the builder, never the SQL. APEX 26.2 or later is required (the
+        export uses its import API); the region SQL keeps the suite's 19c floor. Limits and the lab
+        shortcut are in
+        <a href="https://github.com/davidbudac/awr_capacity_predictions/blob/main/apex/README.md">apex/README.md</a>.</p>
+      </div>
+
       <!-- ===================== DASHBOARDS ===================== -->
       <div class="section-head" id="views">
         <span class="eyebrow">Integrate</span>

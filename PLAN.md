@@ -303,6 +303,25 @@ new report section 7 (text + HTML), new fixture tables
       a result cache or materialized views under the point feeds for large
       sites; ORDS privilege on the module for untrusted networks.
 
+## M14 — Optional Oracle APEX application (done)
+
+- [x] **M14.1 Generator.** `apex/build.py` (stdlib) emits `apex/awrcap_app.sql`,
+      an APEX 26.2 export in the native import API with deterministic ids;
+      one registry maps each CAPR point feed to an `AWRCAP_*` collection and
+      to the CTE every region query starts from.
+- [x] **M14.2 Pages.** Overview (alert counts, alert list, worst days to
+      full, DB size, data freshness), Tablespaces, CPU and workload, Fleet
+      anomalies; global filter bar (database, tablespace, date range, kind,
+      severity) and a Refresh-data button; views loaded once per session.
+- [x] **M14.3 Install.** `apex/install.sql` (workspace, schema, app id
+      arguments, refuses a foreign app id), `apex/workspace.sql` (workspace
+      + ADMIN + viewer accounts, passwords prompted), `apex/publish.sh` (lab),
+      `apex/test/apex_smoke.sql` (every region query inside a scripted APEX
+      session).
+- [ ] **M14.4 Follow-ups.** Collections hold whole views (fine for one
+      database; a results layer per the M18 todo for fleets); multi-select
+      filters; an acknowledgement table once alerts have identity.
+
 ## v2 (unchanged)
 
 - [ ] Memory forecasting (SGA/PGA from `DBA_HIST_MEM_DYNAMIC_COMPONENTS` /
