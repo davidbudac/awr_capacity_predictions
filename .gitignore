@@ -7,3 +7,8 @@ reports/
 bench/env.sh
 bench/results/
 bench/logs/
+
+# grafana/ords lab: installer password and the ORDS config dir (wallet + pool settings)
+grafana/.ords.env
+grafana/ords/config/*
+!grafana/ords/config/.gitkeep

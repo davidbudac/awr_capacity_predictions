@@ -2,7 +2,7 @@
 -- ddl/55_report_views_ml.sql -- CAPR_* report views that need Tier 2 (M8.2).
 -- =====================================================================
 -- The rest of the CAPR_* report layer lives in ddl/45_report_views.sql. These
--- three views are split out ONLY because they read CAPF_COMPARE /
+-- views are split out ONLY because they read CAPF_COMPARE /
 -- CAPF_BACKTEST, which ddl/50_ml.sql creates AFTER 45 -- so install.sql loads
 -- this file last (see its [55] step). Same contract as the others: every
 -- derived number, label and unit conversion is computed here so
@@ -26,6 +26,8 @@
 --   CAPR_BACKTEST       -- section 6c: the M9.4 holdout scorecard pivoted to
 --                          one row per series, incl. the BETTER verdict and
 --                          (M10.4) the ESM model-type pick + its rationale.
+--   CAPR_FORECAST_POINTS -- REGR anchors + the ESM +30 point as chartable
+--                          rows, for grafana/API.md and elk/.
 --
 -- Read-only, like everything else in the suite.
 --
@@ -211,3 +213,91 @@ LEFT   JOIN cap_ml_model p
  AND   p.dbid = f.dbid AND p.con_dbid = f.con_dbid
  AND   p.series_key = f.series_key
 GROUP  BY f.dbid, f.con_dbid, f.series_kind, f.series_key;
+
+-- --------------------------------------------------------------------
+-- CAPR_FORECAST_POINTS -- the projected points to chart after the observed
+-- series (grafana/API.md, elk/export_capacity.sql): the REGR anchors at
+-- horizon 0 (the fitted current value) and +30/+90 (+180/+365 for TBSPC)
+-- with their M9.1 bands, plus the ESM +30 point. ts = last observed day +
+-- horizon. CAPF_COMPARE folds DB CPU into kind CPU under DB_CPU_SEC and
+-- only returns ESM rows trained through the series' last day, so that last
+-- day anchors the ESM target date too.
+-- --------------------------------------------------------------------
+CREATE OR REPLACE VIEW capr_forecast_points AS
+SELECT p.dbid,
+       p.con_dbid,
+       NVL(c.db_pdb, TO_CHAR(p.con_dbid))  AS db,
+       c.db_name,
+       c.con_name,
+       p.ts,
+       p.kind,
+       p.series,
+       p.unit,
+       p.method,
+       p.horizon_days,
+       p.value,
+       p.lo,
+       p.hi,
+       p.limit_value,
+       p.pct,
+       p.quality
+FROM  (
+        SELECT t.dbid, t.con_dbid, t.last_day + h.h AS ts, 'TBSPC' AS kind,
+               t.tablespace_name AS series, 'bytes' AS unit, 'REGR' AS method,
+               h.h AS horizon_days, h.val AS value, h.lo, h.hi,
+               t.limit_bytes AS limit_value,
+               ROUND(100 * h.val / NULLIF(t.limit_bytes, 0), 2) AS pct, t.quality
+        FROM   capf_tbspc_forecast t
+        CROSS  APPLY (SELECT 0 AS h, t.cur_used AS val, CAST(NULL AS NUMBER) AS lo, CAST(NULL AS NUMBER) AS hi FROM dual UNION ALL
+                      SELECT 30,  t.proj_30_bytes,  t.proj_30_lo,  t.proj_30_hi  FROM dual UNION ALL
+                      SELECT 90,  t.proj_90_bytes,  t.proj_90_lo,  t.proj_90_hi  FROM dual UNION ALL
+                      SELECT 180, t.proj_180_bytes, t.proj_180_lo, t.proj_180_hi FROM dual UNION ALL
+                      SELECT 365, t.proj_365_bytes, t.proj_365_lo, t.proj_365_hi FROM dual) h
+        WHERE  t.quality <> 'INSUFFICIENT_HISTORY'
+          AND  h.val IS NOT NULL
+        UNION ALL
+        SELECT t.dbid, t.con_dbid, t.last_day + h.h, 'CPU',
+               t.metric, CASE t.metric WHEN 'DB_CPU_SEC' THEN 'sec' ELSE 'pct' END, 'REGR',
+               h.h, h.val, h.lo, h.hi,
+               CASE WHEN t.metric <> 'DB_CPU_SEC' THEN 100 END,
+               CASE WHEN t.metric <> 'DB_CPU_SEC' THEN h.val END, t.quality
+        FROM   capf_cpu_trend t
+        CROSS  APPLY (SELECT 0 AS h, t.cur_val AS val, CAST(NULL AS NUMBER) AS lo, CAST(NULL AS NUMBER) AS hi FROM dual UNION ALL
+                      SELECT 30, t.proj_30, t.proj_30_lo, t.proj_30_hi FROM dual UNION ALL
+                      SELECT 90, t.proj_90, t.proj_90_lo, t.proj_90_hi FROM dual) h
+        WHERE  t.quality <> 'INSUFFICIENT_HISTORY'
+          AND  h.val IS NOT NULL
+        UNION ALL
+        SELECT t.dbid, t.con_dbid, t.last_day + h.h, 'SERIES',
+               t.series, LOWER(t.unit), 'REGR',
+               h.h, h.val, h.lo, h.hi,
+               t.cur_limit, ROUND(100 * h.val / NULLIF(t.cur_limit, 0), 2), t.quality
+        FROM   capf_series_forecast t
+        CROSS  APPLY (SELECT 0 AS h, t.cur_val AS val, CAST(NULL AS NUMBER) AS lo, CAST(NULL AS NUMBER) AS hi FROM dual UNION ALL
+                      SELECT 30, t.proj_30, t.proj_30_lo, t.proj_30_hi FROM dual UNION ALL
+                      SELECT 90, t.proj_90, t.proj_90_lo, t.proj_90_hi FROM dual) h
+        WHERE  t.quality <> 'INSUFFICIENT_HISTORY'
+          AND  h.val IS NOT NULL
+        UNION ALL
+        SELECT t.dbid, t.con_dbid, f.last_day + t.horizon_days, t.series_kind,
+               t.series_key,
+               CASE WHEN t.series_kind = 'TBSPC' THEN 'bytes'
+                    WHEN t.series_key = 'DB_CPU_SEC' THEN 'sec' ELSE 'pct' END,
+               'ESM',
+               t.horizon_days, t.value, t.lower_bound, t.upper_bound,
+               f.limit_val, ROUND(100 * t.value / NULLIF(f.limit_val, 0), 2), f.quality
+        FROM   capf_compare t
+        JOIN  (SELECT dbid, con_dbid, 'TBSPC' AS series_kind, tablespace_name AS series_key,
+                      last_day, limit_bytes AS limit_val, quality
+               FROM   capf_tbspc_forecast
+               UNION ALL
+               SELECT dbid, con_dbid, 'CPU', metric, last_day,
+                      CASE WHEN metric <> 'DB_CPU_SEC' THEN 100 END, quality
+               FROM   capf_cpu_trend) f
+          ON   f.dbid = t.dbid AND f.con_dbid = t.con_dbid
+         AND   f.series_kind = t.series_kind AND f.series_key = t.series_key
+        WHERE  t.engine = 'ESM'
+          AND  t.value IS NOT NULL
+      ) p
+LEFT   JOIN capr_container c
+  ON   c.dbid = p.dbid AND c.con_dbid = p.con_dbid;

@@ -727,6 +727,55 @@ BEGIN
             fail('M10.3/M10.5 block raised ' || SQLERRM);
     END;
 
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('=== CAPR point feeds (grafana/API.md, elk/) ===');
+        SELECT COUNT(*) INTO v_n   FROM capr_series_points WHERE kind = 'TBSPC';
+        SELECT COUNT(*) INTO v_num FROM capd_tbspc_daily;
+        chk_int('CAPR_SERIES_POINTS TBSPC rows = CAPD_TBSPC_DAILY', v_n, v_num);
+        SELECT COUNT(*) INTO v_n   FROM capr_series_points WHERE kind = 'SERIES';
+        SELECT COUNT(*) INTO v_num FROM capd_series_daily;
+        chk_int('CAPR_SERIES_POINTS SERIES rows = CAPD_SERIES_DAILY', v_n, v_num);
+        SELECT COUNT(*) INTO v_n   FROM capr_series_points WHERE kind = 'CPU' AND series = 'BUSY_PCT';
+        SELECT COUNT(*) INTO v_num FROM capd_cpu_daily WHERE busy_pct IS NOT NULL;
+        chk_int('CAPR_SERIES_POINTS BUSY_PCT rows = CAPD_CPU_DAILY', v_n, v_num);
+        SELECT COUNT(*) INTO v_n   FROM capr_series_points WHERE kind = 'TBSPC' AND anomaly = 1;
+        SELECT COUNT(*) INTO v_num FROM capa_tbspc_anom WHERE anomaly_flag IN ('HIGH', 'LOW');
+        chk_int('CAPR_SERIES_POINTS anomaly=1 on every flagged TBSPC day', v_n, v_num);
+        SELECT COUNT(*) INTO v_n FROM capr_series_points
+          WHERE kind = 'CPU' AND series <> 'BUSY_PCT' AND anomaly IS NOT NULL;
+        chk_int('CPU anomaly is scored on BUSY_PCT only', v_n, 0);
+
+        SELECT COUNT(*) INTO v_n FROM capr_fit;
+        SELECT (SELECT COUNT(*) FROM capf_tbspc_forecast) + (SELECT COUNT(*) FROM capf_cpu_trend)
+               + (SELECT COUNT(*) FROM capf_series_forecast) INTO v_num FROM dual;
+        chk_int('CAPR_FIT one row per fitted series', v_n, v_num);
+        SELECT COUNT(*) INTO v_n FROM capr_fit f JOIN capr_series r
+            ON r.dbid = f.dbid AND r.con_dbid = f.con_dbid AND r.series = f.series
+          WHERE f.kind = 'SERIES' AND f.sev <> NVL(UPPER(r.sev), 'OK');
+        chk_int('CAPR_FIT SERIES sev matches CAPR_SERIES', v_n, 0);
+
+        SELECT COUNT(*) INTO v_n FROM capr_forecast_points p JOIN capf_tbspc_forecast t
+            ON t.dbid = p.dbid AND t.con_dbid = p.con_dbid AND t.tablespace_name = p.series
+          WHERE p.kind = 'TBSPC' AND p.method = 'REGR' AND p.ts <> t.last_day + p.horizon_days;
+        chk_int('CAPR_FORECAST_POINTS ts = last_day + horizon', v_n, 0);
+        SELECT COUNT(*) INTO v_n FROM capr_forecast_points
+          WHERE method = 'REGR' AND horizon_days = 0 AND quality = 'INSUFFICIENT_HISTORY';
+        chk_int('CAPR_FORECAST_POINTS skips INSUFFICIENT_HISTORY', v_n, 0);
+
+        SELECT COUNT(*) INTO v_n   FROM capr_anomalies WHERE anomaly_kind = 'TBSPC_GROWTH';
+        SELECT COUNT(*) INTO v_num FROM capa_tbspc_anom WHERE anomaly_flag IN ('HIGH', 'LOW');
+        chk_int('CAPR_ANOMALIES one TBSPC_GROWTH row per flagged day', v_n, v_num);
+        SELECT COUNT(*) INTO v_n FROM capr_anomalies a JOIN capa_cpu_shift s
+            ON s.dbid = a.dbid AND s.con_dbid = a.con_dbid AND s.metric = a.series
+          WHERE a.anomaly_kind = 'CPU_SHIFT'
+            AND a.ts = s.last_day - s.recent_days + 1 AND a.obs_day = s.last_day
+            AND a.sev = 'WARN' AND a.db = 'FIXCDB/FIXPDB1';
+        chk_int('CPU_SHIFT dated at the start of its recent window, obs_day = last_day', v_n, 1);
+    EXCEPTION
+        WHEN OTHERS THEN
+            fail('CAPR point-feed block raised ' || SQLERRM);
+    END;
+
     DBMS_OUTPUT.PUT_LINE('----------------------------------------');
     DBMS_OUTPUT.PUT_LINE('RESULT: ' || g_pass || ' passed, ' || g_fail || ' failed');
     IF g_fail > 0 THEN
