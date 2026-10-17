@@ -302,6 +302,61 @@
         different: one bounds what pages you, the other bounds what you read.</p>
       </div>
 
+      <!-- ===================== KIBANA ===================== -->
+      <div class="section-head" id="kibana">
+        <span class="eyebrow">Integrate · optional</span>
+        <h2>Kibana dashboards (ELK)</h2>
+        <p>If you already run an Elastic stack, <span class="inline">elk/</span> ships the same
+          analytics the reports print into one index and installs three Lens dashboards. It is
+          entirely optional and lives outside <span class="inline">install.sql</span>.</p>
+      </div>
+
+      <p>The path is the one the rest of your Oracle telemetry already takes: a script on the
+        database host writes NDJSON, Filebeat tails it, Logstash indexes it. Nothing on the database
+        host talks to Elasticsearch, and nothing writes to Oracle.</p>
+
+      <div class="tablewrap">
+        <table>
+          <caption>What ships, one record type per row</caption>
+          <thead><tr><th scope="col">Record</th><th scope="col">One per</th><th scope="col">Drawn as</th></tr></thead>
+          <tbody>
+            <tr><td><span class="k">observation</span></td><td class="def">container × series × day, with <code>cap.anomaly = true</code> on days the <span class="inline">CAPA_</span> layer flagged</td><td class="def">the observed line; flagged days as a red bar under it</td></tr>
+            <tr><td><span class="k">forecast</span></td><td class="def">container × series × method × horizon (REGR anchors, the ESM +30 point) with its band</td><td class="def">the line to the right of today, plus low/high</td></tr>
+            <tr><td><span class="k">fit</span></td><td class="def">container × series × export day: slope, R², quality, days to full/limit/saturation, severity</td><td class="def">the days-to-full and trend tables, colour-coded</td></tr>
+            <tr><td><span class="k">anomaly</span></td><td class="def">flagged event: growth outlier, CPU outlier, DB CPU level shift, with a one-line explanation</td><td class="def">the fleet anomaly board and per-board anomaly tables</td></tr>
+            <tr><td><span class="k">alert</span></td><td class="def"><span class="inline">CAPR_ALERTS</span> row × export day</td><td class="def">a compact alerts table on every board</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>Three dashboards: <b>Tablespaces</b> (days to full, observed + forecast + band, daily growth,
+        growth anomalies), <b>CPU and workload series</b> (host CPU against the saturation line, DB CPU
+        level shifts, sessions / processes / DB size / redo against their limits) and
+        <b>Fleet anomalies</b>, which shows only anomalies across every database, newest first, and
+        drills into the other two.</p>
+
+      <figure class="figure">
+        <img src="assets/kibana-fleet-anomalies.png" alt="The fleet anomalies dashboard: anomaly counts per day by kind, a database-by-day heatmap, and the newest anomalies with their explanations" loading="lazy">
+        <figcaption>The fleet anomalies board over the two demo databases.</figcaption>
+      </figure>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__dots"><i></i><i></i><i></i></span>
+          <span class="term__title">shell</span><span class="term__tag in">install</span></div>
+<pre><span class="c-cmt"># stack side, once (index template, data view, dashboards)</span>
+<span class="c-prompt">$</span> elk/setup.sh
+<span class="c-prompt">$</span> cp elk/logstash/oracle_capacity.conf &lt;logstash pipeline dir&gt;/   <span class="c-cmt"># beside the Oracle pipeline</span>
+
+<span class="c-cmt"># database host, as the Oracle owner, with Filebeat deployed</span>
+<span class="c-prompt">$</span> cp elk/filebeat/awrcap.yml /u01/app/oracle/filebeat/inputs.d/
+<span class="c-prompt">$</span> elk/export.sh --sid cdb1          <span class="c-cmt"># daily; validates against the mapping, appends NDJSON</span></pre>
+      </div>
+
+      <p>Documents carry deterministic ids, so a re-export overwrites rather than duplicates. The
+        index mapping is strict and the exporter checks every document against it before Filebeat
+        sees it. Everything else, including how to add a field or regenerate a dashboard, is in
+        <a href="https://github.com/davidbudac/awr_capacity_predictions/blob/main/elk/README.md">elk/README.md</a>.</p>
+
       <!-- ===================== DASHBOARDS ===================== -->
       <div class="section-head" id="views">
         <span class="eyebrow">Integrate</span>

@@ -280,11 +280,27 @@ SELECT severity, kind, db_pdb, message FROM capr_alerts ORDER BY sev_rank;
 Both reports' at-a-glance blocks are built from the same view, so what pages
 you and what the report says can never disagree.
 
-**Kibana.** `elk/` ships the same analytics (daily observations, forecasts,
-fits, anomalies, alerts) into Elasticsearch and installs three Lens
-dashboards: tablespaces, CPU and workload series, and a fleet-wide anomaly
-board. Anomalies are drawn in red on every chart. See
-[`elk/README.md`](elk/README.md).
+## Optional: Kibana dashboards (ELK)
+
+If you already run an Elastic stack, `elk/` ships the same analytics the
+reports print (daily observations, forecasts, fits, anomalies, alerts) into
+one index and installs three Lens dashboards: **Tablespaces**, **CPU and
+workload series**, and a fleet-wide **Fleet anomalies** board. Anomalies are
+drawn in red on every chart; `CAPR_ALERTS` rows appear as a table on each.
+
+```
+DB host:  elk/export.sh  ->  NDJSON  ->  Filebeat  ->  Logstash  ->  awrcap-capacity  ->  Kibana
+```
+
+Nothing on the database host talks to Elasticsearch and nothing writes to
+Oracle. Stack side, run `elk/setup.sh` once and drop
+`elk/logstash/oracle_capacity.conf` beside your Oracle pipeline; on the
+database host, add `elk/filebeat/awrcap.yml` to Filebeat's `inputs.d/` and
+run `elk/export.sh --sid <sid>` daily. Documents carry deterministic ids, so
+re-exports overwrite. Details, record shapes and limits:
+[`elk/README.md`](elk/README.md); a walkthrough with a screenshot is on the
+[Usage](https://davidbudac.github.io/awr_capacity_predictions/usage.html#kibana)
+page.
 
 ## Preflight & scheduler jobs
 

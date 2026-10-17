@@ -266,6 +266,25 @@ new report section 7 (text + HTML), new fixture tables
       overrides + exclusions applied). Fixture asserts the identity against a
       re-derived sum plus a positive, fittable slope.
 
+## M12 — Optional ELK / Kibana path (done)
+
+- [x] **M12.1 Export.** `elk/export_capacity.sql` emits one JSON document per
+      line (observation / forecast / fit / anomaly / alert) from the CAPD_/
+      CAPF_/CAPA_/CAPR_ views; `elk/export.sh` runs it on the DB host and
+      validates every document against the strict mapping in
+      `elk/elasticsearch/index-template.json` before Filebeat sees it.
+- [x] **M12.2 Transport.** Filebeat input (`elk/filebeat/awrcap.yml`) and a
+      Logstash branch (`elk/logstash/oracle_capacity.conf`) loaded beside
+      `elk_db_automation`'s Oracle pipeline; deterministic `_id`s so a
+      re-export overwrites. No Elasticsearch access from the DB host.
+- [x] **M12.3 Dashboards.** Three generated Lens dashboards
+      (`elk/kibana/build_*.py`, imported by `elk/setup.sh`): tablespaces,
+      CPU + workload series, fleet anomalies. Anomalies as red bars/markers
+      on every chart; alerts as a table on every board.
+- [ ] **M12.4 Scheduling.** A daily `export.sh` run (cron or an external
+      DBMS_SCHEDULER job) is still a manual step; so is keeping Filebeat up
+      across reboots (by `elk_db_automation` design).
+
 ## v2 (unchanged)
 
 - [ ] Memory forecasting (SGA/PGA from `DBA_HIST_MEM_DYNAMIC_COMPONENTS` /
