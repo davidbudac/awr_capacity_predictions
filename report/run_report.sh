@@ -4,9 +4,11 @@
 # =====================================================================
 # Runs report/report.sql (always), plus report/report_html.sql (--html) and
 # report/report_csv.sql (--csv), from the repo root so the @@ includes
-# resolve, and checks each output: the script exits non-zero when a spool is
-# missing or contains an ORA- or SP2- line. Prints the path of every file it
-# wrote. Read-only against the database, like the drivers.
+# resolve, and checks each run: the script exits non-zero when sqlplus exits
+# non-zero (a failed --container / --schema ALTER SESSION aborts the session),
+# when the session output has any ORA- or SP2- line, or when a spool is
+# missing or contains one. Prints the path of every file it wrote.
+# Read-only against the database, like the drivers.
 #
 # Usage:
 #   report/run_report.sh [connect] [--html] [--csv] [--scope dbid[:con_dbid]]
@@ -57,7 +59,7 @@ while [ $# -gt 0 ]; do
                      case "$1" in *:*) scon="${1#*:}" ;; esac ;;
         --container) shift; container="${1:-}" ;;
         --schema)    shift; schema="${1:-}" ;;
-        -h|--help)   sed -n '2,32p' "$0"; exit 0 ;;
+        -h|--help)   sed -n '2,34p' "$0"; exit 0 ;;
         *)           echo "run_report.sh: unknown argument '$1'" >&2; exit 2 ;;
     esac
     shift
@@ -89,9 +91,23 @@ run_driver() {
     label="$1"; marker="$2"; call="$3"
     sqlplus -S -L "$conn" > "$log" 2>&1 <<SQL
 WHENEVER OSERROR EXIT 9
+WHENEVER SQLERROR EXIT FAILURE
 ${pre}${call}
 EXIT
 SQL
+    st=$?
+    if [ $st -ne 0 ]; then
+        echo "FAIL $label: sqlplus exit $st (sqlplus said:)" >&2
+        grep -E '(ORA|SP2)-[0-9]{4,5}' "$log" | head -5 >&2
+        rc=1
+        return
+    fi
+    if grep -q -E '(ORA|SP2)-[0-9]{4,5}' "$log"; then
+        echo "FAIL $label: session output contains errors:" >&2
+        grep -E '(ORA|SP2)-[0-9]{4,5}' "$log" | head -5 >&2
+        rc=1
+        return
+    fi
     out="$(sed -n "s/^${marker} *//p" "$log" | tail -1)"
     if [ -z "$out" ] || [ ! -e "$out" ]; then
         echo "FAIL $label: no output file (sqlplus said:)" >&2

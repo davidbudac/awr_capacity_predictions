@@ -11,7 +11,8 @@
 #   --sql FILE    run extra SQL*Plus script(s) after the tests, same session
 #                 settings (handy for ad-hoc probes against the fixture)
 #
-# test/lint_anom_joins.sh runs first and a violation stops the run (exit 4).
+# test/lint_anom_joins.sh and test/run_report_sh_test.sh run first and a
+# failure of either stops the run (exit 4).
 # Exit status is the SQL*Plus exit status of the last failing step; the log is
 # left in /tmp/dbmint_harness_<SCHEMA>.log and the RESULT / FAIL / ORA- lines
 # are echoed at the end. One schema per concurrent run (see CLAUDE.md).
@@ -33,6 +34,8 @@ LOG=/tmp/dbmint_harness_${SCHEMA}.log
 
 LINT_OUT=$("$HERE"/test/lint_anom_joins.sh) || { echo "$LINT_OUT"; echo "lint failed: not syncing"; exit 4; }
 echo "$LINT_OUT"
+SH_OUT=$("$HERE"/test/run_report_sh_test.sh) || { echo "$SH_OUT"; echo "run_report.sh test failed: not syncing"; exit 4; }
+echo "$SH_OUT"
 
 rsync -az --delete -e 'ssh -p 2200' \
   --exclude .git --exclude .claude --exclude reports --exclude '__pycache__' \
