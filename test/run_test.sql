@@ -3437,10 +3437,10 @@ BEGIN
 
     -- suite_version: stamped by every install, BAD when older than this release.
     SELECT suite_version INTO v_num FROM cap_cfg;
-    chk_int('suite_version = 21', v_num, 21);
-    UPDATE cap_config SET cfg_value = 20 WHERE cfg_name = 'suite_version';
+    chk_int('suite_version = 22', v_num, 22);
+    UPDATE cap_config SET cfg_value = 21 WHERE cfg_name = 'suite_version';
     SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'suite_version';
-    chk_str('CAP_CFG_CHECK suite_version=20 < 21', v_str, 'BAD');
+    chk_str('CAP_CFG_CHECK suite_version=21 < 22', v_str, 'BAD');
     UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'suite_version';
     COMMIT;
 

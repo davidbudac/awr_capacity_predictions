@@ -521,8 +521,7 @@ fixture harness and both reports.
       `test/docs_lint.sh` checks the knob table, the object index and the
       alert kinds against the DDL, and rejects assertion counts and
       "generated" claims. (branch rf/u10-docs)
-- [ ] **M21.5 Follow-ups.** `suite_version` is 16 while the latest milestone
-      is M21 (bump it with its `CAP_CFG_CHECK` rule). Tier 2 still trains on
+- [ ] **M21.5 Follow-ups.** (`suite_version` bumped to 22 by M22.) Tier 2 still trains on
       incomplete days (`is_complete` not applied in ml/ or `CAPF_ESM_HEALTH`).
       Done since: `CAPF_BACKTEST` CPU rows use complete days only and anchor at
       the median of the last `shift_days` training days like the live fit
@@ -550,6 +549,19 @@ fixture harness and both reports.
       the instance). Fixture: `run_test.sql` adds a two-instance dbid
       (43434343, snapshot + resource-limit rows only) for one block and
       deletes it again, so no other assertion sees it.
+- [x] **M22 Review fixes (2026-10 implementation review).** Five findings,
+      one phase each, merged on `fix/review-2026-10`: `report/run_report.sh`
+      fails on a non-zero SQL*Plus exit or any ORA- / SP2- line
+      (`test/run_report_sh_test.sh`, run by the harness); `CAPA_CPU_SHIFT`
+      drops incomplete days and carries `newest_day` / `is_current`, so a
+      stopped series no longer holds a CPU_SHIFT alert open; `CAPF_BACKTEST`
+      CPU rows use production's inputs (M21.5); `cap_results.refresh` takes
+      its serialising lock before allocating `run_id` (M10 results layer);
+      RAC worst-instance percent for `PROCESSES` / `SESSIONS` (M21.6).
+      `suite_version` 22. Left: a CPU series that really stops in the fixture
+      (the stale `is_current = 'N'` case is tested by flipping `stale_days`),
+      a live two-session proof of the `refresh` lock, a permanent RAC fixture
+      dbid.
 
 ## v2 (unchanged)
 
