@@ -372,7 +372,10 @@ LEFT   JOIN capr_container c
 --              Every forecast kind needs is_current = 'Y'; per-tablespace
 --              thresholds come from CAP_TBSPC_OVERRIDE.
 --              CPU_SHIFT (M10.3) a flagged sustained level shift, UP = WARN,
---              DOWN = INFO; capa_cpu_shift holds only the current state.
+--              DOWN = INFO; capa_cpu_shift holds only the current state. Like
+--              the forecast kinds it needs is_current = 'Y': a shift whose
+--              series stopped (stale_days behind its dbid's newest day, e.g. a
+--              dropped PDB) is no alert, so it leaves every poller too.
 --              DATA_STALE   the dbid's newest AWR snapshot is stale_hours or
 --              more old (CAPR_FRESHNESS, the one SYSDATE test), WARN. A dbid
 --              data_stale_max_days or more old is retired: no alert, it shows
@@ -404,8 +407,10 @@ LEFT   JOIN capr_container c
 --                     (value <= it: the countdowns), GE (value >= it: levels,
 --                     HIGH anomalies, DATA_STALE, MODEL_HEALTH), ABS
 --                     (|value| > it: CPU_SHIFT); a LOW anomaly is LE
---   is_current        'Y' on every row today: forecast kinds require it,
---                     the others are dated events or current states
+--   is_current        'Y' on every row: a forecast kind or CPU_SHIFT whose
+--                     series stopped (see stale_days) is no alert, and every
+--                     other kind is a dated event or current state. Kept for
+--                     the column contract; cap_results merges 'Y' rows.
 --   baseline_mode     the anomaly kinds' mode, NULL for every other kind
 --   alert_key         dbid|con_dbid|kind|series_key|YYYY-MM-DD|mode ('-' when
 --                     none): unique per ROW, so it changes with day_dt
@@ -464,10 +469,11 @@ WITH alerts AS (
                NULL,
                'ABS',
                s.threshold_pct,
-               'Y',
+               s.is_current,
                NULL, NULL, NULL
         FROM   capa_cpu_shift s
         WHERE  s.shift_flag IS NOT NULL
+        AND    s.is_current = 'Y'
         UNION ALL
         -- ---- DATA_STALE: the dead-man check. A stalled AWR otherwise reads
         -- as "no alerts" because every other test compares data with data.

@@ -170,8 +170,10 @@ Read-only: the report only SELECTs; it creates/modifies no database object.
 view (every column, every row in the scope) into
 `reports/cap_csv_<db>_<ts>/`. For cron, `report/run_report.sh [connect]
 [--html] [--csv] [--scope D[:C]] [--snapshot] [--keep N] [--container PDB]
-[--schema OWNER]` runs the drivers from the repo root and exits non-zero when a
-spool is missing or holds an ORA- or SP2- line.
+[--schema OWNER]` runs the drivers from the repo root and exits non-zero when
+sqlplus exits non-zero (a failed `--container` / `--schema` aborts the run),
+when the session output has an ORA- or SP2- line, or when a spool is missing or
+holds one.
 
 ### Drill-down
 
@@ -396,12 +398,12 @@ others), a per-row `alert_key`, a `state_key` that stays the same across days
 | `CPU_SAT` / `DBCPU_SAT` | host busy% (p95 by default) / DB CPU% is forecast to reach `cpu_sat_pct` inside `dtf_warn` |
 | `CPU_HOT` / `DBCPU_HOT` | the recent p95 median is already at or above `cpu_sat_pct`, any fit quality |
 | `CPU_SHIFT` | a sustained level shift of a CPU series (UP = WARN, DOWN = INFO) |
-| `SERIES_LIMIT` / `SERIES_NEARLIMIT` | a fixed-ceiling series is forecast to reach / is near `series_sat_pct` of its limit |
+| `SERIES_LIMIT` / `SERIES_NEARLIMIT` | a fixed-ceiling series is forecast to reach / is near `series_sat_pct` of its limit (RAC `PROCESSES` / `SESSIONS`: also when one instance is near its own limit) |
 | `TBSPC_ANOM`, `CPU_ANOM`, `DBCPU_ANOM`, `SERIES_ANOM` | anomaly episodes in the last `anomaly_report_days`, for the modes the `alert_modes_*` bitmask enables |
 | `DATA_STALE` | a dbid's newest AWR snapshot is at least `stale_hours` old (the dead-man check) |
 | `MODEL_HEALTH` | a Tier 2 model failed its last build or is stale |
 
-Forecast kinds need a current series (`is_current = 'Y'`); `CAPR_SEVERITY`
+Forecast kinds and `CPU_SHIFT` need a current series (`is_current = 'Y'`); `CAPR_SEVERITY`
 computes their severity once, so the report, the fit feed and the alerts
 agree. Consecutive flagged days of one series and mode collapse into one
 episode row (`first_day`, `n_days`, `max_z`), and a per-day CPU anomaly
@@ -686,7 +688,8 @@ suite depends on it.
   `max_interval_hours` / `gap_flag` / `day_gap` mark it, `busy_p95` /
   `busy_max` / `busy_peak_pct` (and the `db_cpu_*` twins) ignore intervals
   longer than `cpu_gap_hours`, and neither `CAPA_ANOM` (in any mode) nor
-  `CAPA_CPU_SHIFT` scores a gap day or lets it into a baseline. The hour grain
+  `CAPA_CPU_SHIFT` scores a gap day or lets it into a baseline (it also skips
+  incomplete days, like the CPU fit). The hour grain
   applies a tighter rule (`hour_gap_ratio`), and `REDO_GB_DAY` reuses
   `cpu_gap_hours`. A `DB_SIZE_GB` day whose tablespace set changed (one was
   added or dropped) is a gap day too: its move measures membership, not

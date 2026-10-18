@@ -91,8 +91,9 @@ path), `doctor.sql` (preflight), `install_jobs.sql` / `uninstall_jobs.sql`
 (DBMS_SCHEDULER, all created disabled: CAP_REFRESH_JOB 01:30,
 CAP_ML_RETRAIN daily 02:00, CAP_REPORT_SPOOL_JOB 03:00),
 `report/report_csv.sql` (one CSV per CAPR section view), `report/run_report.sh`
-(cron wrapper: text / --html / --csv, --scope, --snapshot, non-zero exit on
-ORA-/SP2-), `report/drill_tbspc.sql` / `report/drill_cpu.sql`
+(cron wrapper: text / --html / --csv, --scope, --snapshot, non-zero exit on a
+non-zero sqlplus exit or any ORA-/SP2-; `test/run_report_sh_test.sh` is its
+mock-sqlplus test, no DB needed), `report/drill_tbspc.sql` / `report/drill_cpu.sql`
 (single-series drill-down; drill_tbspc prints "who is filling it" from
 CAPR_SEGMENT_GROWTH). Both report drivers take `[top_n] [anomaly_days]
 [show_esm] [dbid] [con_dbid] [LIVE|SNAPSHOT]`, `-` skips one.
@@ -253,7 +254,7 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
   on `con_dbid`, not just `dbid`. The root's OSSTAT is **NUM_CPUS 8 /
   NUM_CPU_CORES 4** (SMT 2:1), so `db_cpu_pct` closed forms divide by 8
   logical CPUs.
-- **Fixture partial day:** one weekday in 14..20 days back restarts at noon
+- **Fixture partial day:** one weekday at fixture index 14..20 (about 100 days back, far outside the 35-day shift windows) restarts at noon
   and keeps only its 06:00 interval: `covered_sec` 43200, `is_complete = 'N'`
   (below `complete_day_pct` 80). CPU and REDO fits read complete days only.
 - **Other fixture series** (closed forms in run_test.sql): `FIX_CYCLIC` /
@@ -297,7 +298,7 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
   bands = the OLS half-widths around that anchor, so +30 and days_to_full
   agree. TBSPC days_to_full / _lo / _hi clamp at 0 and `limit_below_used`
   flags a ceiling under usage. Every CAPF view carries `newest_day` /
-  `is_current` (`stale_days` 3); forecast alert kinds need `is_current = 'Y'`.
+  `is_current` (`stale_days` 3); forecast alert kinds and `CPU_SHIFT` need `is_current = 'Y'` (`CAPA_CPU_SHIFT` carries `newest_day` / `is_current` per dbid and reads complete, non-gap days only).
 - **CYCLIC:** `cyclic_min_cliffs` (2) or more M9.3 shrink cliffs in the
   training window grade a tablespace CYCLIC instead of resetting; it is judged
   on its per-cycle peaks (`cycle_peak_pct`, `peak_slope_bpd`), and TBSPC_FULL

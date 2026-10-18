@@ -1308,6 +1308,88 @@ BEGIN
         chk_int('CAPR_SERIES resolves db_pdb', v_n, 0);
     END;
 
+    -- RAC worst instance (PROCESSES / SESSIONS). The main fixture is one
+    -- instance, so a second dbid with TWO instances is added to the snapshot
+    -- and resource-limit fixture tables for this block only and DELETEd at its
+    -- end (no commit in between, nothing else sees it). Per instance and day,
+    -- limit 1000 each: SESSIONS inst 1 at 10, inst 2 at 990 (fleet 50%,
+    -- worst instance 99% on instance 2); PROCESSES inst 1 at 600, inst 2 at
+    -- 400 (fleet 50%, worst 60%, instance 1).
+    DECLARE
+        c_rac   CONSTANT NUMBER := 43434343;
+        d_last  DATE := meta_d('LAST_DAY');
+        v_inst  NUMBER;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('=== RAC worst instance (two-instance dbid) ===');
+        FOR k IN 0 .. 2 LOOP
+            FOR i IN 1 .. 2 LOOP
+                INSERT INTO cap_fixture_snapshot
+                VALUES (c_rac, c_rac, i, 9000000 + k,
+                        CAST(d_last - 2 + k + 17 / 24 AS TIMESTAMP),
+                        CAST(d_last - 2 + k + 18 / 24 AS TIMESTAMP),
+                        CAST(d_last - 40 AS TIMESTAMP));
+                INSERT INTO cap_fixture_resource_limit
+                VALUES (c_rac, c_rac, i, 9000000 + k, 'sessions',
+                        DECODE(i, 1, 8, 980), DECODE(i, 1, 10, 990), 1000);
+                INSERT INTO cap_fixture_resource_limit
+                VALUES (c_rac, c_rac, i, 9000000 + k, 'processes',
+                        DECODE(i, 1, 500, 300), DECODE(i, 1, 600, 400), 1000);
+            END LOOP;
+        END LOOP;
+
+        SELECT value, limit_value, worst_inst_pct, worst_inst INTO v_num, v_num2, v_num3, v_inst
+          FROM capd_series_daily
+         WHERE dbid = c_rac AND series = 'SESSIONS' AND day_dt = d_last;
+        chk_int('RAC SESSIONS fleet value (10 + 990)',         v_num,  1000);
+        chk_int('RAC SESSIONS fleet limit (1000 + 1000)',      v_num2, 2000);
+        chk_close('RAC SESSIONS daily worst_inst_pct',         v_num3, 99, 0.000001);
+        chk_int('RAC SESSIONS daily worst_inst',               v_inst, 2);
+        SELECT pct_of_limit, worst_inst_pct, worst_inst INTO v_num, v_num2, v_inst
+          FROM capf_series_forecast WHERE dbid = c_rac AND series = 'SESSIONS';
+        chk_close('RAC SESSIONS pct_of_limit stays the fleet 50', v_num,  50, 0.000001);
+        chk_close('RAC SESSIONS forecast worst_inst_pct',         v_num2, 99, 0.000001);
+        chk_int('RAC SESSIONS forecast worst_inst',               v_inst, 2);
+        SELECT worst_inst_pct, worst_inst INTO v_num, v_inst
+          FROM capf_series_forecast WHERE dbid = c_rac AND series = 'PROCESSES';
+        chk_close('RAC PROCESSES worst_inst_pct', v_num, 60, 0.000001);
+        chk_int('RAC PROCESSES worst_inst',       v_inst, 1);
+
+        SELECT sev, value, SUBSTR(sev_reason, 1, 14), message
+          INTO v_str, v_num, v_str2, v_msg
+          FROM capr_severity
+         WHERE dbid = c_rac AND kind = 'SERIES_NEARLIMIT' AND series_key = 'SESSIONS';
+        chk_str  ('RAC SESSIONS SERIES_NEARLIMIT sev (node at 99, fleet 50)', v_str, 'CRIT');
+        chk_close('RAC SESSIONS SERIES_NEARLIMIT value = worst instance pct', v_num, 99, 0.000001);
+        chk_str  ('RAC SESSIONS sev_reason names worst_inst_pct', v_str2, 'worst_inst_pct');
+        chk_true ('RAC SESSIONS message names instance 2 (got ' || SUBSTR(v_msg, 1, 90) || ')',
+                  INSTR(v_msg, 'SESSIONS on instance 2 is at 99.0% of its own limit') = 1);
+        SELECT sev INTO v_str FROM capr_severity
+         WHERE dbid = c_rac AND kind = 'SERIES_NEARLIMIT' AND series_key = 'PROCESSES';
+        chk_str('RAC PROCESSES SERIES_NEARLIMIT sev (worst 60, fleet 50)', v_str, 'OK');
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+         WHERE dbid = c_rac AND kind = 'SERIES_NEARLIMIT' AND series_key = 'SESSIONS'
+           AND severity = 'CRIT';
+        chk_int('RAC SESSIONS raises one SERIES_NEARLIMIT CRIT alert', v_n, 1);
+        SELECT COUNT(*) INTO v_n FROM capr_series
+         WHERE dbid = c_rac AND series = 'SESSIONS' AND sev = 'CRIT' AND worst_inst_pct = 99;
+        chk_int('CAPR_SERIES SESSIONS CRIT with worst_inst_pct 99', v_n, 1);
+
+        -- Single instance: the worst instance IS the fleet (the main fixture).
+        SELECT COUNT(*) INTO v_n FROM capf_series_forecast
+         WHERE dbid = v_dbid AND series IN ('SESSIONS', 'PROCESSES')
+           AND worst_inst = 1 AND worst_inst_pct = pct_of_limit;
+        chk_int('single instance: worst_inst_pct = pct_of_limit, instance 1', v_n, 2);
+        SELECT COUNT(*) INTO v_n FROM capf_series_forecast
+         WHERE dbid = v_dbid AND series NOT IN ('SESSIONS', 'PROCESSES')
+           AND (worst_inst_pct IS NOT NULL OR worst_inst IS NOT NULL);
+        chk_int('worst instance is NULL off PROCESSES / SESSIONS', v_n, 0);
+
+        DELETE FROM cap_fixture_resource_limit WHERE dbid = c_rac;
+        DELETE FROM cap_fixture_snapshot       WHERE dbid = c_rac;
+        SELECT COUNT(*) INTO v_n FROM capf_series_forecast WHERE dbid = c_rac;
+        chk_int('RAC fixture rows removed again', v_n, 0);
+    END;
+
     -- Seam extensions: CAPV_PARAMETER and the cpu_count ceiling, FRA days on
     -- REDO_GB_DAY, the ASM_DG / TEMP_PEAK / UNDO_PEAK series and the
     -- tablespace sizing ask. Closed forms recorded by fixture_install.sql.
@@ -1623,6 +1705,8 @@ BEGIN
     DECLARE
         d_gap   DATE := meta_d('CPUGAP_DAY');
         d_gnext DATE := meta_d('CPUGAP_NEXT');
+        d_last  DATE := meta_d('LAST_DAY');
+        d_part  DATE := meta_d('PARTIAL_DAY');
         n_pdb   NUMBER := meta_n('PDB_CON_DBID');
         v_gflag VARCHAR2(1);
         v_lbl   VARCHAR2(100);
@@ -1723,6 +1807,9 @@ BEGIN
           FROM capa_cpu_shift
           WHERE dbid = v_dbid AND con_dbid = n_pdb AND metric = 'DB_CPU_PCT';
         chk_int  ('PDB shift n_recent (full window)', v_n, 7);
+        -- 4 whole baseline days: the fixture's partial day is ~100 days back,
+        -- far outside the 7 + 28 day shift windows, so the rule that drops
+        -- incomplete days from them is not exercised by a count here.
         chk_int  ('PDB shift n_base', v_num, 28);
         chk_int  ('PDB shift n_above (N-of-M: all 7)', v_num2, 7);
         chk_close('PDB shift base_mad_sigma', v_num3, meta_n('SHIFT_BASE_SIGMA'), 0.0001);
@@ -1739,6 +1826,43 @@ BEGIN
         SELECT COUNT(*) INTO v_n FROM capa_cpu_shift
           WHERE dbid = v_dbid AND con_dbid = v_dbid AND shift_flag IS NOT NULL;
         chk_int('root container raises no level shift', v_n, 0);
+
+        -- Completeness + freshness (CAPA_CPU_SHIFT carries newest_day /
+        -- is_current like every CAPF view). Every fixture CPU series ends on
+        -- the same day, so all five rows are current.
+        SELECT COUNT(*) INTO v_n FROM capa_cpu_shift
+          WHERE dbid = v_dbid AND is_current = 'Y' AND newest_day = d_last;
+        chk_int('CAPA_CPU_SHIFT: all rows is_current Y, newest_day = last day', v_n, 5);
+        SELECT COUNT(*) INTO v_n FROM capa_cpu_shift WHERE dbid = v_dbid AND last_day <> newest_day;
+        chk_int('CAPA_CPU_SHIFT: every series ends on the dbid newest day', v_n, 0);
+        -- The partial day (is_complete N) feeds neither window.
+        SELECT COUNT(*) INTO v_n FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND is_complete = 'N'
+            AND gap_flag = 'N' AND day_dt = d_part;
+        chk_int('partial day is a non-gap incomplete DB_CPU_PCT day (the case the rule drops)', v_n, 1);
+        -- Negative case: stale_days = -1 puts every series behind "newest",
+        -- standing in for a PDB whose time model stopped. The shift stays in
+        -- CAPA_CPU_SHIFT but reads is_current N, and CAPR_ALERTS drops it (so
+        -- ORDS / ELK / CSV and cap_results all stop seeing it). Uncommitted,
+        -- then reset.
+        BEGIN
+            UPDATE cap_config SET cfg_value = -1 WHERE cfg_name = 'stale_days';
+            SELECT COUNT(*) INTO v_n FROM capa_cpu_shift
+              WHERE dbid = v_dbid AND con_dbid = n_pdb AND metric = 'DB_CPU_PCT'
+                AND shift_flag = 'UP' AND is_current = 'N';
+            chk_int('stale series: CAPA_CPU_SHIFT is_current N', v_n, 1);
+            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SHIFT';
+            chk_int('stale series: no CPU_SHIFT alert', v_n, 0);
+            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE is_current = 'N';
+            chk_int('stale series: no CAPR_ALERTS row is_current N', v_n, 0);
+            UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'stale_days';
+        EXCEPTION
+            WHEN OTHERS THEN
+                UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'stale_days';
+                RAISE;
+        END;
+        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SHIFT' AND is_current = 'Y';
+        chk_int('fresh again: CPU_SHIFT alert is_current Y', v_n, 1);
 
         -- Alert + report view.
         snap_alerts;
@@ -1834,6 +1958,33 @@ BEGIN
         chk_int  ('CPU partial day n_intervals', v_n, 1);
         chk_close('CPU partial day busy_pct (night interval only)',
                   v_num3, meta_n('PARTIAL_BUSY_PCT'), 0.000001);
+        -- CAPF_BACKTEST CPU row (root BUSY_PCT): complete days only, anchored at
+        -- the median of the last shift_days training days (not the last value).
+        -- The partial day sits at i 14..20, inside the backtest training window
+        -- (i 3..92), so it must not be fitted: n_train counts complete days only.
+        SELECT n_train, anchor_val, cutoff_day INTO v_n, v_num, v_ts
+          FROM capf_backtest
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND series_kind = 'CPU'
+            AND series_key = 'BUSY_PCT' AND engine = 'REGR';
+        SELECT train_days INTO v_cnt0 FROM cap_cfg;
+        chk_true('CPU backtest: partial day lies inside the training window',
+                 d_part <= v_ts AND d_part > v_ts - v_cnt0);
+        SELECT COUNT(*) INTO v_num2 FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND busy_pct IS NOT NULL
+            AND is_complete = 'Y' AND day_dt <= v_ts
+            AND day_dt > v_ts - v_cnt0;
+        chk_int('CPU backtest n_train = complete training days', v_n, v_num2);
+        SELECT COUNT(*) INTO v_num2 FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND busy_pct IS NOT NULL
+            AND day_dt <= v_ts AND day_dt > v_ts - v_cnt0;
+        chk_true('CPU backtest n_train excludes the partial day', v_n < v_num2);
+        SELECT shift_days INTO v_cnt0 FROM cap_cfg;
+        SELECT MEDIAN(busy_pct) INTO v_num2 FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND busy_pct IS NOT NULL
+            AND is_complete = 'Y' AND day_dt <= v_ts
+            AND day_dt > v_ts - v_cnt0;
+        chk_close('CPU backtest anchor_val = median of the last shift_days training days',
+                  v_num, v_num2, 0.000001);
         SELECT covered_sec, is_complete, db_cpu_pct INTO v_num, v_c, v_num2
           FROM capd_dbtime_daily
           WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_part;
@@ -3286,10 +3437,10 @@ BEGIN
 
     -- suite_version: stamped by every install, BAD when older than this release.
     SELECT suite_version INTO v_num FROM cap_cfg;
-    chk_int('suite_version = 21', v_num, 21);
-    UPDATE cap_config SET cfg_value = 20 WHERE cfg_name = 'suite_version';
+    chk_int('suite_version = 22', v_num, 22);
+    UPDATE cap_config SET cfg_value = 21 WHERE cfg_name = 'suite_version';
     SELECT status INTO v_str FROM cap_cfg_check WHERE knob = 'suite_version';
-    chk_str('CAP_CFG_CHECK suite_version=20 < 21', v_str, 'BAD');
+    chk_str('CAP_CFG_CHECK suite_version=21 < 22', v_str, 'BAD');
     UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'suite_version';
     COMMIT;
 
@@ -3443,6 +3594,15 @@ BEGIN
         chk_true('3 CAP_RUN rows, all OK, one backdated (got ' || v_n || '/' || v_a || '/' || v_b || ')',
                  v_n = 3 AND v_a = 3 AND v_b = 1);
         chk_true('run_id grows: R0 < R1 < R2', run_0 < run_1 AND run_1 < run_2);
+        -- Refreshes are serialised for their whole lifetime (lock before run_id
+        -- allocation), so run_id order is commit order: no pair of runs, and
+        -- no pair of events, is ordered one way by run_id and the other by time.
+        SELECT COUNT(*) INTO v_n
+          FROM cap_run a JOIN cap_run b ON a.run_id < b.run_id AND a.started_at > b.started_at;
+        chk_int ('run_id order = started_at order (inverted CAP_RUN pairs)', v_n, 0);
+        SELECT COUNT(*) INTO v_n
+          FROM cap_alert_event a JOIN cap_alert_event b ON a.run_id < b.run_id AND a.at_time > b.at_time;
+        chk_int ('run_id order = at_time order for CAP_ALERT_EVENT (inverted event pairs)', v_n, 0);
         SELECT as_of_day, backdated, n_alert, n_event, seam_mode, n_fit INTO v_dt, v_c1, v_a, v_b, v_str, v_c
           FROM cap_run WHERE run_id = run_0;
         chk_true('R0: as_of_day TRUNC(SYSDATE) - 7, backdated Y, no alert state (n_alert, n_event NULL), seam fixture (got '

@@ -194,6 +194,13 @@ every new number (see `test/run_test.sql`).
       windows. Fixture: a SECOND container (FIXPDB1, con_dbid 42424243, time-
       model rows only) whose DB CPU is a 7-day 34..46% sawtooth — so both
       medians are exact closed forms — stepping +18 points for the last 7 days.
+      Review fix (2026-10): incomplete days (`is_complete = 'N'`) now leave
+      both windows too (same rule as `CAPA_ANOM` and the CPU fit), and the view
+      carries `newest_day` / `is_current` per dbid; `CAPR_ALERTS` passes
+      `is_current` through for `CPU_SHIFT`, so a stopped PDB's shift stops
+      being merged. The fixture has no CPU series that stops early (giving
+      FIXPDB2 a 30-day early stop would break its deseason / DBCPU_HOT / digest
+      assertions), so the negative case flips `stale_days` to -1 instead.
 - [x] **M10.4 ESM tuning.** Done: `train_tablespaces` now picks the ESM model
       type per series. With `esm_tbspc_model = 2` (AUTO) and
       `esm_select_by_backtest = 1` (both new knobs, both defaults) it builds
@@ -514,10 +521,15 @@ fixture harness and both reports.
       `test/docs_lint.sh` checks the knob table, the object index and the
       alert kinds against the DDL, and rejects assertion counts and
       "generated" claims. (branch rf/u10-docs)
-- [ ] **M21.5 Follow-ups.** `suite_version` is 16 while the latest milestone
-      is M21 (bump it with its `CAP_CFG_CHECK` rule). Tier 2 still trains on
-      incomplete days (`is_complete` not applied in ml/, `CAPF_BACKTEST`
-      input, `CAPF_ESM_CANDIDATE`, `CAPF_ESM_HEALTH`).
+- [ ] **M21.5 Follow-ups.** (`suite_version` bumped to 22 by M22.) Tier 2 still trains on
+      incomplete days (`is_complete` not applied in ml/ or `CAPF_ESM_HEALTH`).
+      Done since: `CAPF_BACKTEST` CPU rows use complete days only and anchor at
+      the median of the last `shift_days` training days like the live fit
+      (new `anchor_val` column, cutoff still from all days so it matches the
+      twins), and `CAPF_ESM_CANDIDATE` scores CPU holdout actuals on complete
+      days. Left: the ml/ training input and the `CAPF_ESM_HEALTH` last_day
+      (a complete-only filter there would give negative ages while the twins
+      train through an incomplete last day).
       `test/fixture_remove.sql` does not drop `CAP_FIXTURE_SEG_STAT`.
       `CAP_TBSPC_OVERRIDE` does not apply to the TEMP / UNDO peak series;
       PDB-level `cpu_count` is unused. ELK forecast doc ids hash
@@ -528,6 +540,28 @@ fixture harness and both reports.
       `CAPR_COVERAGE` per run, and consider a run_test snapshot of
       `CAPR_ALERTS`. The warehouse collector should gather the CON_ views,
       parameters, ASM and segment facts (sibling repo).
+
+- [x] **M21.6 RAC worst instance.** `PROCESSES` / `SESSIONS` still sum across
+      instances (one fleet row per series, no `instance_number` downstream),
+      but `CAPD_SERIES_DAILY` / `CAPF_SERIES_FORECAST` / `CAPR_SERIES` now
+      carry `worst_inst_pct` / `worst_inst`, and `SERIES_NEARLIMIT` judges
+      the larger of the fleet and the worst-instance percent (message names
+      the instance). Fixture: `run_test.sql` adds a two-instance dbid
+      (43434343, snapshot + resource-limit rows only) for one block and
+      deletes it again, so no other assertion sees it.
+- [x] **M22 Review fixes (2026-10 implementation review).** Five findings,
+      one phase each, merged on `fix/review-2026-10`: `report/run_report.sh`
+      fails on a non-zero SQL*Plus exit or any ORA- / SP2- line
+      (`test/run_report_sh_test.sh`, run by the harness); `CAPA_CPU_SHIFT`
+      drops incomplete days and carries `newest_day` / `is_current`, so a
+      stopped series no longer holds a CPU_SHIFT alert open; `CAPF_BACKTEST`
+      CPU rows use production's inputs (M21.5); `cap_results.refresh` takes
+      its serialising lock before allocating `run_id` (M10 results layer);
+      RAC worst-instance percent for `PROCESSES` / `SESSIONS` (M21.6).
+      `suite_version` 22. Left: a CPU series that really stops in the fixture
+      (the stale `is_current = 'N'` case is tested by flipping `stale_days`),
+      a live two-session proof of the `refresh` lock, a permanent RAC fixture
+      dbid.
 
 ## v2 (unchanged)
 

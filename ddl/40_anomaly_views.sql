@@ -359,9 +359,20 @@ GROUP  BY a.dbid, a.con_dbid, a.kind, a.series, a.ts;
 -- base_mad_sigma, n_recent, n_base, n_above, n_below, the thresholds), so a
 -- flag can be re-derived by hand from CAPD_CPU_DAILY / CAPD_DBTIME_DAILY.
 --
--- M10.5: gap-flagged days are dropped from BOTH windows -- a 36 h average is
--- not a day, and letting it into a 7-day median is exactly how a maintenance
--- window turns into a fake "level shift".
+-- M10.5: gap-flagged AND incomplete days are dropped from BOTH windows -- a
+-- 36 h average is not a day, and letting it into a 7-day median is exactly
+-- how a maintenance window turns into a fake "level shift". An incomplete day
+-- (is_complete = 'N': covered_sec below complete_day_pct) is a partial
+-- sample, e.g. a restart day; CAPA_ANOM's history and the CPU trend fit
+-- (ddl/30) already read complete days only, so the shift windows use the
+-- same rule instead of a looser one that could flag seven partial days.
+--
+-- newest_day / is_current (as on every CAPF view): newest_day is the newest
+-- source day of the DBID (not of the con_dbid), is_current = 'Y' when the
+-- series' last_day is within stale_days of it. CAPR_FRESHNESS is per dbid, so
+-- a PDB whose time model stopped (unplugged, dropped) while the CDB goes on
+-- raises no DATA_STALE; is_current = 'N' is what stops its last shift from
+-- staying an OPEN CPU_SHIFT alert until AWR retention purges the rows.
 --
 -- Metrics: BUSY_PCT and BUSY_P95 (host, per CAPD_CPU_DAILY) and DB_CPU_PCT
 -- (per container, per CAPD_DBTIME_DAILY). BUSY_PEAK is deliberately left out:
@@ -372,20 +383,25 @@ CREATE OR REPLACE VIEW capa_cpu_shift AS
 WITH src AS (
         SELECT dbid, con_dbid, 'BUSY_PCT' AS metric, day_dt, busy_pct AS val
         FROM   capd_cpu_daily
-        WHERE  busy_pct IS NOT NULL AND gap_flag = 'N'
+        WHERE  busy_pct IS NOT NULL AND gap_flag = 'N' AND is_complete = 'Y'
         UNION ALL
         SELECT dbid, con_dbid, 'BUSY_P95' AS metric, day_dt, busy_p95 AS val
         FROM   capd_cpu_daily
-        WHERE  busy_p95 IS NOT NULL AND gap_flag = 'N'
+        WHERE  busy_p95 IS NOT NULL AND gap_flag = 'N' AND is_complete = 'Y'
         UNION ALL
         SELECT dbid, con_dbid, 'DB_CPU_PCT' AS metric, day_dt, db_cpu_pct AS val
         FROM   capd_dbtime_daily
-        WHERE  db_cpu_pct IS NOT NULL AND gap_flag = 'N'
+        WHERE  db_cpu_pct IS NOT NULL AND gap_flag = 'N' AND is_complete = 'Y'
      ),
      lastd AS (
         SELECT dbid, con_dbid, metric, MAX(day_dt) AS last_day
         FROM   src
         GROUP  BY dbid, con_dbid, metric
+     ),
+     nd AS (
+        SELECT dbid, MAX(day_dt) AS newest_day
+        FROM   src
+        GROUP  BY dbid
      ),
      -- Tag every day with the window it belongs to: R = recent, B = baseline,
      -- NULL = older than both and irrelevant here.
@@ -469,5 +485,10 @@ SELECT a.dbid,
             AND (a.base_med - a.recent_med) >  cfg.shift_min_pct
             AND a.n_below >= cfg.shift_days                        THEN 'DOWN'
            ELSE NULL
-       END                                                         AS shift_flag
-FROM   m3 a CROSS JOIN cap_cfg cfg;
+       END                                                         AS shift_flag,
+       n.newest_day,
+       CASE WHEN a.last_day >= n.newest_day - cfg.stale_days
+            THEN 'Y' ELSE 'N' END                                  AS is_current
+FROM   m3 a
+JOIN   nd n ON n.dbid = a.dbid
+CROSS  JOIN cap_cfg cfg;

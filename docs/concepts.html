@@ -503,7 +503,9 @@
         training window ending at that cutoff, and scores the predictions against the days it hid:
         <b>MAPE</b> (average absolute error as a percent) and <b>bias</b> (the same average with its
         sign, so positive means the engine over-forecast), per series per engine. The REGR row is
-        recomputed in pure SQL and is always available; the ESM row appears once
+        recomputed in pure SQL and is always available, anchored the way the live fit is
+        (the last value for a tablespace, the median of the last
+        <span class="inline">shift_days</span> days for CPU, incomplete CPU days left out); the ESM row appears once
         <span class="inline">cap_forecast_ml.train_backtest</span> has trained
         <em>purpose = BACKTEST</em> twin models through the same cutoff. Those twins never leak into
         the live forecast views. Because the 19c 30-step cap and a conservative
@@ -650,7 +652,7 @@
           <caption>The shipped fixed-ceiling series</caption>
           <thead><tr><th>Series</th><th>Value</th><th>Ceiling</th></tr></thead>
           <tbody>
-            <tr><td><span class="k">PROCESSES</span> / <span class="k">SESSIONS</span></td><td class="def">The day's peak utilisation from <code>MAX_UTILIZATION</code>, summed across RAC instances</td><td class="def">The summed init parameters. NULL — no ceiling — if any instance reads <code>UNLIMITED</code>, rather than an understated sum</td></tr>
+            <tr><td><span class="k">PROCESSES</span> / <span class="k">SESSIONS</span></td><td class="def">The day's peak utilisation from <code>MAX_UTILIZATION</code>, summed across RAC instances. The worst instance's percent of its own limit is kept beside the sum and the near-limit alert judges the larger</td><td class="def">The summed init parameters. NULL — no ceiling — if any instance reads <code>UNLIMITED</code>, rather than an understated sum</td></tr>
             <tr><td><span class="k">REDO_GB_DAY</span></td><td class="def">Redo generated per day in GiB, from the <code>redo size</code> counter deltas (one stream per database)</td><td class="def">None. FRA / archive-destination sizing is an operator decision, so this is a trend, never an alert</td></tr>
             <tr><td><span class="k">DB_SIZE_GB</span></td><td class="def">Total database size — the summed used bytes across permanent tablespaces</td><td class="def">The summed tablespace ceilings, inheriting the UNDO/TEMP exclusion and any operator overrides</td></tr>
           </tbody>

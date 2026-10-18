@@ -300,7 +300,9 @@ the series — it is still data, and the forecast layer wants it — but:
   day; the daily totals (`db_cpu_sec`, `host_busy_sec`, `REDO_GB_DAY`) do
   carry more than a day, and `gap_flag` is the column that says so.
 - `CAPA_ANOM` (in every mode) and `CAPA_CPU_SHIFT` (Layer 4) drop gap days
-  from their baselines and never flag one.
+  from their baselines and never flag one. `CAPA_CPU_SHIFT` also drops
+  incomplete days (`is_complete = 'N'`), the rule `CAPA_ANOM`'s history and the
+  CPU trend fit already follow.
 
 Why 12 hours and not something tighter: `gap_flag` *suppresses* anomaly
 scoring, so an over-sensitive default would silence the whole CPU anomaly layer
@@ -562,7 +564,17 @@ n_samples, covered_sec, is_complete, day_gap, max_interval_hours, gap_flag)` —
   which reads as a level shift (degrading R², not lying).
 - RAC: limits are per instance, so both the utilization and the ceiling are
   summed. If **any** instance's limit is non-numeric (`UNLIMITED`) the day's
-  `limit_value` is NULL rather than an understated sum.
+  `limit_value` is NULL rather than an understated sum. The sum hides one
+  exhausted node (two nodes at 990/1000 and 10/1000 read 50%), so
+  `PROCESSES` / `SESSIONS` days also carry `worst_inst_pct` (the highest
+  per-instance `100 · max_utilization / limit`) and `worst_inst` (that
+  instance_number; NULL on every other series). There is still one fleet row
+  per series, no `instance_number` downstream. `CAPF_SERIES_FORECAST` carries
+  the last day's pair (`worst_inst_pct` at 1 decimal) and `SERIES_NEARLIMIT`
+  judges the larger of `pct_of_limit` and `worst_inst_pct`; the message names
+  the instance when it is the one over the line, and `CAPR_SEVERITY.value`
+  is then the instance's percent (`sev_reason` starts `worst_inst_pct`). On a
+  single instance the two percents are equal and nothing changes.
 - `REDO_GB_DAY` sums the `redo size` rows of `CAPD_COUNTER_DELTA` with
   `is_restart = 'N'`, the same rule as `CAPD_CPU_DAILY`. The delta is
   attributed to the day the interval **ends** on. It is the one flow series
@@ -632,8 +644,9 @@ the FRA also holds flashback logs and backups. NULL on every other series.
 Fixture: 100 GiB / 2.0 GiB/day = 50.
 
 Two alert kinds and one report view ride on it: `SERIES_LIMIT` (quality `OK`,
-`days_to_limit <= dtf_warn`), `SERIES_NEARLIMIT` (`pct_of_limit >=
-nearfull_warn_pct` now, at **any** quality — the M7.1 rule again) and
+`days_to_limit <= dtf_warn`), `SERIES_NEARLIMIT` (`pct_of_limit`, or on RAC the worst instance's
+`worst_inst_pct` when higher, `>= nearfull_warn_pct` now, at **any**
+quality — the M7.1 rule again) and
 `CAPR_SERIES` (report section 7, which prints `FRA_DAYS` on the REDO row).
 
 ## Layer 4 — anomalies (`CAPA_*`)
@@ -849,7 +862,7 @@ month ago. So this view compares **windows, not days**, per
 `shift_pct = recent_med − base_med` in percentage **points**. `UP` requires
 all four of: `shift_pct > shift_min_pct` (15); a full recent window
 (`n_recent ≥ shift_days` — gap days are excluded from the source, so a window
-with a gap in it cannot flag); enough baseline (`n_base ≥ shift_days`); and
+with a gap or an incomplete day in it cannot flag); enough baseline (`n_base ≥ shift_days`); and
 the **N-of-M confirmation** `n_above ≥ shift_days`, i.e. *every* day of the
 recent window sits above `base_med + max(base_mad_sigma, cpu_min_mad_pct)`.
 That last clause is what separates a genuine step from one loud day dragging
@@ -862,6 +875,20 @@ every input (`recent_med`, `base_med`, `base_mad_sigma`, `n_recent`,
 re-derivable by hand. `BUSY_PEAK` is deliberately not covered: it is already
 a same-window average of `BUSY_PCT`'s busiest hours, so it shifts with them
 and would only duplicate the alert.
+
+Gap-flagged **and** incomplete days (`is_complete = 'N'`: `covered_sec` below
+`complete_day_pct`, e.g. a restart day) leave both windows (M10.5). Without
+the second half, seven partial days could produce an UP or DOWN while the
+CPU trend fit and `CAPA_ANOM`'s history, which read complete days only,
+ignored the same days. The view also carries `newest_day` (the newest source
+day of the *dbid*, so a dead PDB compares against the live CDB) and
+`is_current` (`last_day >= newest_day − stale_days`), as every `CAPF_*` view
+does. `CAPR_FRESHNESS` is per dbid, so a PDB whose time model stopped
+(unplugged, dropped) raises no `DATA_STALE`; `is_current = 'N'` is what stops
+its last shift from staying an OPEN `CPU_SHIFT` alert until AWR retention
+purges the rows. `CAPR_ALERTS` drops a stale shift (as `CAPR_SEVERITY` gates a
+stale forecast kind to OK), so it leaves ORDS, the ELK export and the CSV at
+once and `cap_results` resolves it after `resolve_grace_runs`.
 
 ### Downstream
 
@@ -960,7 +987,16 @@ no partitioned ESM) via `DBMS_DATA_MINING.CREATE_MODEL2(mining_function =>
   the report's forecasts. `CAPF_BACKTEST` then scores both engines over the
   holdout — REGR is re-fit in pure SQL on the same truncated window (works
   with zero models trained) — as `mape_pct` / `bias_pct` per series per
-  engine, surfaced as report section 6c ("which engine was right"). ESM may
+  engine, surfaced as report section 6c ("which engine was right"). The REGR
+  replay uses production's inputs: a tablespace line starts at the last
+  training day's value, a CPU line at the median of the last `shift_days`
+  complete training days (the live `anc` anchor, exposed as `anchor_val`), and
+  CPU days count only when `is_complete = 'Y'`, both as training rows and as
+  holdout actuals (so a partial day is neither fitted nor scored). The cutoff
+  still comes from every day with a value, which is what the twins train
+  through. CPU deseasoning is not replayed: it changes the slope input, not
+  the anchor. `CAPF_ESM_CANDIDATE` applies the same complete-day rule to its
+  CPU actuals; the twins and `CAPF_ESM_HEALTH` still read every day. ESM may
   cover fewer than holdout_days days (30-step cap + the rows/4 floor);
   `n_days` records actual coverage. `train_all(p_top_n, p_backtest => TRUE)`
   refreshes the twins of every series it trains, the CPU ones included, so
@@ -1093,7 +1129,7 @@ M8.2, for the bundled reports themselves:
   same on every severity; `direction` says how `value` relates to it on an
   alert: `LE` (the countdowns), `GE` (levels, HIGH anomalies, `DATA_STALE`,
   `MODEL_HEALTH`), `ABS` (`CPU_SHIFT`, `|value| > alarm_threshold`), and `LE`
-  on a LOW anomaly. `is_current` is `'Y'` on every row today. So a poller can
+  on a LOW anomaly. `is_current` is `'Y'` on every row (a forecast kind or `CPU_SHIFT` whose series stopped is no alert); the column stays for the contract and `cap_results` merges the `'Y'` rows. So a poller can
   key, de-duplicate and alarm without parsing `message`. Both reports'
   at-a-glance blocks read this view (DATA_STALE first), and the section
   severities come from the same `CAPR_SEVERITY` rows, so paging and reporting
@@ -1197,8 +1233,10 @@ The tables are created with their key columns and then gain every other
 column one `ALTER TABLE ... ADD` at a time (ORA-01430 ignored), so a later
 column reaches an older install on the next `@install.sql`.
 
-**`CAP_RESULTS.refresh(p_as_of)`** inserts the `CAP_RUN` row as `RUNNING` and
-commits it at once (a hung run stays visible), copies `CAPR_FIT` into
+**`CAP_RESULTS.refresh(p_as_of)`** first takes an exclusive lock on the state
+table, then inserts the `CAP_RUN` row as `RUNNING` and commits it at once from
+an autonomous transaction (a hung run stays visible, and the lock stays
+held), copies `CAPR_FIT` into
 `CAP_FIT_HIST`, merges `CAPR_ALERTS` into the state table, marks the run `OK`
 with its counts and commits. On any error it rolls the run's work back,
 marks it `FAILED` with the error stack in `error_text` and re-raises, so the
@@ -1206,8 +1244,14 @@ scheduler log says FAILED too. `CAPR_ALERTS` is read once: one row per
 `state_key` (worst severity, then latest day; an anomaly key can carry
 several episodes). A `p_as_of` before today records a backdated run: the
 fits as the views show them now, labelled with that day, and no alert state,
-because the state machine runs in real time. A `LOCK TABLE` on the state
-table serialises two refreshes.
+because the state machine runs in real time (it still takes the lock). That
+`LOCK TABLE` on `CAP_ALERT_STATE` is held from `run_id` allocation to the
+final COMMIT or ROLLBACK, so refreshes are serialised for their whole
+lifetime: `run_id` order equals commit order, and the poller recipe below
+(`run_id > :last_seen_run_id`) cannot skip a run whose events commit after a
+higher id's. A second refresh waits at the lock and shows no `RUNNING` row
+until it holds it. `purge` and `reset` lock the state table first and
+`CAP_RUN` second, the same order, so none of the three can deadlock.
 
 The state machine, per `state_key`, on each live run:
 
