@@ -16,7 +16,9 @@ PROMPT
 PROMPT == 7. FIXED-CEILING SERIES (processes / sessions / redo / DB size / ASM / TEMP / UNDO) ==
 PROMPT     PROCESSES, SESSIONS  peak concurrency (AWR max_utilization, a
 PROMPT                          high-water mark since instance startup) against
-PROMPT                          the init parameter. RAC: summed over instances.
+PROMPT                          the init parameter. RAC: summed over instances,
+PROMPT                          and INST_PCT is the worst instance's percent of
+PROMPT                          its own limit (SERIES_NEARLIMIT judges the larger).
 PROMPT     REDO_GB_DAY          redo written per day, GiB. No ceiling -- it is a
 PROMPT                          trend for FRA / archive-destination sizing.
 PROMPT                          FRA_DAYS = days of redo db_recovery_file_dest_size
@@ -40,6 +42,7 @@ COLUMN cur_val      FORMAT 99999990.00   HEADING 'CURRENT'
 COLUMN cur_limit    FORMAT 99999990.00   HEADING 'LIMIT'
 COLUMN sat_value    FORMAT 99999990.00   HEADING 'SAT'
 COLUMN pct_of_limit FORMAT 990.0         HEADING 'PCT_LIM'
+COLUMN worst_inst_pct FORMAT 990.0       HEADING 'INST_PCT'
 COLUMN slope_day    FORMAT 9999990.0000  HEADING 'SLOPE/DAY'
 COLUMN r2           FORMAT 90.999        HEADING 'R2'
 COLUMN days_lim     FORMAT 99999990      HEADING 'DAYS_LIM'
@@ -57,6 +60,7 @@ SELECT db_pdb,
        cur_limit,
        sat_value,
        pct_of_limit,
+       worst_inst_pct,
        slope_per_day AS slope_day,
        r2,
        days_to_limit AS days_lim,

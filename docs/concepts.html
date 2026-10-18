@@ -650,7 +650,7 @@
           <caption>The shipped fixed-ceiling series</caption>
           <thead><tr><th>Series</th><th>Value</th><th>Ceiling</th></tr></thead>
           <tbody>
-            <tr><td><span class="k">PROCESSES</span> / <span class="k">SESSIONS</span></td><td class="def">The day's peak utilisation from <code>MAX_UTILIZATION</code>, summed across RAC instances</td><td class="def">The summed init parameters. NULL — no ceiling — if any instance reads <code>UNLIMITED</code>, rather than an understated sum</td></tr>
+            <tr><td><span class="k">PROCESSES</span> / <span class="k">SESSIONS</span></td><td class="def">The day's peak utilisation from <code>MAX_UTILIZATION</code>, summed across RAC instances. The worst instance's percent of its own limit is kept beside the sum and the near-limit alert judges the larger</td><td class="def">The summed init parameters. NULL — no ceiling — if any instance reads <code>UNLIMITED</code>, rather than an understated sum</td></tr>
             <tr><td><span class="k">REDO_GB_DAY</span></td><td class="def">Redo generated per day in GiB, from the <code>redo size</code> counter deltas (one stream per database)</td><td class="def">None. FRA / archive-destination sizing is an operator decision, so this is a trend, never an alert</td></tr>
             <tr><td><span class="k">DB_SIZE_GB</span></td><td class="def">Total database size — the summed used bytes across permanent tablespaces</td><td class="def">The summed tablespace ceilings, inheriting the UNDO/TEMP exclusion and any operator overrides</td></tr>
           </tbody>

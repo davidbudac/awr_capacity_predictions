@@ -38,7 +38,8 @@
 --
 -- Column contract:
 --   (dbid, con_dbid, series, day_dt, value, limit_value, unit, n_samples,
---    covered_sec, is_complete, day_gap, max_interval_hours, gap_flag)
+--    covered_sec, is_complete, day_gap, max_interval_hours, gap_flag,
+--    worst_inst_pct, worst_inst)
 -- limit_value is NULL when the series has no ceiling (REDO_GB_DAY) or when it
 -- could not be resolved (an UNLIMITED / non-numeric resource limit).
 -- covered_sec / is_complete mean what they mean in CAPD_CPU_DAILY, and only a
@@ -59,6 +60,16 @@
 --                        else 'N'. ASM_DG / TEMP_PEAK / UNDO_PEAK count
 --                        samples, not members, so they read 'N'.
 --
+-- worst_inst_pct / worst_inst (RAC) are filled on PROCESSES / SESSIONS only,
+-- NULL on every other series: the day's highest per-instance
+-- 100 * max_utilization / limit, and the instance_number that had it (the
+-- highest number on a tie). The series value / limit_value stay the summed
+-- fleet figures, so a node at 990 of 1000 beside one at 10 of 1000 reads 50%
+-- there and 99% here; SERIES_NEARLIMIT judges the larger (ddl/45
+-- CAPR_SEVERITY). On a single instance worst_inst_pct is the plain
+-- percent of limit and worst_inst is that instance. NULL when no instance
+-- has a numeric limit.
+--
 -- Seam-agnostic: only CAPV_* (+ CAPD_TBSPC_DAILY and CAPD_COUNTER_DELTA,
 -- both seam-agnostic). The ASM_DG and TEMP/UNDO branches give each series a
 -- name of its own, so CAPF_SERIES_FORECAST, the SERIES_LIMIT /
@@ -76,7 +87,11 @@
 --   * RAC: limits are PER INSTANCE, so both the utilization and the limit are
 --     SUMMED across instances -- the fleet-wide ceiling is the sum of the
 --     instance ceilings. If ANY instance's limit is non-numeric (UNLIMITED)
---     the day's limit_value is NULL rather than an understated sum.
+--     the day's limit_value is NULL rather than an understated sum. The
+--     sum hides one exhausted node, so the day also carries the WORST
+--     instance (worst_inst_pct / worst_inst, above) for the near-limit
+--     alert; the series itself stays one fleet row (no instance_number
+--     anywhere downstream).
 --   * DB_SIZE_GB inherits CAPD_TBSPC_DAILY's rules: UNDO and TEMPORARY
 --     tablespaces are EXCLUDED (their usage is transient, not growth), and
 --     CAP_TBSPC_OVERRIDE limits / exclusions (M9.5) are already applied. So
@@ -115,7 +130,8 @@ WITH snap AS (
         SELECT dbid, con_dbid, series, day_dt, instance_number,
                MAX(util) AS util,
                MAX(lim)  AS lim,
-               COUNT(*)  AS n_samples
+               COUNT(*)  AS n_samples,
+               100 * MAX(util) / NULLIF(MAX(lim), 0) AS pct
         FROM   rl
         GROUP  BY dbid, con_dbid, series, day_dt, instance_number
      ),
@@ -124,7 +140,13 @@ WITH snap AS (
                SUM(util)      AS val,
                -- NULL (not an understated sum) if any instance is UNLIMITED.
                CASE WHEN COUNT(*) = COUNT(lim) THEN SUM(lim) END AS lim,
-               SUM(n_samples) AS n_samples
+               SUM(n_samples) AS n_samples,
+               -- Worst node: its percent of its OWN limit, and which node.
+               -- NULLS FIRST so DENSE_RANK LAST lands on the largest number.
+               MAX(pct)       AS worst_pct,
+               CASE WHEN MAX(pct) IS NOT NULL
+                    THEN MAX(instance_number) KEEP (DENSE_RANK LAST ORDER BY pct NULLS FIRST)
+               END            AS worst_inst
         FROM   rl_inst
         GROUP  BY dbid, con_dbid, series, day_dt
      ),
@@ -236,7 +258,8 @@ WITH snap AS (
         SELECT dbid, con_dbid, series, day_dt, val, lim,
                'COUNT'       AS unit, n_samples,
                CAST(NULL AS NUMBER) AS covered_sec, 'Y' AS is_complete,
-               CAST(NULL AS NUMBER) AS max_ivl
+               CAST(NULL AS NUMBER) AS max_ivl,
+               worst_pct, worst_inst
         FROM   rl_day
         UNION ALL
         SELECT r.dbid, r.con_dbid, r.series, r.day_dt, r.val, r.lim,
@@ -244,21 +267,25 @@ WITH snap AS (
                r.covered_sec,
                CASE WHEN r.covered_sec >= cfg.complete_day_pct / 100 * 86400
                     THEN 'Y' ELSE 'N' END,
-               r.max_ivl
+               r.max_ivl,
+               CAST(NULL AS NUMBER), CAST(NULL AS NUMBER)
         FROM   redo_day r
         CROSS  JOIN cap_cfg cfg
         UNION ALL
         SELECT dbid, con_dbid, series, day_dt, val, lim,
                'GIB'         AS unit, n_samples,
-               CAST(NULL AS NUMBER), 'Y', CAST(NULL AS NUMBER)
+               CAST(NULL AS NUMBER), 'Y', CAST(NULL AS NUMBER),
+               CAST(NULL AS NUMBER), CAST(NULL AS NUMBER)
         FROM   size_day
         UNION ALL
         SELECT dbid, con_dbid, series, day_dt, val, lim,
-               'GIB', n_samples, CAST(NULL AS NUMBER), 'Y', CAST(NULL AS NUMBER)
+               'GIB', n_samples, CAST(NULL AS NUMBER), 'Y', CAST(NULL AS NUMBER),
+               CAST(NULL AS NUMBER), CAST(NULL AS NUMBER)
         FROM   asm_day
         UNION ALL
         SELECT dbid, con_dbid, series, day_dt, val, lim,
-               'GIB', n_samples, CAST(NULL AS NUMBER), 'Y', CAST(NULL AS NUMBER)
+               'GIB', n_samples, CAST(NULL AS NUMBER), 'Y', CAST(NULL AS NUMBER),
+               CAST(NULL AS NUMBER), CAST(NULL AS NUMBER)
         FROM   tu_day
      )
 SELECT u.dbid, u.con_dbid, u.series, u.day_dt, u.val AS value, u.lim AS limit_value,
@@ -272,5 +299,7 @@ SELECT u.dbid, u.con_dbid, u.series, u.day_dt, u.val AS value, u.lim AS limit_va
             AND u.n_samples <> LAG(u.n_samples) OVER (PARTITION BY u.dbid, u.con_dbid, u.series
                                                       ORDER BY u.day_dt) THEN 'Y'
            ELSE 'N'
-       END                                                                    AS gap_flag
+       END                                                                    AS gap_flag,
+       u.worst_pct                                                            AS worst_inst_pct,
+       u.worst_inst
 FROM   u CROSS JOIN cap_cfg cfg;

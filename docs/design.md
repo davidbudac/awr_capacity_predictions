@@ -562,7 +562,17 @@ n_samples, covered_sec, is_complete, day_gap, max_interval_hours, gap_flag)` —
   which reads as a level shift (degrading R², not lying).
 - RAC: limits are per instance, so both the utilization and the ceiling are
   summed. If **any** instance's limit is non-numeric (`UNLIMITED`) the day's
-  `limit_value` is NULL rather than an understated sum.
+  `limit_value` is NULL rather than an understated sum. The sum hides one
+  exhausted node (two nodes at 990/1000 and 10/1000 read 50%), so
+  `PROCESSES` / `SESSIONS` days also carry `worst_inst_pct` (the highest
+  per-instance `100 · max_utilization / limit`) and `worst_inst` (that
+  instance_number; NULL on every other series). There is still one fleet row
+  per series, no `instance_number` downstream. `CAPF_SERIES_FORECAST` carries
+  the last day's pair (`worst_inst_pct` at 1 decimal) and `SERIES_NEARLIMIT`
+  judges the larger of `pct_of_limit` and `worst_inst_pct`; the message names
+  the instance when it is the one over the line, and `CAPR_SEVERITY.value`
+  is then the instance's percent (`sev_reason` starts `worst_inst_pct`). On a
+  single instance the two percents are equal and nothing changes.
 - `REDO_GB_DAY` sums the `redo size` rows of `CAPD_COUNTER_DELTA` with
   `is_restart = 'N'`, the same rule as `CAPD_CPU_DAILY`. The delta is
   attributed to the day the interval **ends** on. It is the one flow series
@@ -632,8 +642,9 @@ the FRA also holds flashback logs and backups. NULL on every other series.
 Fixture: 100 GiB / 2.0 GiB/day = 50.
 
 Two alert kinds and one report view ride on it: `SERIES_LIMIT` (quality `OK`,
-`days_to_limit <= dtf_warn`), `SERIES_NEARLIMIT` (`pct_of_limit >=
-nearfull_warn_pct` now, at **any** quality — the M7.1 rule again) and
+`days_to_limit <= dtf_warn`), `SERIES_NEARLIMIT` (`pct_of_limit`, or on RAC the worst instance's
+`worst_inst_pct` when higher, `>= nearfull_warn_pct` now, at **any**
+quality — the M7.1 rule again) and
 `CAPR_SERIES` (report section 7, which prints `FRA_DAYS` on the REDO row).
 
 ## Layer 4 — anomalies (`CAPA_*`)
