@@ -9,6 +9,7 @@ visual paths (Kibana, Grafana over ORDS, Oracle APEX) read the same views.
 📖 **Documentation site:** <https://davidbudac.github.io/awr_capacity_predictions/>
 
 🧪 **Sample report** (real output, fictional database): <https://davidbudac.github.io/awr_capacity_predictions/demo/cap_report_demo.html>
+(and the one-page briefing: <https://davidbudac.github.io/awr_capacity_predictions/demo/cap_brief_demo.html>)
 
 What it answers:
 
@@ -249,6 +250,24 @@ SQL> @report/report_html.sql     -- spools reports/cap_report_<db>_<ts>.html
 Same arguments, same defaults file, same read-only guarantee (the HTML is
 built in one PL/SQL block via `DBMS_OUTPUT`, captured by `SPOOL`). Open the
 spooled `.html` file directly in a browser.
+
+### One-page briefing (optional)
+
+`report/report_brief.sql` is a third driver for the reader who wants the
+answer, not the tables: a printable page that leads with one sentence
+("AUDIT_TRAIL fills on 3 November. Add 54 GiB before then."), a 12-month
+timeline of the date each limit is reached, the actions in date order with
+their worst-case dates, the evidence chart for the first few, and one fill
+bar per tablespace (today and +90 days). It reads `CAPR_FIT` (or
+`CAPR_FIT_HISTORY` under `SNAPSHOT`) and `CAPR_ALERTS` (or
+`CAPR_ALERTS_LATEST`), takes the same arguments, and is just as read-only:
+
+```sql
+SQL> @report/report_brief.sql    -- spools reports/cap_brief_<db>_<ts>.html
+```
+
+`report/run_report.sh --brief` writes it from cron. See the
+[sample briefing](https://davidbudac.github.io/awr_capacity_predictions/demo/cap_brief_demo.html).
 
 ## Tier 2 (OML ESM) — optional
 

@@ -169,6 +169,14 @@
         <code>&lt;svg&gt;</code> with no chart library and no external assets, plus a sticky section nav and
         a light/dark toggle. See the <a href="demo/cap_report_demo.html" target="_blank" rel="noopener">sample report</a>.</p>
 
+      <p><span class="inline">report/report_brief.sql</span> is the optional one-page briefing for a reader who
+        wants the answer rather than the tables. It leads with one sentence (what fills, when, and how much
+        to add), draws a 12-month timeline of the date each limit is reached, lists the actions in date order
+        with their worst-case dates, shows the evidence chart for the first few, and ends with one fill bar
+        per tablespace, today and in 90 days. Same arguments, same <b>read-only</b> guarantee, printable;
+        <span class="inline">run_report.sh --brief</span> writes it from cron. See the
+        <a href="demo/cap_brief_demo.html" target="_blank" rel="noopener">sample briefing</a>.</p>
+
       <div class="callout">
         <span class="ico">i</span>
         <p><strong>The two drivers read the same rows.</strong> Both consume the

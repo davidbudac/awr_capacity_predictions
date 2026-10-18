@@ -90,8 +90,10 @@ install local → report/report.sql, in one run; the docs' "Getting started"
 path), `doctor.sql` (preflight), `install_jobs.sql` / `uninstall_jobs.sql`
 (DBMS_SCHEDULER, all created disabled: CAP_REFRESH_JOB 01:30,
 CAP_ML_RETRAIN daily 02:00, CAP_REPORT_SPOOL_JOB 03:00),
-`report/report_csv.sql` (one CSV per CAPR section view), `report/run_report.sh`
-(cron wrapper: text / --html / --csv, --scope, --snapshot, non-zero exit on a
+`report/report_csv.sql` (one CSV per CAPR section view), `report/report_brief.sql`
+(one-page "Runway" briefing from CAPR_FIT[_HISTORY] + the alert list; demo
+`docs/demo/cap_brief_demo.html`), `report/run_report.sh`
+(cron wrapper: text / --html / --brief / --csv, --scope, --snapshot, non-zero exit on a
 non-zero sqlplus exit or any ORA-/SP2-; `test/run_report_sh_test.sh` is its
 mock-sqlplus test, no DB needed), `report/drill_tbspc.sql` / `report/drill_cpu.sql`
 (single-series drill-down; drill_tbspc prints "who is filling it" from
