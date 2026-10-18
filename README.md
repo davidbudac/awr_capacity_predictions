@@ -403,7 +403,7 @@ others), a per-row `alert_key`, a `state_key` that stays the same across days
 | `DATA_STALE` | a dbid's newest AWR snapshot is at least `stale_hours` old (the dead-man check) |
 | `MODEL_HEALTH` | a Tier 2 model failed its last build or is stale |
 
-Forecast kinds need a current series (`is_current = 'Y'`); `CAPR_SEVERITY`
+Forecast kinds and `CPU_SHIFT` need a current series (`is_current = 'Y'`); `CAPR_SEVERITY`
 computes their severity once, so the report, the fit feed and the alerts
 agree. Consecutive flagged days of one series and mode collapse into one
 episode row (`first_day`, `n_days`, `max_z`), and a per-day CPU anomaly
@@ -688,7 +688,8 @@ suite depends on it.
   `max_interval_hours` / `gap_flag` / `day_gap` mark it, `busy_p95` /
   `busy_max` / `busy_peak_pct` (and the `db_cpu_*` twins) ignore intervals
   longer than `cpu_gap_hours`, and neither `CAPA_ANOM` (in any mode) nor
-  `CAPA_CPU_SHIFT` scores a gap day or lets it into a baseline. The hour grain
+  `CAPA_CPU_SHIFT` scores a gap day or lets it into a baseline (it also skips
+  incomplete days, like the CPU fit). The hour grain
   applies a tighter rule (`hour_gap_ratio`), and `REDO_GB_DAY` reuses
   `cpu_gap_hours`. A `DB_SIZE_GB` day whose tablespace set changed (one was
   added or dropped) is a gap day too: its move measures membership, not

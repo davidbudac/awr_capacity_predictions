@@ -194,6 +194,13 @@ every new number (see `test/run_test.sql`).
       windows. Fixture: a SECOND container (FIXPDB1, con_dbid 42424243, time-
       model rows only) whose DB CPU is a 7-day 34..46% sawtooth — so both
       medians are exact closed forms — stepping +18 points for the last 7 days.
+      Review fix (2026-10): incomplete days (`is_complete = 'N'`) now leave
+      both windows too (same rule as `CAPA_ANOM` and the CPU fit), and the view
+      carries `newest_day` / `is_current` per dbid; `CAPR_ALERTS` passes
+      `is_current` through for `CPU_SHIFT`, so a stopped PDB's shift stops
+      being merged. The fixture has no CPU series that stops early (giving
+      FIXPDB2 a 30-day early stop would break its deseason / DBCPU_HOT / digest
+      assertions), so the negative case flips `stale_days` to -1 instead.
 - [x] **M10.4 ESM tuning.** Done: `train_tablespaces` now picks the ESM model
       type per series. With `esm_tbspc_model = 2` (AUTO) and
       `esm_select_by_backtest = 1` (both new knobs, both defaults) it builds
