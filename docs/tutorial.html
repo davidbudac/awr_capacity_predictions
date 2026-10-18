@@ -1,0 +1,1114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Tutorial — AWR Capacity Predictions</title>
+<meta name="description" content="A fifteen-minute walkthrough: install the suite, read the first report, run it day to day, and understand forecasts, bands, days-to-full, quality grades, anomalies, CPU level shifts, freshness and severity, with worked examples from the sample report.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23b06a0d'/><path d='M16 8L24 23L8 23Z' fill='%23fff'/></svg>">
+<link rel="stylesheet" href="assets/style.css">
+<script>
+  // No-FOUC: apply the persisted theme before first paint.
+  (function(){try{var t=localStorage.getItem("cap-theme");
+    if(t){document.documentElement.setAttribute("data-theme",t);
+      var m=document.querySelector('meta[name="color-scheme"]');if(m)m.content=t;}}catch(e){}})();
+</script>
+<style>
+  /* ---- tutorial page only ---- */
+  .tut-bar{position:fixed;top:0;left:0;right:0;height:3px;z-index:100;pointer-events:none}
+  .tut-bar i{display:block;height:100%;background:var(--accent);transform-origin:0 50%;transform:scaleX(0)}
+  .tut-chip{position:fixed;right:16px;bottom:16px;z-index:60;background:var(--bg);color:var(--muted);
+    border:1px solid var(--border);border-radius:999px;padding:6px 13px;font-size:12.5px;font-weight:500;
+    box-shadow:0 4px 14px rgb(0 0 0 / .08)}
+  .tut-chip b{color:var(--text);font-weight:600}
+  @media (max-width:620px){.tut-chip{right:10px;bottom:10px;font-size:11.5px;padding:4px 10px;opacity:.92}}
+  .mins{display:inline-block;margin-left:8px;font-family:var(--mono);font-size:11px;font-weight:600;
+    color:var(--muted);background:var(--surface-2);border-radius:999px;padding:1px 8px;vertical-align:1px}
+
+  .route{list-style:none;margin:22px 0 8px;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px}
+  .route a{display:flex;gap:10px;align-items:baseline;border:1px solid var(--border);border-radius:var(--r);
+    padding:9px 12px;color:var(--text);font-size:13.5px;font-weight:500;height:100%}
+  .route a:hover{border-color:var(--accent);text-decoration:none}
+  .route .n{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .route .m{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--faint);white-space:nowrap}
+  .route a.done{border-color:var(--accent);background:var(--accent-soft)}
+
+  .anim{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:12px 14px 12px;margin:22px 0}
+  .anim__head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+  .anim__title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--faint)}
+  .anim__btn{font-family:var(--sans);font-size:12.5px;font-weight:500;color:var(--accent-text);cursor:pointer;
+    background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:4px 10px}
+  .anim__btn:hover{border-color:var(--accent)}
+  .anim__scroll{overflow-x:auto}
+  .anim svg{display:block;width:100%;height:auto}
+  .anim__cap{font-size:13.5px;color:var(--muted);margin:8px 2px 0;max-width:none;min-height:3.2em}
+  .anim__cap b{color:var(--text);font-weight:600}
+  .anim__src{font-size:11.5px;color:var(--faint);margin:6px 2px 0;max-width:none}
+  @media (max-width:620px){.anim svg.wide{min-width:560px}}
+
+  .g-grid{stroke:var(--border);stroke-width:1}
+  .g-axis{stroke:var(--border-strong);stroke-width:1}
+  .g-txt{font-family:var(--sans);font-size:11px;fill:var(--faint)}
+  .g-lbl{font-family:var(--sans);font-size:11.5px;fill:var(--muted)}
+  .g-acc{font-family:var(--sans);font-size:11.5px;fill:var(--accent-text);font-weight:600}
+  .g-crit{font-family:var(--sans);font-size:11.5px;fill:var(--crit);font-weight:600}
+  .g-ok{font-family:var(--sans);font-size:11.5px;fill:var(--ok);font-weight:600}
+  .g-dot{fill:var(--text)}
+  .g-dot.dim{fill:var(--faint)}
+  .g-dot.hot{fill:var(--crit)}
+  .g-fit{fill:none;stroke:var(--muted);stroke-width:1.6;stroke-dasharray:2 3}
+  .g-proj{fill:none;stroke:var(--accent);stroke-width:2;stroke-dasharray:6 4;stroke-linecap:round}
+  .g-band{fill:var(--accent);opacity:.15}
+  .g-ceil{fill:none;stroke:var(--crit);stroke-width:1.3;stroke-dasharray:5 4}
+  .g-mark{fill:none;stroke:var(--crit);stroke-width:2}
+  .g-med{fill:none;stroke:var(--accent);stroke-width:2}
+  .g-ghost{fill:none;stroke:var(--warn);stroke-width:1.3;stroke-dasharray:4 4}
+  .g-win{fill:var(--surface-3);opacity:.7}
+  .g-win2{fill:var(--accent-soft)}
+  .g-arrow{fill:none;stroke:var(--crit);stroke-width:1.6}
+  .g-arrow.ok{stroke:var(--warn)}
+  .g-node{fill:var(--bg);stroke:var(--border-strong);stroke-width:1.3}
+  .g-node.on{fill:var(--accent-soft);stroke:var(--accent);stroke-width:2}
+  .g-edge{fill:none;stroke:var(--border-strong);stroke-width:1.4}
+  .g-edge.on{stroke:var(--accent);stroke-width:2.4}
+  .g-head{fill:var(--border-strong)}
+  .g-head.on{fill:var(--accent)}
+  .g-name{font-family:var(--mono);font-size:13px;fill:var(--text)}
+  .g-elbl{font-family:var(--mono);font-size:11px;fill:var(--muted)}
+  .g-elbl.on{fill:var(--accent-text);font-weight:600}
+
+  .flow{list-style:none;margin:4px 0 0;padding:0;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:18px}
+  .flow li{position:relative;min-width:0}
+  .flow li+li::before{content:"→";position:absolute;left:-15px;top:50%;transform:translateY(-50%);color:var(--faint);font-size:13px}
+  .flow button{all:unset;box-sizing:border-box;display:block;width:100%;height:100%;cursor:pointer;background:var(--bg);
+    border:1px solid var(--border);border-radius:9px;padding:9px 9px 8px;transition:border-color .2s,background .2s}
+  .flow button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .flow button[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-soft)}
+  .flow .t{display:block;font-family:var(--mono);font-size:11px;font-weight:600;color:var(--accent-text)}
+  .flow .s{display:block;font-size:11.5px;color:var(--muted);line-height:1.35;margin-top:3px}
+  .flow-detail{margin:12px 0 0;background:var(--bg);border:1px solid var(--border);border-radius:9px;padding:10px 12px;min-height:5.4em}
+  .flow-detail h4{font-family:var(--mono);font-size:12.5px;color:var(--accent-text);margin:0 0 3px}
+  .flow-detail p{margin:0;font-size:13.5px;color:var(--muted);max-width:none}
+  .flow-detail code{font-family:var(--mono);font-size:12px;color:var(--text)}
+  .pulse{animation:pulse 1.1s ease-out}
+  @keyframes pulse{from{box-shadow:0 0 0 0 color-mix(in srgb,var(--accent) 45%,transparent)}to{box-shadow:0 0 0 9px transparent}}
+  @media (max-width:760px){
+    .flow{grid-template-columns:repeat(3,minmax(0,1fr))}
+    .flow li:nth-child(4)::before{content:none}
+  }
+  @media (max-width:460px){
+    .flow{grid-template-columns:1fr;gap:14px}
+    .flow li+li::before{content:"↓";left:50%;top:-15px;transform:translateX(-50%)}
+    .flow li:nth-child(4)::before{content:"↓"}
+  }
+
+  .runs{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 0}
+  .runs span{font-family:var(--mono);font-size:11.5px;border:1px solid var(--border);border-radius:6px;padding:3px 8px;color:var(--faint);background:var(--bg)}
+  .runs span.on{border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft);font-weight:600}
+  .runs span.past{color:var(--muted)}
+  .evlog{list-style:none;margin:10px 0 0;padding:0;font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .evlog li{padding:4px 0;border-top:1px solid var(--border)}
+  .evlog li:first-child{border-top:none}
+  .evlog b{color:var(--text)}
+
+  dl.read{display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;margin:14px 0;font-size:14px}
+  dl.read dt{font-family:var(--mono);font-size:12.5px;color:var(--accent-text);white-space:nowrap}
+  dl.read dd{margin:0;color:var(--muted)}
+  @media (max-width:520px){dl.read{grid-template-columns:1fr}dl.read dd{margin-bottom:6px}}
+  .calc{font-family:var(--mono);font-size:12.8px;background:var(--surface-2);border-radius:8px;padding:10px 14px;margin:14px 0;overflow-x:auto;white-space:pre;color:var(--text)}
+</style>
+</head>
+<body>
+<div class="tut-bar" aria-hidden="true"><i id="tutBar"></i></div>
+<a class="skip-link visually-hidden" href="#content">Skip to content</a>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="index.html">
+      <div class="brand__mark" aria-hidden="true">▲</div>
+      <div>
+        <div class="brand__name">AWR Capacity<br>Predictions</div>
+        <div class="brand__sub">Documentation</div>
+      </div>
+    </a>
+    <nav class="nav" aria-label="Documentation pages">
+      <div class="nav__group">Start</div>
+      <a class="nav-page" href="index.html"><span class="n">01</span> Introduction</a>
+      <a class="nav-page" href="start.html"><span class="n">02</span> Getting started</a>
+      <a class="nav-page" href="tutorial.html"><span class="n">03</span> Tutorial</a>
+      <div class="nav__group">Guides</div>
+      <a class="nav-page" href="concepts.html"><span class="n">04</span> How it works</a>
+      <a class="nav-page" href="usage.html"><span class="n">05</span> Usage</a>
+      <a class="nav-page" href="testing.html"><span class="n">06</span> Testing</a>
+      <div class="nav__group">Reference</div>
+      <a class="nav-page" href="reference.html"><span class="n">07</span> Reference</a>
+    </nav>
+    <div class="sidebar__foot">
+      <button class="theme-toggle" id="themeBtn" type="button">◐ System</button>
+      <a class="sidebar__link" href="demo/cap_report_demo.html" target="_blank" rel="noopener">Sample report ↗</a>
+      <a class="sidebar__link" href="https://github.com/davidbudac/awr_capacity_predictions">Source on GitHub ↗</a>
+    </div>
+  </aside>
+
+  <main class="main" id="content" tabindex="-1">
+    <div class="wrap">
+
+      <!-- ===================== HERO ===================== -->
+      <section class="hero" id="tutorial" data-min="0">
+        <span class="eyebrow">Tutorial</span>
+        <h1>From zero to reading the report, in fifteen minutes</h1>
+        <p class="lead">Install the suite, read your first report, run it every day, and learn what
+          each number means. Every example on this page is real output from the
+          <a href="demo/cap_report_demo.txt" target="_blank" rel="noopener">sample report</a>, and
+          every command is one the repository ships.</p>
+        <ol class="route" id="route">
+          <li><a href="#picture"><span class="n">1</span> The big picture<span class="m">1 min</span></a></li>
+          <li><a href="#install"><span class="n">2</span> Install<span class="m">2 min</span></a></li>
+          <li><a href="#first-report"><span class="n">3</span> First report<span class="m">2 min</span></a></li>
+          <li><a href="#daily"><span class="n">4</span> Day to day<span class="m">3 min</span></a></li>
+          <li><a href="#forecast"><span class="n">5</span> Forecasts<span class="m">3 min</span></a></li>
+          <li><a href="#anomalies"><span class="n">6</span> Anomalies<span class="m">2 min</span></a></li>
+          <li><a href="#shift"><span class="n">7</span> CPU level shifts<span class="m">1 min</span></a></li>
+          <li><a href="#severity"><span class="n">8</span> Freshness, severity<span class="m">1 min</span></a></li>
+        </ol>
+      </section>
+
+      <div class="callout">
+        <span class="ico">i</span>
+        <p><strong>The example database.</strong> The sample report comes from ECOMPRD, a fictional
+        e-commerce CDB with one application PDB, SHOP_PDB, and 150 days of designed hourly AWR
+        history. Its last day is 2026-10-17. The charts below replot the same daily values the report
+        was computed from.</p>
+      </div>
+
+      <!-- ===================== 1. PICTURE ===================== -->
+      <div class="section-head" id="picture" data-min="1">
+        <span class="eyebrow">Step 1 <span class="mins">~1 min</span></span>
+        <h2>The big picture</h2>
+        <p>Five layers of views, stacked on AWR, inside the database.</p>
+      </div>
+
+      <p>AWR already writes a snapshot of every database every hour by default. The suite reads those
+        rows and never writes to them. It stacks views on top: one layer cleans the snapshots into a
+        daily series, the next fits a forecast and scores anomalies, and the last turns both into
+        alerts. Click a stage, or let it run, to follow the tablespace AUDIT_TRAIL through it.</p>
+
+      <figure class="anim" id="pipe" aria-label="Pipeline from AWR snapshots to alerts">
+        <div class="anim__head">
+          <span class="anim__title">One tablespace through the pipeline</span>
+          <button class="anim__btn" type="button" data-role="toggle">❚❚ Pause</button>
+        </div>
+        <ol class="flow">
+          <li><button type="button" aria-pressed="true"><span class="t">DBA_HIST_*</span><span class="s">AWR snapshots</span></button></li>
+          <li><button type="button" aria-pressed="false"><span class="t">CAPV_</span><span class="s">the seam</span></button></li>
+          <li><button type="button" aria-pressed="false"><span class="t">CAPD_</span><span class="s">one row per day</span></button></li>
+          <li><button type="button" aria-pressed="false"><span class="t">CAPF_ · CAPA_</span><span class="s">forecast, anomaly</span></button></li>
+          <li><button type="button" aria-pressed="false"><span class="t">CAPR_</span><span class="s">alerts, labels</span></button></li>
+          <li><button type="button" aria-pressed="false"><span class="t">consumers</span><span class="s">report, pollers</span></button></li>
+        </ol>
+        <div class="flow-detail" aria-live="polite">
+          <h4 data-role="h"></h4>
+          <p data-role="p"></p>
+        </div>
+      </figure>
+
+      <p>The prefix of a view name tells you its layer. Only the <span class="inline">CAPV_</span>
+        views read <span class="inline">DBA_HIST_*</span>, so the same layers run unchanged on a local
+        AWR, on a central warehouse, or on the test fixture.</p>
+
+      <!-- ===================== 2. INSTALL ===================== -->
+      <div class="section-head" id="install" data-min="2">
+        <span class="eyebrow">Step 2 <span class="mins">~2 min</span></span>
+        <h2>Install</h2>
+        <p>One script does the preflight, the install and the first report.</p>
+      </div>
+
+      <p>You need Oracle Database 19c or newer with the Diagnostics Pack (AWR is part of it),
+        <span class="inline">sqlplus</span>, and a <span class="inline">sysdba</span> connection to
+        <span class="inline">CDB$ROOT</span>, where the AWR history lives. On the database host:</p>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__title">DB host · bash</span><span class="term__tag in">you run</span></div>
+<pre>git clone https://github.com/davidbudac/awr_capacity_predictions.git
+cd awr_capacity_predictions
+./quickstart.sh                      <span class="c-cmt"># sqlplus / as sysdba, CDB$ROOT</span></pre>
+      </div>
+
+      <p><span class="inline">quickstart.sh</span> runs three scripts in a row.
+        <span class="inline">doctor.sql</span> is a read-only preflight that checks grants, retention
+        and how much history each source has. If it reports a FAIL line, the quickstart stops before
+        installing and tells you why. <span class="inline">install.sql</span> creates the views and
+        packages in the current schema. <span class="inline">report/report.sql</span> spools the first
+        report. The end of the output looks like this:</p>
+
+      <div class="term">
+        <div class="term__bar"><span class="term__title">output</span><span class="term__tag">expect</span></div>
+<pre>  <span class="c-pass">All CAP* objects valid in schema SYS.</span>
+============================================================
+ Install complete (seam_mode = local, schema = SYS).
+============================================================
+...
+Report written to: reports/cap_report_CDB1_202609221410.txt</pre>
+      </div>
+
+      <div class="callout warn">
+        <span class="ico">!</span>
+        <p><strong>A fresh database says INSUFFICIENT_HISTORY.</strong> Stock AWR keeps 8 days and a
+        forecast needs <span class="inline">min_train_days</span> (14) daily points. Raise the
+        retention once; the forecasts fill in over the next weeks. This is optional and it is the only
+        change the suite asks of Oracle.</p>
+      </div>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__title">SQL*Plus · CDB$ROOT</span><span class="term__tag in">optional · once</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> EXEC DBMS_WORKLOAD_REPOSITORY.MODIFY_SNAPSHOT_SETTINGS(retention =&gt; 90*24*60);</pre>
+      </div>
+
+      <p>As <span class="inline">/ as sysdba</span>, the quickstart installs into SYS and
+        <span class="inline">install.sql</span> warns you about it. That is fine for a first look. For
+        a lasting install, create a dedicated owner once and install into it. Always start SQL*Plus
+        in the repository root, because the <span class="inline">@@</span> includes resolve from
+        there.</p>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__title">SQL*Plus · CDB$ROOT</span><span class="term__tag in">production path</span></div>
+<pre>sqlplus / as sysdba
+<span class="c-prompt">SQL&gt;</span> @create_owner.sql                           <span class="c-cmt">-- C##AWRCAP, direct DBA_HIST_* grants</span>
+<span class="c-prompt">SQL&gt;</span> ALTER SESSION SET CURRENT_SCHEMA = C##AWRCAP;
+<span class="c-prompt">SQL&gt;</span> DEFINE seam_mode = 'local'
+<span class="c-prompt">SQL&gt;</span> @install.sql                                <span class="c-cmt">-- idempotent; keeps knobs you changed</span>
+<span class="c-prompt">SQL&gt;</span> @report/report.sql</pre>
+      </div>
+
+      <p>The suite writes only to its own <span class="inline">CAP_*</span> tables. To remove
+        everything, run <span class="inline">@uninstall.sql</span>.</p>
+
+      <!-- ===================== 3. FIRST REPORT ===================== -->
+      <div class="section-head" id="first-report" data-min="2">
+        <span class="eyebrow">Step 3 <span class="mins">~2 min</span></span>
+        <h2>Read the first report</h2>
+        <p>Start at the top. Section 0 is the to-do list; the rest is the evidence.</p>
+      </div>
+
+      <p>The report is plain text in <span class="inline">reports/</span>. Its header says which
+        database it covers, which thresholds were in force and whether the alert list was evaluated
+        live. The coverage line says how much history there is and how the series were graded.</p>
+
+      <div class="term">
+        <div class="term__bar"><span class="term__title">reports/cap_report_ECOMPRD_….txt</span><span class="term__tag">sample, excerpt</span></div>
+<pre>Database : ECOMPRD
+Config   : days-to-full WARN&lt;=90 CRIT&lt;=30 ; CPU saturation 80%
+Source   : LIVE (CAPR views evaluated now)
+
+== 0. AT A GLANCE (from CAPR_ALERTS, or CAPR_ALERTS_LATEST when the source is SNAPSHOT) ==
+ECOMPRD (dbid 3141592653): current, 151 days of AWR, 24 series (19 OK, 0 low confidence, 4 flat, 0 short history, 1 cyclic), 0 not current
+
+ CRIT  WARN  INFO
+----- ----- -----
+    1    10     0
+
+SEV  KIND             DB/PDB               MESSAGE
+---- ---------------- -------------------- -----------------------------------------------------------------------
+<span class="c-crit">CRIT TBSPC_FULL       ECOMPRD/SHOP_PDB     Tablespace AUDIT_TRAIL forecast full in 17 days (92.0% used, 613.7 MiB/day)</span>
+<span class="c-warn">WARN CPU_ANOM         ECOMPRD              Host CPU 69.8% busy on 2026-10-09 vs usual 46.8% for that weekday, robust z +7.7 (+49% vs median)</span>
+<span class="c-warn">WARN CPU_SAT          ECOMPRD              Host CPU (busy-hour p95) forecast to reach 80% busy in 51 days (now 65.0% busy)</span>
+<span class="c-warn">WARN DBCPU_ANOM       ECOMPRD/SHOP_PDB     13 consecutive days, latest 2026-10-17, peak robust z +6.0: DB CPU 21.6% of host CPUs ...</span>
+<span class="c-warn">WARN SERIES_LIMIT     ECOMPRD/SHOP_PDB     SESSIONS forecast to reach 90% of its limit (1300 COUNT) in 36 days (now 1091, 83.9% of limit)</span>
+<span class="c-warn">WARN TBSPC_NEARFULL   ECOMPRD/SHOP_PDB     Tablespace CUSTOMER_DATA is 95.0% full now (152.02 of 160.00 GiB; forecast quality OK)</span>
+<span class="c-dim">... 5 more WARN rows</span></pre>
+      </div>
+
+      <p>Read each alert row left to right:</p>
+      <dl class="read">
+        <dt>SEV</dt><dd>CRIT, WARN or INFO. The list is sorted by it.</dd>
+        <dt>KIND</dt><dd>What kind of problem. <span class="inline">TBSPC_FULL</span> is a forecast
+          (it will fill), <span class="inline">TBSPC_NEARFULL</span> is a level (it is full now),
+          <span class="inline">*_ANOM</span> is an unusual day.</dd>
+        <dt>DB/PDB</dt><dd>The database and container. ECOMPRD alone means the root or host level.</dd>
+        <dt>MESSAGE</dt><dd>The number that tripped the alert and the number it was compared with.</dd>
+      </dl>
+
+      <p>Below section 0, every section holds the evidence for one family of alerts:</p>
+
+      <div class="tablewrap">
+        <table>
+          <caption>Report sections</caption>
+          <thead><tr><th scope="col">Section</th><th scope="col">Answers</th></tr></thead>
+          <tbody>
+            <tr><td class="kt">1a · 1b</td><td class="def">Which tablespace fills first, and which is nearly full right now.</td></tr>
+            <tr><td class="kt">2</td><td class="def">Projected size at +30, +90 and +180 days, with the 95% band.</td></tr>
+            <tr><td class="kt">3</td><td class="def">Unusual tablespace growth days.</td></tr>
+            <tr><td class="kt">4</td><td class="def">CPU trend and days until 80% busy.</td></tr>
+            <tr><td class="kt">5 · 5b</td><td class="def">Unusual CPU days and hours; sustained CPU level shifts.</td></tr>
+            <tr><td class="kt">6</td><td class="def">The optional Tier 2 (OML exponential smoothing) second opinion and a backtest of both engines.</td></tr>
+            <tr><td class="kt">7 · 7b</td><td class="def">Sessions, processes, redo, DB size, ASM, TEMP and UNDO against their ceilings, and their unusual days.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>The report is read-only. It only runs SELECT statements, so you can run it as often as you
+        like.</p>
+
+      <!-- ===================== 4. DAY TO DAY ===================== -->
+      <div class="section-head" id="daily" data-min="3">
+        <span class="eyebrow">Step 4 <span class="mins">~3 min</span></span>
+        <h2>Day to day</h2>
+        <p>A daily report, an alert feed with memory, and a drill-down when a number looks wrong.</p>
+      </div>
+
+      <h3>Run the report on a schedule</h3>
+      <p><span class="inline">report/run_report.sh</span> is the cron wrapper. It runs the drivers from
+        the repository root and exits non-zero when sqlplus fails or any ORA- or SP2- line appears, so
+        cron mail tells you when a run broke.</p>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__title">crontab · oracle</span><span class="term__tag in">example</span></div>
+<pre>30 6 * * * . /home/oracle/.bash_profile; /opt/awrcap/report/run_report.sh "/ as sysdba" --html --keep 14 &gt;&gt; /var/log/awrcap_report.log 2&gt;&amp;1</pre>
+      </div>
+
+      <p>Add <span class="inline">--schema C##AWRCAP</span> when the suite lives in a dedicated owner,
+        <span class="inline">--csv</span> for one CSV per section view, and
+        <span class="inline">--scope 3141592653:3141592654</span> to report on one container only.
+        By hand, the same drivers are <span class="inline">@report/report.sql</span>,
+        <span class="inline">@report/report_html.sql</span> and
+        <span class="inline">@report/report_csv.sql</span>.</p>
+
+      <h3>Poll the alerts</h3>
+      <p><span class="inline">CAPR_ALERTS</span> is section 0 as a view: one row per current issue.
+        A monitoring tool can read it directly.</p>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__title">SQL*Plus</span><span class="term__tag in">example</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> SELECT severity, kind, db_pdb, message
+  2    FROM capr_alerts ORDER BY sev_rank;
+
+<span class="c-cmt">-- alarm on the numbers, without parsing the message text</span>
+<span class="c-prompt">SQL&gt;</span> SELECT kind, db_pdb, series_key, value, threshold, unit
+  2    FROM capr_alerts WHERE severity = 'CRIT';</pre>
+      </div>
+
+      <h3>Give the alerts a memory</h3>
+      <p><span class="inline">CAPR_ALERTS</span> is evaluated every time you query it and remembers
+        nothing. <span class="inline">cap_results.refresh</span> stores each run and keeps one state
+        per alert, keyed by a <span class="inline">state_key</span> that stays the same from day to
+        day. Each run compares what it sees with the stored states and records an event.</p>
+
+      <figure class="anim" id="life" aria-label="Alert state lifecycle across refresh runs">
+        <div class="anim__head">
+          <span class="anim__title">One alert across five refresh runs (example sequence)</span>
+          <button class="anim__btn" type="button" data-role="replay">↻ Replay</button>
+        </div>
+        <div class="anim__scroll">
+        <svg class="wide" viewBox="0 0 720 190" role="img" aria-label="State diagram: no state, OPEN, RESOLVED. NEW opens a state; ESCALATED and DEESCALATED change its severity; RESOLVED after the alert is missing from resolve_grace_runs runs; REOPENED when it comes back.">
+          <defs>
+            <marker id="lcHead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" class="g-head"></path></marker>
+            <marker id="lcHeadOn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" class="g-head on"></path></marker>
+          </defs>
+          <path data-e="NEW" class="g-edge" d="M128,100 L272,100" marker-end="url(#lcHead)"></path>
+          <path data-e="SEV" class="g-edge" d="M330,78 C300,18 420,18 390,78" marker-end="url(#lcHead)"></path>
+          <path data-e="RESOLVED" class="g-edge" d="M420,88 C480,58 540,58 590,88" marker-end="url(#lcHead)"></path>
+          <path data-e="REOPENED" class="g-edge" d="M590,114 C540,146 480,146 420,114" marker-end="url(#lcHead)"></path>
+          <rect data-n="NONE" class="g-node" x="22" y="78" width="106" height="44" rx="10"></rect>
+          <rect data-n="OPEN" class="g-node" x="272" y="78" width="150" height="44" rx="10"></rect>
+          <rect data-n="RESOLVED" class="g-node" x="590" y="78" width="112" height="44" rx="10"></rect>
+          <text class="g-name" x="75" y="105" text-anchor="middle">no state</text>
+          <text class="g-name" x="347" y="105" text-anchor="middle" data-role="opentxt">OPEN</text>
+          <text class="g-name" x="646" y="105" text-anchor="middle">RESOLVED</text>
+          <text data-l="NEW" class="g-elbl" x="200" y="92" text-anchor="middle">NEW</text>
+          <text data-l="SEV" class="g-elbl" x="360" y="16" text-anchor="middle">ESCALATED / DEESCALATED</text>
+          <text data-l="RESOLVED" class="g-elbl" x="505" y="56" text-anchor="middle">RESOLVED</text>
+          <text data-l="REOPENED" class="g-elbl" x="505" y="160" text-anchor="middle">REOPENED</text>
+          <text class="g-txt" x="505" y="182" text-anchor="middle">missing from resolve_grace_runs (2) runs → RESOLVED</text>
+        </svg>
+        </div>
+        <div class="runs" data-role="runs">
+          <span>run 1</span><span>run 2</span><span>run 3</span><span>run 4</span><span>run 5</span>
+        </div>
+        <ol class="evlog" data-role="log"></ol>
+        <p class="anim__src">The rules are those of <span class="inline">cap_results.refresh</span>; the sequence of runs is an example.</p>
+      </figure>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__title">SQL*Plus</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> EXEC cap_results.refresh
+<span class="c-prompt">SQL&gt;</span> SELECT severity, kind, db_pdb, message, age_days, events_since
+  2    FROM capr_alerts_latest ORDER BY sev_rank;   <span class="c-cmt">-- open, not acked, as of the last run</span>
+
+<span class="c-cmt">-- acknowledge: hidden until the date (NULL = until it resolves)</span>
+<span class="c-prompt">SQL&gt;</span> EXEC cap_results.ack('TBSPC_FULL|3141592653|3141592654|AUDIT_TRAIL|-', SYSDATE + 7, 'disk ordered, CHG0042')
+
+<span class="c-prompt">SQL&gt;</span> SELECT * FROM capr_alert_events WHERE run_id &gt; :last_run_id;   <span class="c-cmt">-- poll the changes</span></pre>
+      </div>
+
+      <p>An escalation or a reopen clears the ack, so a hidden alert comes back when it gets worse.</p>
+
+      <h3>Let the scheduler do it</h3>
+      <p><span class="inline">install_jobs.sql</span> creates three DBMS_SCHEDULER jobs in the suite's
+        schema, all disabled. Enable the ones you want:</p>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__title">SQL*Plus · suite owner</span><span class="term__tag in">optional</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> @install_jobs.sql
+<span class="c-prompt">SQL&gt;</span> EXEC DBMS_SCHEDULER.ENABLE('CAP_REFRESH_JOB')       <span class="c-cmt">-- daily 01:30, cap_results.refresh</span>
+<span class="c-prompt">SQL&gt;</span> EXEC DBMS_SCHEDULER.ENABLE('CAP_ML_RETRAIN')        <span class="c-cmt">-- daily 02:00, Tier 2 models</span>
+<span class="c-prompt">SQL&gt;</span> EXEC DBMS_SCHEDULER.ENABLE('CAP_REPORT_SPOOL_JOB')  <span class="c-cmt">-- daily 03:00, alert snapshot file</span></pre>
+      </div>
+
+      <p><span class="inline">CAP_ML_RETRAIN</span> only matters if you use Tier 2. Train it once by hand
+        with <span class="inline">EXEC cap_forecast_ml.train_all</span> (it needs
+        <span class="inline">CREATE MINING MODEL</span>), and section 6 of the report fills in.</p>
+
+      <h3>Drill into one series</h3>
+      <p>When a row looks wrong, the drill-down prints everything behind it: the fit, every daily
+        value with its fitted value and residual, the anomaly arithmetic, and the segments that grew
+        the most.</p>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__title">SQL*Plus · repo root</span><span class="term__tag in">you run</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> @report/drill_tbspc.sql AUDIT_TRAIL 3141592654   <span class="c-cmt">-- tablespace, con_dbid (optional)</span>
+<span class="c-prompt">SQL&gt;</span> @report/drill_cpu.sql DB_CPU_PCT 3141592654</pre>
+      </div>
+
+      <p>The same views also feed three optional dashboards:
+        <a href="usage.html#kibana">Kibana</a>, <a href="usage.html#grafana">Grafana over ORDS</a> and
+        an <a href="usage.html#apex">Oracle APEX app</a>. They read the numbers this tutorial
+        explains, so nothing below changes when you switch to one.</p>
+
+      <!-- ===================== 5. FORECAST ===================== -->
+      <div class="section-head" id="forecast" data-min="3">
+        <span class="eyebrow">Step 5 <span class="mins">~3 min</span></span>
+        <h2>Forecasts, bands and days-to-full</h2>
+        <p>A straight line through 90 days, a band around it, and the day it meets the ceiling.</p>
+      </div>
+
+      <p>Take the CRIT row: AUDIT_TRAIL in SHOP_PDB. The daily series is the tablespace's used space
+        at each day's last snapshot. Press replay to watch the 90 training days arrive, the line get
+        fitted, and the projection run into the 130 GiB maxsize.</p>
+
+      <figure class="anim" id="fc" aria-label="AUDIT_TRAIL forecast animation">
+        <div class="anim__head">
+          <span class="anim__title">AUDIT_TRAIL · ECOMPRD/SHOP_PDB · GiB used</span>
+          <button class="anim__btn" type="button" data-role="replay">↻ Replay</button>
+        </div>
+        <div class="anim__scroll"><svg class="wide" viewBox="0 0 720 330" role="img"
+          aria-label="90 daily values rising from 62 to 119.6 GiB, faster in the last month. A fitted line, then a projection from today with a widening band that reaches the 130 GiB ceiling after about 17 days."></svg></div>
+        <p class="anim__cap" aria-live="polite"></p>
+        <p class="anim__src">Values: the sample's daily AUDIT_TRAIL series, 2026-07-20 to 2026-10-17 (train_days 90). Fit numbers from report sections 1a and 2.</p>
+      </figure>
+
+      <p>The fit is ordinary least squares over the last <span class="inline">train_days</span> (90)
+        days. The projection starts at today's value, not at the end of the fitted line, so you can
+        check every number with a calculator:</p>
+
+      <div class="calc">slope       613.664 MiB/day = 0.5993 GiB/day
++30 days    119.60 + 30 × 0.5993 = 137.58 GiB        (section 2: +30_GIB 137.58)
+days_full   (130.00 − 119.60) / 0.5993 = 17.4 → 17   (section 1a: DAYS_FULL 17)</div>
+
+      <p>The shaded band is the 95% prediction band. It widens with distance, because the slope is
+        uncertain and every day adds noise; at +180 days it is 214.58 to 240.35 GiB. WORST and BEST
+        (16 and 18 days) come from the 95% confidence interval on the slope. A blank BEST means the
+        interval includes zero growth, so the tablespace might never fill.</p>
+
+      <p>Now look at ACCEL 1.92 in section 1a. It is the slope of the last
+        <span class="inline">recent_days</span> (28) divided by the 90-day slope. Above 1.5 means
+        growth is speeding up. AUDIT_TRAIL tripled its daily growth in mid-September, which you can
+        see as the bend in the chart. At the recent rate, 1.92 × 613.664 ≈ 1,178 MiB/day, the last
+        10.40 GiB lasts about 9 days, not 17. The Tier 2 value in section 6 agrees: its +30 estimate
+        is 155.35 GiB, past the ceiling. Treat 17 days as the optimistic end. The report also prints
+        what to do: NEED_90_GIB 54.40 (space to add so the upper band stays under the limit for 90
+        days) and ADD_BY 2026-11-02 (the worst-case fill date).</p>
+
+      <h3>Quality grades</h3>
+      <p>Not every line deserves trust. Each fit gets one grade, and only OK forecasts page.</p>
+
+      <div class="tablewrap">
+        <table>
+          <caption>Quality grades, with an example from the sample</caption>
+          <thead><tr><th scope="col">Grade</th><th scope="col">Means</th><th scope="col">Sample</th></tr></thead>
+          <tbody>
+            <tr><td><span class="pill ok">OK</span></td><td class="def">Enough history and a fit good enough to act on. Tablespaces need R² ≥ <span class="inline">r2_gate</span> (0.60); CPU needs a slope outside its own 95% interval.</td><td class="def">AUDIT_TRAIL, R² 0.916</td></tr>
+            <tr><td><span class="pill warn">LOW_CONFIDENCE</span></td><td class="def">The line explains too little of the movement. Shown, never paged.</td><td class="def">none in the sample</td></tr>
+            <tr><td><span class="pill warn">FLAT</span></td><td class="def">No growth at all, so no fill date.</td><td class="def">PRODUCT_CATALOG, 12.00 GiB every day</td></tr>
+            <tr><td><span class="pill warn">CYCLIC</span></td><td class="def">At least <span class="inline">cyclic_min_cliffs</span> (2) purges in the window. Judged on its peaks, not the sawtooth.</td><td class="def">SESSION_STORE, purged every 30 days, peaks at 30.8%</td></tr>
+            <tr><td><span class="pill crit">INSUFFICIENT_HISTORY</span></td><td class="def">Fewer than <span class="inline">min_train_days</span> (14) days. A fresh install.</td><td class="def">none in the sample</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>CPU works the same way, with one difference: the projection starts at ANCHOR, the median of
+        the last <span class="inline">shift_days</span> (7) complete days, because a single day of CPU
+        is noisy. Host BUSY_P95 (the busy hour) has ANCHOR 69.62 and slope 0.2018 points per day, so
+        (80 − 69.62) / 0.2018 = 51 days to the <span class="inline">cpu_sat_pct</span> (80) line. That is
+        the CPU_SAT row in section 0.</p>
+
+      <!-- ===================== 6. ANOMALIES ===================== -->
+      <div class="section-head" id="anomalies" data-min="2">
+        <span class="eyebrow">Step 6 <span class="mins">~2 min</span></span>
+        <h2>Anomalies and baseline modes</h2>
+        <p>Is today unusual compared with days that should look like it?</p>
+      </div>
+
+      <p>An anomaly is a day (or, for CPU, an hour) that sits too far from a baseline. The baseline is
+        a median of comparable past points, and "too far" is measured with the MAD (median absolute
+        deviation), so one bad day in the history cannot drag the baseline with it. Here is the
+        CPU_ANOM row from section 0: host CPU on Friday 2026-10-09, compared with the 8 Fridays
+        before it.</p>
+
+      <figure class="anim" id="an" aria-label="Anomaly animation, host CPU on 2026-10-09">
+        <div class="anim__head">
+          <span class="anim__title">Host BUSY_PCT · Fridays · SAME_DOW baseline</span>
+          <button class="anim__btn" type="button" data-role="replay">↻ Replay</button>
+        </div>
+        <div class="anim__scroll"><svg class="wide" viewBox="0 0 720 300" role="img"
+          aria-label="Eight Fridays between 43.8 and 49.7 percent busy, their median 46.82, a band of plus or minus 9 points, and 2026-10-09 at 69.8 percent, far above the band."></svg></div>
+        <p class="anim__cap" aria-live="polite"></p>
+        <p class="anim__src">Values: daily host busy% of the sample, the Fridays 2026-08-14 to 2026-10-09. Median, threshold and z from report section 5.</p>
+      </figure>
+
+      <div class="calc">MAD σ       1.4826 × median |x − 46.82| = 2.07, floored at cpu_min_mad_pct 3.00
+threshold   mad_k × σ = 3 × 3.00 = 9.00 points
+robust z    (69.80 − 46.82) / 3.00 = +7.7   → |z| &gt; 3 → HIGH</div>
+
+      <p>The floor matters. A very steady baseline has a tiny MAD, and without a floor every small
+        wobble would flag. For tablespaces the floor is <span class="inline">abs_floor_bytes</span>
+        (100 MiB per day).</p>
+
+      <p>Every point is scored against more than one baseline:</p>
+
+      <div class="tablewrap">
+        <table>
+          <caption>Baseline modes (report column MODE)</caption>
+          <thead><tr><th scope="col">Mode</th><th scope="col">Compares with</th><th scope="col">Raises alerts by default</th></tr></thead>
+          <tbody>
+            <tr><td class="kt">TRAILING · TRL</td><td class="def">The last <span class="inline">mad_window_days</span> (28) days. "Unusual lately?"</td><td class="def">tablespaces, fixed-ceiling series</td></tr>
+            <tr><td class="kt">SAME_DOW · DOW</td><td class="def">The same weekday over the last <span class="inline">dow_weeks</span> (8) weeks. "Unusual for a Friday?"</td><td class="def">CPU</td></tr>
+            <tr><td class="kt">HOUR_OF_WEEK · HOW</td><td class="def">The same weekday and hour over those weeks, CPU only. "Unusual for Friday 10:00?"</td><td class="def">none (shown in section 5)</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>Which modes alert is set per family by the bitmask knobs
+        <span class="inline">alert_modes_tbspc</span>, <span class="inline">alert_modes_cpu</span> and
+        <span class="inline">alert_modes_series</span> (1 = TRAILING, 2 = SAME_DOW, 4 = HOUR_OF_WEEK).
+        The report shows every mode; only the alerting ones reach section 0.</p>
+
+      <p>Two things in the sample show how the modes behave. First, a trailing baseline adapts.
+        AUDIT_TRAIL's growth tripled on 2026-09-15; section 3 flags it under TRL until 2026-09-28,
+        then stops, because by then the new rate fills half the 28-day window and has become the
+        median. The lasting change is now the forecast's job (ACCEL 1.92). Second, consecutive
+        flagged days collapse into one alert row: SHOP_PDB's DB CPU flagged on 13 days in a row and
+        section 0 shows a single DBCPU_ANOM row, "13 consecutive days, latest 2026-10-17". Section 0
+        looks back <span class="inline">anomaly_report_days</span> (14) days; the report sections
+        print the last 30.</p>
+
+      <!-- ===================== 7. CPU SHIFT ===================== -->
+      <div class="section-head" id="shift" data-min="1">
+        <span class="eyebrow">Step 7 <span class="mins">~1 min</span></span>
+        <h2>CPU level shifts</h2>
+        <p>A step that stays, as opposed to a day that sticks out.</p>
+      </div>
+
+      <p>A release can raise CPU for good. A per-day anomaly would flag it every day until the
+        baseline catches up. <span class="inline">CAPA_CPU_SHIFT</span> asks a different question: is
+        the median of the last <span class="inline">shift_days</span> (7) days far from the median of
+        the <span class="inline">shift_baseline_days</span> (28) before it? SHOP_PDB's DB CPU is the
+        test case, and section 5b of the sample is empty. The chart shows why.</p>
+
+      <figure class="anim" id="sh" aria-label="CPU level shift animation, SHOP_PDB DB CPU">
+        <div class="anim__head">
+          <span class="anim__title">DB_CPU_PCT · ECOMPRD/SHOP_PDB · % of host CPUs</span>
+          <button class="anim__btn" type="button" data-role="replay">↻ Replay</button>
+        </div>
+        <div class="anim__scroll"><svg class="wide" viewBox="0 0 720 300" role="img"
+          aria-label="35 days of DB CPU percent. The 28-day baseline window has median 11.98, the last 7 days have median 22.96. The gap of 10.98 points is below the 15 point threshold."></svg></div>
+        <p class="anim__cap" aria-live="polite"></p>
+        <p class="anim__src">Values: the sample's daily SHOP_PDB DB_CPU_PCT, 2026-09-13 to 2026-10-17. The 2026-10-05 to 2026-10-17 values appear in report section 5.</p>
+      </figure>
+
+      <p>A shift is flagged UP or DOWN only when both conditions hold: the gap between the medians is
+        more than <span class="inline">shift_min_pct</span> (15) percentage points, and every day of
+        the recent window sits outside the baseline median ± its MAD σ. Here the second condition holds
+        (all 7 days are above 14.98), but the gap is 22.96 − 11.98 = 10.98 points. So no CPU_SHIFT,
+        and the step reaches you as the DBCPU_ANOM episode instead. If a 10-point step matters on your
+        system, lower the knob:</p>
+
+      <div class="term in">
+        <div class="term__bar"><span class="term__title">SQL*Plus · suite owner</span><span class="term__tag in">tuning</span></div>
+<pre><span class="c-prompt">SQL&gt;</span> UPDATE cap_config SET cfg_value = 10 WHERE cfg_name = 'shift_min_pct';
+<span class="c-prompt">SQL&gt;</span> COMMIT;
+<span class="c-prompt">SQL&gt;</span> SELECT * FROM cap_cfg_check WHERE status &lt;&gt; 'OK';   <span class="c-cmt">-- any knob MISSING or BAD?</span></pre>
+      </div>
+
+      <p>When a shift is active, the per-day CPU anomalies inside it drop to INFO, so the shift row
+        carries the news once. An UP shift is WARN; a DOWN shift is INFO.</p>
+
+      <!-- ===================== 8. FRESHNESS / SEVERITY ===================== -->
+      <div class="section-head" id="severity" data-min="1">
+        <span class="eyebrow">Step 8 <span class="mins">~1 min</span></span>
+        <h2>Freshness and severity</h2>
+        <p>Is the data still arriving, and how loud should each finding be?</p>
+      </div>
+
+      <p>Two checks keep old data from looking current. Each forecast row carries
+        <span class="inline">is_current</span>: N when its last day is more than
+        <span class="inline">stale_days</span> (3) days behind the newest day of its database, as with a
+        dropped tablespace. A stale row is shown but never pages; the report marks it GATE
+        <span class="inline">stale</span>. That test compares the data with itself, so it cannot notice
+        when AWR stops altogether. <span class="inline">CAPR_FRESHNESS</span> compares the newest
+        snapshot with the clock instead, and <span class="inline">DATA_STALE</span> is listed first in
+        section 0 when it is <span class="inline">stale_hours</span> (36) old. A database silent for
+        <span class="inline">data_stale_max_days</span> (14) days is treated as retired and stops
+        alerting.</p>
+
+      <div class="tablewrap">
+        <table>
+          <caption>How each alert kind gets its severity (default knobs)</caption>
+          <thead><tr><th scope="col">Kind</th><th scope="col">WARN</th><th scope="col">CRIT</th><th scope="col">Sample</th></tr></thead>
+          <tbody>
+            <tr><td class="kt">TBSPC_FULL</td><td class="def">days_to_full ≤ dtf_warn (90)</td><td class="def">≤ dtf_crit (30)</td><td class="def">AUDIT_TRAIL, 17 days: CRIT</td></tr>
+            <tr><td class="kt">TBSPC_NEARFULL</td><td class="def">used ≥ nearfull_warn_pct (90%)</td><td class="def">≥ nearfull_crit_pct (97%)</td><td class="def">CUSTOMER_DATA, 95.0%: WARN</td></tr>
+            <tr><td class="kt">CPU_SAT · DBCPU_SAT</td><td class="def">days to 80% ≤ 90</td><td class="def">≤ 30</td><td class="def">host BUSY_P95, 51 days: WARN</td></tr>
+            <tr><td class="kt">CPU_HOT · DBCPU_HOT</td><td class="def">busy-hour p95 at or above 80% now</td><td class="def">no CRIT level</td><td class="def">HOT N everywhere</td></tr>
+            <tr><td class="kt">SERIES_LIMIT</td><td class="def">days to 90% of the limit ≤ 90</td><td class="def">≤ 30</td><td class="def">SESSIONS, 36 days: WARN</td></tr>
+            <tr><td class="kt">*_ANOM</td><td class="def">a HIGH day or episode</td><td class="def">no CRIT level</td><td class="def">CPU_ANOM, robust z +7.7: WARN</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p>The countdown kinds page only on an OK fit and a current series. The level kinds
+        (NEARFULL, HOT) page at any quality, because full now is full whatever the trend says. That is
+        why CUSTOMER_DATA warns at 95.0% although it grows 20 MiB a day and its fill date is 399 days
+        out. When a row in the warning window does not page, section 1a says why in its GATE column:
+        <span class="inline">low-q</span>, <span class="inline">short</span>,
+        <span class="inline">cyclic</span>, <span class="inline">stale</span> or
+        <span class="inline">lim&lt;used</span>. LOW and shrink-side anomalies are INFO.</p>
+
+      <div class="callout tip">
+        <span class="ico">▸</span>
+        <p><strong>You can now read the whole report.</strong> Thresholds are knobs in
+        <span class="inline">CAP_CONFIG</span>, and per-tablespace ceilings and thresholds go in
+        <span class="inline">CAP_TBSPC_OVERRIDE</span>; both survive a re-install. Every knob is listed
+        in the <a href="reference.html#config">Reference</a>.</p>
+      </div>
+
+      <!-- ===================== NEXT ===================== -->
+      <div class="section-head" id="next" data-min="0">
+        <span class="eyebrow">Read next</span>
+        <h2>Where to go from here</h2>
+        <p>Each page goes deeper into one part of this walkthrough.</p>
+      </div>
+      <div class="cardgrid">
+        <a class="card" href="usage.html">
+          <div class="k">05 · Guide</div>
+          <h3>Usage</h3>
+          <p>Every report section column by column, overrides, Tier 2, the dashboards.</p>
+          <div class="go">Run it your way →</div>
+        </a>
+        <a class="card" href="concepts.html">
+          <div class="k">04 · Guide</div>
+          <h3>How it works</h3>
+          <p>The seam, the layers, and why each statistical choice was made.</p>
+          <div class="go">See the architecture →</div>
+        </a>
+        <a class="card" href="reference.html">
+          <div class="k">07 · Reference</div>
+          <h3>Reference</h3>
+          <p>Every knob, every object, the advanced install and the caveats.</p>
+          <div class="go">Look it up →</div>
+        </a>
+      </div>
+
+      <nav class="pager" id="pager" aria-label="Previous and next page"></nav>
+
+      <footer class="foot">
+        AWR Capacity Predictions · in-database capacity forecasting · Oracle 19c floor<br>
+        Hand-maintained documentation. Design rationale lives in
+        <span class="inline">docs/design.md</span>.
+      </footer>
+
+    </div><!-- /wrap -->
+  </main>
+  <aside class="rail"><nav class="toc" id="toc" aria-label="On this page"></nav></aside>
+</div>
+<div class="tut-chip" id="tutChip" aria-hidden="true"></div>
+<script src="assets/site.js"></script>
+<script>
+(function () {
+  "use strict";
+  var NS = "http://www.w3.org/2000/svg";
+  var RM = !!(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches);
+
+  function el(tag, attrs, parent) {
+    var e = document.createElementNS(NS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function txt(parent, x, y, s, cls, anchor) {
+    var t = el("text", { x: x, y: y, "class": cls || "g-txt" }, parent);
+    if (anchor) t.setAttribute("text-anchor", anchor);
+    t.textContent = s;
+    return t;
+  }
+  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+  function phase(t, a, b) { return clamp01((t - a) / (b - a)); }
+
+  // A replayable timeline: draw(t) must render the state at time t (ms) from scratch.
+  // Starts when the figure scrolls into view; reduced motion renders the end state.
+  function timeline(fig, duration, draw) {
+    var raf = 0, start = 0;
+    function frame(now) {
+      if (!start) start = now;
+      var t = now - start;
+      draw(Math.min(t, duration));
+      if (t < duration) raf = requestAnimationFrame(frame);
+    }
+    function play() {
+      cancelAnimationFrame(raf);
+      if (RM) { draw(duration); return; }
+      start = 0;
+      raf = requestAnimationFrame(frame);
+    }
+    var btn = fig.querySelector('[data-role="replay"]');
+    if (btn) btn.addEventListener("click", play);
+    draw(RM ? duration : 0);
+    if (RM) return;
+    if ("IntersectionObserver" in window) {
+      var io = new IntersectionObserver(function (es) {
+        if (es[0].isIntersecting) { io.disconnect(); play(); }
+      }, { threshold: 0.45 });
+      io.observe(fig);
+    } else {
+      play();
+    }
+  }
+
+  function setCap(fig, html) {
+    var c = fig.querySelector(".anim__cap");
+    if (c && c.getAttribute("data-html") !== html) { c.innerHTML = html; c.setAttribute("data-html", html); }
+  }
+
+  function dateLabel(base, i) {
+    var d = new Date(Date.UTC(base[0], base[1] - 1, base[2]) + i * 864e5);
+    return d.toISOString().slice(0, 10);
+  }
+
+  // ------------------------------------------------------------------
+  // 1. Pipeline
+  // ------------------------------------------------------------------
+  (function () {
+    var fig = document.getElementById("pipe");
+    if (!fig) return;
+    var STAGES = [
+      ["DBA_HIST_TBSPC_SPACE_USAGE",
+       "AWR keeps one row per tablespace per snapshot, here one an hour. The suite only reads it. On 2026-10-17 the last snapshot of the day has AUDIT_TRAIL at 119.60 GiB used, maxsize 130.00 GiB."],
+      ["CAPV_TBSPC_USAGE",
+       "The seam: the only layer that knows where the rows come from. Local AWR, a central warehouse and the test fixture all present these same columns."],
+      ["CAPD_TBSPC_DAILY",
+       "One row per tablespace per day, from the day's last snapshot: 2026-10-17, 119.60 GiB used, 1.21 GiB more than the day before. CPU gets the same treatment in CAPD_CPU_DAILY."],
+      ["CAPF_TBSPC_FORECAST · CAPA_ANOM",
+       "CAPF fits the last 90 days: 613.664 MiB/day, R² 0.916, quality OK, days_to_full 17. CAPA scores each day's growth against its baselines to find unusual days."],
+      ["CAPR_ALERTS",
+       "Thresholds turn numbers into findings: days_to_full 17 is at or below dtf_crit 30, so CRIT TBSPC_FULL, “Tablespace AUDIT_TRAIL forecast full in 17 days (92.0% used, 613.7 MiB/day)”."],
+      ["report · cap_results · dashboards",
+       "report/report.sql prints it in section 0, cap_results.refresh records it as a NEW event, and Kibana, Grafana or APEX plot it. All of them read the same CAPR views."]
+    ];
+    var btns = [].slice.call(fig.querySelectorAll(".flow button"));
+    var h = fig.querySelector('[data-role="h"]'), p = fig.querySelector('[data-role="p"]');
+    var toggle = fig.querySelector('[data-role="toggle"]');
+    var cur = 0, timer = 0, auto = !RM, visible = false;
+    function show(i, pulse) {
+      cur = i;
+      btns.forEach(function (b, k) { b.setAttribute("aria-pressed", k === i ? "true" : "false"); });
+      h.textContent = STAGES[i][0];
+      p.textContent = STAGES[i][1];
+      if (pulse && !RM) { btns[i].classList.remove("pulse"); void btns[i].offsetWidth; btns[i].classList.add("pulse"); }
+    }
+    function tick() { show((cur + 1) % STAGES.length, true); }
+    function run() {
+      clearInterval(timer);
+      if (auto && visible) timer = setInterval(tick, 3200);
+      toggle.textContent = auto ? "❚❚ Pause" : "▶ Play";
+    }
+    btns.forEach(function (b, k) {
+      b.addEventListener("click", function () { auto = false; run(); show(k, true); });
+    });
+    toggle.addEventListener("click", function () { auto = !auto; run(); if (auto) tick(); });
+    show(0, false);
+    if ("IntersectionObserver" in window) {
+      new IntersectionObserver(function (es) { visible = es[0].isIntersecting; run(); }, { threshold: 0.4 }).observe(fig);
+    } else { visible = true; run(); }
+  })();
+
+  // ------------------------------------------------------------------
+  // 2. Alert lifecycle
+  // ------------------------------------------------------------------
+  (function () {
+    var fig = document.getElementById("life");
+    if (!fig) return;
+    var RUNS = [
+      { edge: "NEW",      node: "OPEN",     state: "OPEN · WARN", log: "<b>NEW</b> WARN: TBSPC_FULL, days_to_full inside dtf_warn (90)" },
+      { edge: "SEV",      node: "OPEN",     state: "OPEN · CRIT", log: "<b>ESCALATED</b> WARN → CRIT: inside dtf_crit (30); an ack would be cleared" },
+      { edge: null,       node: "OPEN",     state: "OPEN · CRIT", log: "no event: missing from this run (space added), missed_runs 1" },
+      { edge: "RESOLVED", node: "RESOLVED", state: "OPEN · CRIT", log: "<b>RESOLVED</b>: missing from 2 consecutive runs = resolve_grace_runs" },
+      { edge: "REOPENED", node: "OPEN",     state: "OPEN · WARN", log: "<b>REOPENED</b> WARN: the same state_key is back" }
+    ];
+    var STEP = 1700;
+    var svg = fig.querySelector("svg");
+    var edges = [].slice.call(svg.querySelectorAll("[data-e]"));
+    var labels = [].slice.call(svg.querySelectorAll("[data-l]"));
+    var nodes = [].slice.call(svg.querySelectorAll("[data-n]"));
+    var openTxt = svg.querySelector('[data-role="opentxt"]');
+    var chips = [].slice.call(fig.querySelectorAll('[data-role="runs"] span'));
+    var log = fig.querySelector('[data-role="log"]');
+    function draw(t) {
+      var k = Math.min(RUNS.length - 1, Math.floor(t / STEP));
+      if (t <= 0) k = -1;
+      var r = k >= 0 ? RUNS[k] : null;
+      edges.forEach(function (e) {
+        var on = r && e.getAttribute("data-e") === r.edge;
+        e.setAttribute("class", "g-edge" + (on ? " on" : ""));
+        e.setAttribute("marker-end", on ? "url(#lcHeadOn)" : "url(#lcHead)");
+      });
+      labels.forEach(function (l) { l.setAttribute("class", "g-elbl" + (r && l.getAttribute("data-l") === r.edge ? " on" : "")); });
+      nodes.forEach(function (n) {
+        var name = r ? r.node : "NONE";
+        n.setAttribute("class", "g-node" + (n.getAttribute("data-n") === name ? " on" : ""));
+      });
+      openTxt.textContent = r && r.node === "OPEN" ? r.state : "OPEN";
+      chips.forEach(function (c, i) { c.className = i === k ? "on" : i < k ? "past" : ""; });
+      var html = "";
+      for (var i = 0; i <= k; i++) html += "<li>run " + (i + 1) + " · " + RUNS[i].log + "</li>";
+      if (log.getAttribute("data-k") !== String(k)) { log.innerHTML = html; log.setAttribute("data-k", String(k)); }
+    }
+    timeline(fig, STEP * RUNS.length - 1, draw);
+  })();
+
+  // ------------------------------------------------------------------
+  // 3. Forecast: AUDIT_TRAIL
+  // ------------------------------------------------------------------
+  (function () {
+    var fig = document.getElementById("fc");
+    if (!fig) return;
+    var D = [62.02,62.39,62.71,63.03,63.39,63.79,64.18,64.5,64.88,65.26,65.66,66.04,66.38,66.7,67.01,67.37,67.75,68.06,68.4,68.74,69.04,69.41,69.8,70.14,70.46,70.78,71.09,71.41,71.81,72.17,72.58,72.9,73.29,73.61,73.95,74.33,74.69,75.04,75.42,75.72,76.13,76.42,76.76,77.08,77.4,77.71,78.08,78.4,78.72,79.08,79.44,79.74,80.1,80.5,80.88,81.23,81.55,82.72,83.86,84.97,86.17,87.28,88.44,89.63,90.83,91.99,93.08,94.23,95.4,96.57,97.73,98.93,100.11,101.27,102.45,103.55,104.73,105.92,107.02,108.14,109.28,110.4,111.53,112.7,113.79,114.91,116.07,117.26,118.39,119.6];
+    var BASE = [2026, 7, 20], N = D.length, LAST = N - 1, H = 30, CEIL = 130;
+    // OLS on the plotted values, and the M9.1 band: t = 1.96 + 2.4/(n-2).
+    var mx = 0, my = 0, i;
+    for (i = 0; i < N; i++) { mx += i; my += D[i]; }
+    mx /= N; my /= N;
+    var sxy = 0, sxx = 0, sse = 0;
+    for (i = 0; i < N; i++) { sxy += (i - mx) * (D[i] - my); sxx += (i - mx) * (i - mx); }
+    var b = sxy / sxx, a = my - b * mx;
+    for (i = 0; i < N; i++) sse += Math.pow(D[i] - (a + b * i), 2);
+    var se = Math.sqrt(sse / (N - 2)), tv = 1.96 + 2.4 / (N - 2);
+    function half(h) { return tv * se * Math.sqrt(1 + 1 / N + Math.pow(LAST + h - mx, 2) / sxx); }
+    var cur = D[LAST], dtf = (CEIL - cur) / b;
+
+    var svg = fig.querySelector("svg");
+    var L = 50, R = 700, T = 20, B = 292, X0 = 0, X1 = LAST + H, Y0 = 55, Y1 = 150;
+    function x(v) { return L + (v - X0) / (X1 - X0) * (R - L); }
+    function y(v) { return B - (v - Y0) / (Y1 - Y0) * (B - T); }
+    [60, 80, 100, 120, 140].forEach(function (v) {
+      el("line", { x1: L, x2: R, y1: y(v), y2: y(v), "class": "g-grid" }, svg);
+      txt(svg, L - 8, y(v) + 4, String(v), "g-txt", "end");
+    });
+    el("line", { x1: L, x2: R, y1: B, y2: B, "class": "g-axis" }, svg);
+    [0, 30, 60].forEach(function (d) { txt(svg, x(d), B + 18, dateLabel(BASE, d), "g-txt", "middle"); });
+    txt(svg, x(LAST), B + 18, "2026-10-17 today", "g-acc", "middle");
+    txt(svg, x(LAST + H), B + 18, "+30", "g-txt", "end");
+    el("line", { x1: x(LAST), x2: x(LAST), y1: T, y2: B, "class": "g-grid" }, svg);
+    el("line", { x1: L, x2: R, y1: y(CEIL), y2: y(CEIL), "class": "g-ceil" }, svg);
+    txt(svg, L + 6, y(CEIL) - 6, "maxsize 130.00 GiB", "g-crit");
+
+    var band = el("path", { "class": "g-band", d: "" }, svg);
+    var fit = el("line", { "class": "g-fit", x1: x(0), y1: y(a), x2: x(0), y2: y(a) }, svg);
+    var proj = el("line", { "class": "g-proj", x1: x(LAST), y1: y(cur), x2: x(LAST), y2: y(cur) }, svg);
+    var dots = D.map(function (v, k) { return el("circle", { cx: x(k), cy: y(v), r: 2.3, "class": "g-dot" }, svg); });
+    var readout = txt(svg, L + 6, T + 14, "", "g-lbl");
+    var mark = el("g", {}, svg);
+    var xd = x(LAST + dtf);
+    el("line", { x1: xd, x2: xd, y1: y(CEIL) - 10, y2: y(CEIL) + 10, "class": "g-mark" }, mark);
+    el("line", { x1: x(LAST + 16.31), x2: x(LAST + 18.55), y1: y(CEIL) + 16, y2: y(CEIL) + 16, "class": "g-mark" }, mark);
+    txt(mark, xd, y(CEIL) - 16, "full in 17 days", "g-crit", "middle");
+    txt(mark, xd, y(CEIL) + 30, "worst 16 · best 18", "g-lbl", "middle");
+
+    var CAPS = [
+      "Each dot is one day: AUDIT_TRAIL's used GiB at the day's last snapshot. Growth bends upward in mid-September.",
+      "<b>Fit.</b> The least-squares line through all 90 days: <b>613.664 MiB/day</b>, R² <b>0.916</b>, so quality OK.",
+      "<b>Project.</b> Start at today's 119.60 GiB and add the slope per day. The shaded 95% band widens with distance.",
+      "<b>Days to full.</b> The projection meets the 130 GiB ceiling after <b>17 days</b>; the slope's confidence interval gives 16 to 18. That is the CRIT row."
+    ];
+    function draw(t) {
+      var p1 = phase(t, 0, 3200), p2 = phase(t, 3500, 4700), p3 = phase(t, 5000, 6800), p4 = phase(t, 7000, 7400);
+      var shown = Math.max(1, Math.round(p1 * N));
+      dots.forEach(function (c, k) { c.style.opacity = k < shown ? 1 : 0; });
+      readout.textContent = p2 > 0 ? "" : dateLabel(BASE, shown - 1) + " · " + D[shown - 1].toFixed(2) + " GiB used";
+      var xe = LAST * p2;
+      fit.setAttribute("x2", x(xe)); fit.setAttribute("y2", y(a + b * xe));
+      fit.style.opacity = p2 > 0 ? 1 : 0;
+      var he = H * p3;
+      proj.setAttribute("x2", x(LAST + he)); proj.setAttribute("y2", y(cur + b * he));
+      proj.style.opacity = p3 > 0 ? 1 : 0;
+      if (p3 > 0) {
+        var up = [], lo = [], s;
+        for (s = 0; s <= 24; s++) {
+          var hh = he * s / 24;
+          up.push(x(LAST + hh).toFixed(1) + "," + y(cur + b * hh + half(hh)).toFixed(1));
+          lo.unshift(x(LAST + hh).toFixed(1) + "," + y(cur + b * hh - half(hh)).toFixed(1));
+        }
+        band.setAttribute("d", "M" + up.join("L") + "L" + lo.join("L") + "Z");
+      } else band.setAttribute("d", "");
+      mark.style.opacity = p4;
+      setCap(fig, CAPS[p4 > 0 ? 3 : p3 > 0 ? 2 : p2 > 0 ? 1 : 0]);
+    }
+    timeline(fig, 7400, draw);
+  })();
+
+  // ------------------------------------------------------------------
+  // 4. Anomaly: host BUSY_PCT on Friday 2026-10-09 vs the 8 Fridays before
+  // ------------------------------------------------------------------
+  (function () {
+    var fig = document.getElementById("an");
+    if (!fig) return;
+    var F = [["2026-08-14", 43.83], ["2026-08-21", 44.87], ["2026-08-28", 45.54], ["2026-09-04", 46.55],
+             ["2026-09-11", 47.08], ["2026-09-18", 47.89], ["2026-09-25", 48.33], ["2026-10-02", 49.65]];
+    var TODAY = 69.80, MED = 46.82, THR = 9.00;
+    var svg = fig.querySelector("svg");
+    var L = 50, R = 700, T = 18, B = 258, Y0 = 30, Y1 = 80;
+    function x(k) { return L + 40 + k * (R - L - 80) / 8; }
+    function y(v) { return B - (v - Y0) / (Y1 - Y0) * (B - T); }
+    [30, 40, 50, 60, 70, 80].forEach(function (v) {
+      el("line", { x1: L, x2: R, y1: y(v), y2: y(v), "class": "g-grid" }, svg);
+      txt(svg, L - 8, y(v) + 4, v + "%", "g-txt", "end");
+    });
+    F.forEach(function (f, k) { txt(svg, x(k), B + 18, f[0].slice(5), "g-txt", "middle"); });
+    txt(svg, x(8), B + 18, "10-09", "g-acc", "middle");
+    txt(svg, x(8), B + 33, "the day", "g-txt", "middle");
+    txt(svg, x(3.5), B + 33, "the same weekday, 1 to 8 weeks back (dow_weeks 8)", "g-txt", "middle");
+    var bandR = el("rect", { x: L, width: R - L, y: y(MED + THR), height: y(MED - THR) - y(MED + THR), "class": "g-win2" }, svg);
+    var bandL = txt(svg, L + 6, y(MED + THR) - 6, "band ± 9.00 = 3 × σ 3.00", "g-acc");
+    var med = el("line", { "class": "g-med", x1: L, x2: L, y1: y(MED), y2: y(MED) }, svg);
+    var medL = txt(svg, L + 6, y(MED) - 6, "median 46.82", "g-acc");
+    var dots = F.map(function (f, k) { return el("circle", { cx: x(k), cy: y(f[1]), r: 5, "class": "g-dot" }, svg); });
+    var arrow = el("line", { "class": "g-arrow", x1: x(8) - 20, x2: x(8) - 20, y1: y(MED), y2: y(TODAY) }, svg);
+    var arrowL = txt(svg, x(8) - 28, y((MED + TODAY) / 2) + 4, "+22.98 · robust z +7.7", "g-crit", "end");
+    var dot = el("circle", { cx: x(8), cy: y(TODAY), r: 6.5, "class": "g-dot hot" }, svg);
+    var dotL = txt(svg, x(8), y(TODAY) - 13, "69.80% HIGH", "g-crit", "middle");
+    var CAPS = [
+      "The baseline: host busy% on each of the 8 previous Fridays, between 43.83% and 49.65%.",
+      "Their <b>median is 46.82%</b>. One odd Friday in the history would barely move it.",
+      "The MAD σ is 2.07, below the floor <b>cpu_min_mad_pct</b> 3.00, so σ = 3.00 and the band is ± 3 × 3.00 = 9.00 points.",
+      "<b>2026-10-09: 69.80%</b>, 22.98 points above the median. z = 22.98 / 3.00 = +7.7, past mad_k 3, so HIGH: the CPU_ANOM row."
+    ];
+    function draw(t) {
+      var p1 = phase(t, 0, 2200), p2 = phase(t, 2400, 3200), p3 = phase(t, 3400, 4000), p4 = phase(t, 4300, 5100);
+      var shown = Math.round(p1 * F.length);
+      dots.forEach(function (c, k) { c.style.opacity = k < shown ? 1 : 0; });
+      med.setAttribute("x2", L + (R - L) * p2);
+      med.style.opacity = medL.style.opacity = p2 > 0 ? 1 : 0;
+      medL.style.opacity = p2 >= 1 ? 1 : 0;
+      bandR.style.opacity = p3 * 0.9; bandL.style.opacity = p3;
+      var e = 1 - Math.pow(1 - p4, 3);
+      dot.setAttribute("cy", y(TODAY) - (1 - e) * 60);
+      dot.style.opacity = p4 > 0 ? 1 : 0;
+      arrow.style.opacity = arrowL.style.opacity = dotL.style.opacity = p4 >= 1 ? 1 : 0;
+      setCap(fig, CAPS[p4 > 0 ? 3 : p3 > 0 ? 2 : p2 > 0 ? 1 : 0]);
+    }
+    timeline(fig, 5100, draw);
+  })();
+
+  // ------------------------------------------------------------------
+  // 5. CPU level shift: SHOP_PDB DB_CPU_PCT, 2026-09-13 .. 2026-10-17
+  // ------------------------------------------------------------------
+  (function () {
+    var fig = document.getElementById("sh");
+    if (!fig) return;
+    var P = [10.88,11.85,11.73,11.74,12.01,11.97,11.21,11.14,11.96,11.87,11.98,11.97,12.08,11.28,11.18,12.18,12.27,12.28,12.25,12.41,11.51,11.43,22.71,22.86,22.82,22.85,29.66,21.48,21.42,22.9,22.96,23.24,23.12,23.18,21.63];
+    var BASE = [2026, 9, 13], NB = 28, N = P.length;
+    var BMED = 11.98, RMED = 22.96, NEED = 15, BHI = 14.98;
+    var svg = fig.querySelector("svg");
+    var L = 50, R = 700, T = 18, B = 254, Y0 = 0, Y1 = 32;
+    var step = (R - L) / N;
+    function x(k) { return L + step * (k + 0.5); }
+    function y(v) { return B - (v - Y0) / (Y1 - Y0) * (B - T); }
+    var winB = el("rect", { x: L, y: T, width: step * NB, height: B - T, "class": "g-win" }, svg);
+    var winR = el("rect", { x: L + step * NB, y: T, width: step * (N - NB), height: B - T, "class": "g-win2" }, svg);
+    [0, 10, 20, 30].forEach(function (v) {
+      el("line", { x1: L, x2: R, y1: y(v), y2: y(v), "class": "g-grid" }, svg);
+      txt(svg, L - 8, y(v) + 4, v + "%", "g-txt", "end");
+    });
+    [0, 14, 22, 28, 34].forEach(function (k) { txt(svg, x(k), B + 18, dateLabel(BASE, k).slice(5), k === 22 ? "g-acc" : "g-txt", "middle"); });
+    var wl1 = txt(svg, L + step * NB / 2, B + 34, "baseline: 28 days (shift_baseline_days)", "g-txt", "middle");
+    var wl2 = txt(svg, L + step * (NB + (N - NB) / 2), B + 34, "recent: 7 (shift_days)", "g-acc", "middle");
+    var bhi = el("line", { x1: L, x2: L + step * NB, y1: y(BHI), y2: y(BHI), "class": "g-fit" }, svg);
+    var bhiL = txt(svg, L + 6, y(BHI) - 5, "median + σ floor 14.98", "g-txt");
+    var bmed = el("line", { "class": "g-med", x1: L, x2: L, y1: y(BMED), y2: y(BMED) }, svg);
+    var bmedL = txt(svg, L + 6, y(BMED) + 16, "baseline median 11.98", "g-acc");
+    var rmed = el("line", { "class": "g-med", x1: L + step * NB, x2: L + step * NB, y1: y(RMED), y2: y(RMED) }, svg);
+    var rmedL = txt(svg, R - 4, y(RMED) - 8, "recent 22.96", "g-acc", "end");
+    var ghost = el("line", { "class": "g-ghost", x1: L + step * NB, x2: R, y1: y(BMED + NEED), y2: y(BMED + NEED) }, svg);
+    var ghostL = txt(svg, R - 4, y(BMED + NEED) - 6, "needed: 11.98 + 15 = 26.98", "g-lbl", "end");
+    var ax = L + step * NB - 10;
+    var arrow = el("line", { "class": "g-arrow ok", x1: ax, x2: ax, y1: y(BMED), y2: y(RMED) }, svg);
+    var arrowL = txt(svg, ax - 6, y((BMED + RMED) / 2) + 4, "gap 10.98 < 15", "g-lbl", "end");
+    var dots = P.map(function (v, k) { return el("circle", { cx: x(k), cy: y(v), r: 3.6, "class": k >= 22 ? "g-dot hot" : "g-dot" }, svg); });
+    var CAPS = [
+      "Each dot is a day of SHOP_PDB DB CPU as a % of the host's 32 logical CPUs. A release on <b>2026-10-05</b> roughly doubles it.",
+      "The <b>baseline window</b> is the 28 days before the last 7. Its median is <b>11.98%</b>; six of its days are already after the release.",
+      "The <b>recent window</b>, the last 7 days, has median <b>22.96%</b>. Every one of those days is above the baseline band (14.98).",
+      "The gap is <b>10.98 points</b>, less than <b>shift_min_pct</b> 15. No CPU_SHIFT; the step shows up as the DBCPU_ANOM episode instead."
+    ];
+    function draw(t) {
+      var p1 = phase(t, 0, 2600), p2 = phase(t, 2800, 3700), p3 = phase(t, 3900, 4700), p4 = phase(t, 4900, 5600);
+      var shown = Math.round(p1 * N);
+      dots.forEach(function (c, k) { c.style.opacity = k < shown ? 1 : 0; });
+      winB.style.opacity = wl1.style.opacity = p2 > 0 ? 1 : 0;
+      winR.style.opacity = wl2.style.opacity = p3 > 0 ? 1 : 0;
+      bmed.setAttribute("x2", L + step * NB * p2);
+      bmed.style.opacity = p2 > 0 ? 1 : 0;
+      bmedL.style.opacity = bhi.style.opacity = bhiL.style.opacity = p2 >= 1 ? 1 : 0;
+      rmed.setAttribute("x2", L + step * NB + step * (N - NB) * p3);
+      rmed.style.opacity = p3 > 0 ? 1 : 0;
+      rmedL.style.opacity = p3 >= 1 ? 1 : 0;
+      arrow.style.opacity = arrowL.style.opacity = ghost.style.opacity = ghostL.style.opacity = p4;
+      setCap(fig, CAPS[p4 > 0 ? 3 : p3 > 0 ? 2 : p2 > 0 ? 1 : 0]);
+    }
+    timeline(fig, 5600, draw);
+  })();
+
+  // ------------------------------------------------------------------
+  // Progress: top bar, step chip, visited route cards
+  // ------------------------------------------------------------------
+  (function () {
+    var bar = document.getElementById("tutBar"), chip = document.getElementById("tutChip");
+    var secs = [].slice.call(document.querySelectorAll("[data-min]"));
+    var steps = secs.filter(function (s) { return +s.getAttribute("data-min") > 0; });
+    var total = steps.reduce(function (n, s) { return n + +s.getAttribute("data-min"); }, 0);
+    var route = [].slice.call(document.querySelectorAll("#route a"));
+    var ticking = false;
+    function update() {
+      ticking = false;
+      var doc = document.documentElement;
+      var max = doc.scrollHeight - innerHeight;
+      bar.style.transform = "scaleX(" + (max > 0 ? clamp01(scrollY / max) : 0) + ")";
+      var k = -1;
+      steps.forEach(function (s, i) { if (s.getBoundingClientRect().top < innerHeight * 0.4) k = i; });
+      var next = document.getElementById("next");
+      var finished = next && next.getBoundingClientRect().top < innerHeight * 0.6;
+      route.forEach(function (a, i) { a.classList.toggle("done", i < k || (finished && i <= k)); });
+      if (finished) { chip.innerHTML = "<b>Done</b> · all 8 steps"; return; }
+      if (k < 0) { chip.innerHTML = "<b>8 steps</b> · ~" + total + " min"; return; }
+      var left = 0;
+      for (var i = k; i < steps.length; i++) left += +steps[i].getAttribute("data-min");
+      chip.innerHTML = "<b>Step " + (k + 1) + " of " + steps.length + "</b> · ~" + left + " min left";
+    }
+    addEventListener("scroll", function () { if (!ticking) { ticking = true; requestAnimationFrame(update); } }, { passive: true });
+    addEventListener("resize", update);
+    update();
+  })();
+})();
+</script>
+</body>
+</html>

@@ -121,6 +121,13 @@ lasting install, create a dedicated owner once with `@create_owner.sql` (as
 SYSDBA: `C##AWRCAP` in CDB$ROOT, `AWRCAP` in a PDB, with direct grants on
 every DBA_HIST_* view the seam reads) and install as that user.
 
+**New here?** The fifteen-minute
+[tutorial](https://davidbudac.github.io/awr_capacity_predictions/tutorial.html)
+(`docs/tutorial.html`) walks from install to the first report and daily use,
+then explains forecasts, bands, days-to-full, quality grades, anomalies and
+their baseline modes, CPU level shifts, freshness and severity, with worked
+examples from the sample report.
+
 ## Install (manual / other modes)
 
 ```sql

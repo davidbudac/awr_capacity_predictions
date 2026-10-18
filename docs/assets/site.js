@@ -15,6 +15,7 @@
   var PAGES = [
     { file: "index.html",     label: "Introduction" },
     { file: "start.html",     label: "Getting started" },
+    { file: "tutorial.html",  label: "Tutorial" },
     { file: "concepts.html",  label: "How it works" },
     { file: "usage.html",     label: "Usage" },
     { file: "testing.html",   label: "Testing" },
