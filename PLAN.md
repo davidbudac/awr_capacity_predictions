@@ -542,6 +542,15 @@ fixture harness and both reports.
       `CAPR_ALERTS`. The warehouse collector should gather the CON_ views,
       parameters, ASM and segment facts (sibling repo).
 
+- [x] **M21.6 RAC worst instance.** `PROCESSES` / `SESSIONS` still sum across
+      instances (one fleet row per series, no `instance_number` downstream),
+      but `CAPD_SERIES_DAILY` / `CAPF_SERIES_FORECAST` / `CAPR_SERIES` now
+      carry `worst_inst_pct` / `worst_inst`, and `SERIES_NEARLIMIT` judges
+      the larger of the fleet and the worst-instance percent (message names
+      the instance). Fixture: `run_test.sql` adds a two-instance dbid
+      (43434343, snapshot + resource-limit rows only) for one block and
+      deletes it again, so no other assertion sees it.
+
 ## v2 (unchanged)
 
 - [ ] Memory forecasting (SGA/PGA from `DBA_HIST_MEM_DYNAMIC_COMP` (the

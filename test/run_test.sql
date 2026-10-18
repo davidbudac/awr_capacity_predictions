@@ -1308,6 +1308,88 @@ BEGIN
         chk_int('CAPR_SERIES resolves db_pdb', v_n, 0);
     END;
 
+    -- RAC worst instance (PROCESSES / SESSIONS). The main fixture is one
+    -- instance, so a second dbid with TWO instances is added to the snapshot
+    -- and resource-limit fixture tables for this block only and DELETEd at its
+    -- end (no commit in between, nothing else sees it). Per instance and day,
+    -- limit 1000 each: SESSIONS inst 1 at 10, inst 2 at 990 (fleet 50%,
+    -- worst instance 99% on instance 2); PROCESSES inst 1 at 600, inst 2 at
+    -- 400 (fleet 50%, worst 60%, instance 1).
+    DECLARE
+        c_rac   CONSTANT NUMBER := 43434343;
+        d_last  DATE := meta_d('LAST_DAY');
+        v_inst  NUMBER;
+    BEGIN
+        DBMS_OUTPUT.PUT_LINE('=== RAC worst instance (two-instance dbid) ===');
+        FOR k IN 0 .. 2 LOOP
+            FOR i IN 1 .. 2 LOOP
+                INSERT INTO cap_fixture_snapshot
+                VALUES (c_rac, c_rac, i, 9000000 + k,
+                        CAST(d_last - 2 + k + 17 / 24 AS TIMESTAMP),
+                        CAST(d_last - 2 + k + 18 / 24 AS TIMESTAMP),
+                        CAST(d_last - 40 AS TIMESTAMP));
+                INSERT INTO cap_fixture_resource_limit
+                VALUES (c_rac, c_rac, i, 9000000 + k, 'sessions',
+                        DECODE(i, 1, 8, 980), DECODE(i, 1, 10, 990), 1000);
+                INSERT INTO cap_fixture_resource_limit
+                VALUES (c_rac, c_rac, i, 9000000 + k, 'processes',
+                        DECODE(i, 1, 500, 300), DECODE(i, 1, 600, 400), 1000);
+            END LOOP;
+        END LOOP;
+
+        SELECT value, limit_value, worst_inst_pct, worst_inst INTO v_num, v_num2, v_num3, v_inst
+          FROM capd_series_daily
+         WHERE dbid = c_rac AND series = 'SESSIONS' AND day_dt = d_last;
+        chk_int('RAC SESSIONS fleet value (10 + 990)',         v_num,  1000);
+        chk_int('RAC SESSIONS fleet limit (1000 + 1000)',      v_num2, 2000);
+        chk_close('RAC SESSIONS daily worst_inst_pct',         v_num3, 99, 0.000001);
+        chk_int('RAC SESSIONS daily worst_inst',               v_inst, 2);
+        SELECT pct_of_limit, worst_inst_pct, worst_inst INTO v_num, v_num2, v_inst
+          FROM capf_series_forecast WHERE dbid = c_rac AND series = 'SESSIONS';
+        chk_close('RAC SESSIONS pct_of_limit stays the fleet 50', v_num,  50, 0.000001);
+        chk_close('RAC SESSIONS forecast worst_inst_pct',         v_num2, 99, 0.000001);
+        chk_int('RAC SESSIONS forecast worst_inst',               v_inst, 2);
+        SELECT worst_inst_pct, worst_inst INTO v_num, v_inst
+          FROM capf_series_forecast WHERE dbid = c_rac AND series = 'PROCESSES';
+        chk_close('RAC PROCESSES worst_inst_pct', v_num, 60, 0.000001);
+        chk_int('RAC PROCESSES worst_inst',       v_inst, 1);
+
+        SELECT sev, value, SUBSTR(sev_reason, 1, 14), message
+          INTO v_str, v_num, v_str2, v_msg
+          FROM capr_severity
+         WHERE dbid = c_rac AND kind = 'SERIES_NEARLIMIT' AND series_key = 'SESSIONS';
+        chk_str  ('RAC SESSIONS SERIES_NEARLIMIT sev (node at 99, fleet 50)', v_str, 'CRIT');
+        chk_close('RAC SESSIONS SERIES_NEARLIMIT value = worst instance pct', v_num, 99, 0.000001);
+        chk_str  ('RAC SESSIONS sev_reason names worst_inst_pct', v_str2, 'worst_inst_pct');
+        chk_true ('RAC SESSIONS message names instance 2 (got ' || SUBSTR(v_msg, 1, 90) || ')',
+                  INSTR(v_msg, 'SESSIONS on instance 2 is at 99.0% of its own limit') = 1);
+        SELECT sev INTO v_str FROM capr_severity
+         WHERE dbid = c_rac AND kind = 'SERIES_NEARLIMIT' AND series_key = 'PROCESSES';
+        chk_str('RAC PROCESSES SERIES_NEARLIMIT sev (worst 60, fleet 50)', v_str, 'OK');
+        SELECT COUNT(*) INTO v_n FROM capr_alerts
+         WHERE dbid = c_rac AND kind = 'SERIES_NEARLIMIT' AND series_key = 'SESSIONS'
+           AND severity = 'CRIT';
+        chk_int('RAC SESSIONS raises one SERIES_NEARLIMIT CRIT alert', v_n, 1);
+        SELECT COUNT(*) INTO v_n FROM capr_series
+         WHERE dbid = c_rac AND series = 'SESSIONS' AND sev = 'CRIT' AND worst_inst_pct = 99;
+        chk_int('CAPR_SERIES SESSIONS CRIT with worst_inst_pct 99', v_n, 1);
+
+        -- Single instance: the worst instance IS the fleet (the main fixture).
+        SELECT COUNT(*) INTO v_n FROM capf_series_forecast
+         WHERE dbid = v_dbid AND series IN ('SESSIONS', 'PROCESSES')
+           AND worst_inst = 1 AND worst_inst_pct = pct_of_limit;
+        chk_int('single instance: worst_inst_pct = pct_of_limit, instance 1', v_n, 2);
+        SELECT COUNT(*) INTO v_n FROM capf_series_forecast
+         WHERE dbid = v_dbid AND series NOT IN ('SESSIONS', 'PROCESSES')
+           AND (worst_inst_pct IS NOT NULL OR worst_inst IS NOT NULL);
+        chk_int('worst instance is NULL off PROCESSES / SESSIONS', v_n, 0);
+
+        DELETE FROM cap_fixture_resource_limit WHERE dbid = c_rac;
+        DELETE FROM cap_fixture_snapshot       WHERE dbid = c_rac;
+        SELECT COUNT(*) INTO v_n FROM capf_series_forecast WHERE dbid = c_rac;
+        chk_int('RAC fixture rows removed again', v_n, 0);
+    END;
+
     -- Seam extensions: CAPV_PARAMETER and the cpu_count ceiling, FRA days on
     -- REDO_GB_DAY, the ASM_DG / TEMP_PEAK / UNDO_PEAK series and the
     -- tablespace sizing ask. Closed forms recorded by fixture_install.sql.

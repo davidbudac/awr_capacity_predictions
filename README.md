@@ -398,7 +398,7 @@ others), a per-row `alert_key`, a `state_key` that stays the same across days
 | `CPU_SAT` / `DBCPU_SAT` | host busy% (p95 by default) / DB CPU% is forecast to reach `cpu_sat_pct` inside `dtf_warn` |
 | `CPU_HOT` / `DBCPU_HOT` | the recent p95 median is already at or above `cpu_sat_pct`, any fit quality |
 | `CPU_SHIFT` | a sustained level shift of a CPU series (UP = WARN, DOWN = INFO) |
-| `SERIES_LIMIT` / `SERIES_NEARLIMIT` | a fixed-ceiling series is forecast to reach / is near `series_sat_pct` of its limit |
+| `SERIES_LIMIT` / `SERIES_NEARLIMIT` | a fixed-ceiling series is forecast to reach / is near `series_sat_pct` of its limit (RAC `PROCESSES` / `SESSIONS`: also when one instance is near its own limit) |
 | `TBSPC_ANOM`, `CPU_ANOM`, `DBCPU_ANOM`, `SERIES_ANOM` | anomaly episodes in the last `anomaly_report_days`, for the modes the `alert_modes_*` bitmask enables |
 | `DATA_STALE` | a dbid's newest AWR snapshot is at least `stale_hours` old (the dead-man check) |
 | `MODEL_HEALTH` | a Tier 2 model failed its last build or is stale |

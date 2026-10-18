@@ -248,7 +248,10 @@ LEFT   JOIN capr_container c
 --   fit_kind       TBSPC / CPU / SERIES = CAPR_FIT.kind, so consumers join
 --                  on (fit_kind, dbid, con_dbid, series_key)
 --   value, unit    the number judged: days_to_full, pct_used, days_to_sat,
---                  recent_p95_med, days_to_limit or pct_of_limit
+--                  recent_p95_med, days_to_limit or pct_of_limit (for
+--                  SERIES_NEARLIMIT the larger of the fleet pct_of_limit and
+--                  the worst RAC instance's worst_inst_pct, and the message
+--                  names the instance when it is the one over the line)
 --   direction      LE (a countdown: alert when value <= threshold) or GE (a
 --                  level: alert when value >= threshold)
 --   warn_threshold, crit_threshold  the effective thresholds. A tablespace
@@ -378,9 +381,20 @@ WITH src AS (
         SELECT g.kind, 'SERIES',
                s.dbid, s.con_dbid, s.series, s.last_day,
                s.quality, s.is_current, 'N',
-               CASE g.kind WHEN 'SERIES_LIMIT' THEN s.days_to_limit ELSE s.pct_of_limit END,
+               -- SERIES_NEARLIMIT judges the worse of the fleet percent and the
+               -- worst instance's percent of its own limit (RAC: PROCESSES /
+               -- SESSIONS sum across instances, which hides one full node).
+               CASE g.kind WHEN 'SERIES_LIMIT' THEN s.days_to_limit
+                           WHEN 'SERIES_NEARLIMIT' THEN
+                                CASE WHEN s.worst_inst_pct IS NULL THEN s.pct_of_limit
+                                     ELSE GREATEST(NVL(s.pct_of_limit, 0), s.worst_inst_pct) END
+               END,
                CASE g.kind WHEN 'SERIES_LIMIT' THEN 'DAYS' ELSE 'PCT' END,
-               CASE g.kind WHEN 'SERIES_LIMIT' THEN 'days_to_limit' ELSE 'pct_of_limit' END,
+               CASE g.kind WHEN 'SERIES_LIMIT' THEN 'days_to_limit'
+                           WHEN 'SERIES_NEARLIMIT' THEN
+                                CASE WHEN s.worst_inst_pct > NVL(s.pct_of_limit, -1)
+                                     THEN 'worst_inst_pct' ELSE 'pct_of_limit' END
+               END,
                CASE g.kind WHEN 'SERIES_LIMIT' THEN cfg.dtf_warn ELSE cfg.nearfull_warn_pct END,
                CASE g.kind WHEN 'SERIES_LIMIT' THEN cfg.dtf_crit ELSE cfg.nearfull_crit_pct END,
                CASE g.kind WHEN 'SERIES_LIMIT' THEN 'dtf_warn' ELSE 'nearfull_warn_pct' END,
@@ -394,11 +408,21 @@ WITH src AS (
                        || ' ' || s.unit || ') in ' || TO_CHAR(s.days_to_limit, 'FM9999990')
                        || ' days (now ' || RTRIM(TO_CHAR(s.cur_val, 'FM99999999990.99'), '.')
                        || ', ' || TO_CHAR(s.pct_of_limit, 'FM990.0') || '% of limit)'
-                   ELSE
+                   WHEN 'SERIES_NEARLIMIT' THEN
+                       CASE WHEN s.worst_inst_pct > NVL(s.pct_of_limit, -1) THEN
+                           s.series || ' on instance ' || TO_CHAR(s.worst_inst, 'FM9990')
+                           || ' is at ' || TO_CHAR(s.worst_inst_pct, 'FM990.0')
+                           || '% of its own limit now (fleet '
+                           || NVL(TO_CHAR(s.pct_of_limit, 'FM990.0'), 'n/a')
+                           || '%, ' || RTRIM(TO_CHAR(s.cur_val, 'FM99999999990.99'), '.')
+                           || ' of ' || NVL(RTRIM(TO_CHAR(s.cur_limit, 'FM99999999990.99'), '.'), 'n/a')
+                           || ' ' || s.unit || ' summed; forecast quality ' || s.quality || ')'
+                       ELSE
                        s.series || ' is at ' || TO_CHAR(s.pct_of_limit, 'FM990.0')
                        || '% of its limit now (' || RTRIM(TO_CHAR(s.cur_val, 'FM99999999990.99'), '.')
                        || ' of ' || RTRIM(TO_CHAR(s.cur_limit, 'FM99999999990.99'), '.') || ' ' || s.unit
                        || '; forecast quality ' || s.quality || ')'
+                       END
                END
         FROM   capf_series_forecast s
         CROSS  JOIN cap_cfg cfg
@@ -759,6 +783,10 @@ WHERE  s.shift_flag IS NOT NULL;
 -- an OK severity: they are a trend, not a countdown. REDO_GB_DAY rows pass
 -- fra_size_gb / fra_days_at_cur through (the days of redo the FRA holds at
 -- today's rate), NULL on every other series.
+-- worst_inst_pct / worst_inst (PROCESSES / SESSIONS, RAC) pass through from
+-- CAPF_SERIES_FORECAST: the highest per-instance percent of its own limit
+-- and that instance. pct_of_limit stays the summed fleet figure, and
+-- SERIES_NEARLIMIT (hence sev) judges the larger of the two.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_series AS
 SELECT s.dbid,
@@ -788,7 +816,9 @@ SELECT s.dbid,
        s.is_current,
        s.fra_size_gb,
        s.fra_days_at_cur,
-       v.gated_by
+       v.gated_by,
+       s.worst_inst_pct,
+       s.worst_inst
 FROM   capf_series_forecast s
 LEFT   JOIN (SELECT dbid, con_dbid, series_key,
                     DECODE(MIN(sev_rank), 1, 'CRIT', 2, 'WARN', 'OK') AS sev,

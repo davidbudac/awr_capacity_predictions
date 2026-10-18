@@ -62,6 +62,13 @@
 --                     NULL or 0. It is an upper bound: the FRA also holds
 --                     flashback logs and backups.
 --
+-- RAC (PROCESSES / SESSIONS, NULL on every other series): worst_inst_pct /
+-- worst_inst are the last day's highest per-instance percent of that
+-- instance's own limit and its instance_number (ddl/25), 1 decimal like
+-- pct_of_limit, which stays the fleet figure (summed use over summed limits).
+-- SERIES_NEARLIMIT judges the larger of the two. On one instance the two
+-- percents agree.
+--
 -- 19c note: inline OVER (...) on every window call; no 21c WINDOW clause.
 --
 SET DEFINE OFF
@@ -69,7 +76,7 @@ SET DEFINE OFF
 CREATE OR REPLACE VIEW capf_series_forecast AS
 WITH src AS (
         SELECT dbid, con_dbid, series, unit, day_dt, value AS val, limit_value,
-               is_complete
+               is_complete, worst_inst_pct, worst_inst
         FROM   capd_series_daily
         WHERE  value IS NOT NULL
      ),
@@ -81,7 +88,7 @@ WITH src AS (
      d AS (
         SELECT dbid, con_dbid, series, unit, day_dt,
                day_dt - DATE '2020-01-01' AS day_n,
-               val, limit_value
+               val, limit_value, worst_inst_pct, worst_inst
         FROM   src
         WHERE  is_complete = 'Y'
      ),
@@ -183,7 +190,9 @@ WITH src AS (
         SELECT dbid, con_dbid, series,
                MAX(unit)        KEEP (DENSE_RANK LAST ORDER BY day_dt) AS unit,
                MAX(val)         KEEP (DENSE_RANK LAST ORDER BY day_dt) AS cur_val,
-               MAX(limit_value) KEEP (DENSE_RANK LAST ORDER BY day_dt) AS cur_limit
+               MAX(limit_value) KEEP (DENSE_RANK LAST ORDER BY day_dt) AS cur_limit,
+               MAX(worst_inst_pct) KEEP (DENSE_RANK LAST ORDER BY day_dt) AS cur_worst_pct,
+               MAX(worst_inst)     KEEP (DENSE_RANK LAST ORDER BY day_dt) AS cur_worst_inst
         FROM   d GROUP BY dbid, con_dbid, series
      ),
      -- db_recovery_file_dest_size is database-wide: MAX across instances at
@@ -270,7 +279,9 @@ SELECT f.dbid,
        END                                          AS fra_size_gb,
        CASE WHEN f.series = 'REDO_GB_DAY' AND r.fra_bytes > 0 AND x.redo_gb_day > 0
             THEN r.fra_bytes / 1073741824 / x.redo_gb_day
-       END                                          AS fra_days_at_cur
+       END                                          AS fra_days_at_cur,
+       ROUND(c.cur_worst_pct, 1)                    AS worst_inst_pct,
+       c.cur_worst_inst                             AS worst_inst
 FROM   est f
 JOIN   cur c ON c.dbid = f.dbid AND c.con_dbid = f.con_dbid AND c.series = f.series
 JOIN   nd  n ON n.dbid = f.dbid
