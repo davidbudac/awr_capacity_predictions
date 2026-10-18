@@ -695,7 +695,7 @@ DECLARE
     WHILE m - v_today <= c_span - 12 LOOP
       x := sx(m - v_today);
       p('<line x1="' || crd(x) || '" x2="' || crd(x) || '" y1="34" y2="210" class="tick"/>');
-      IF x - sx(0) >= 38 THEN
+      IF x - sx(0) >= 56 THEN
         p('<text x="' || crd(x + 4) || '" y="226" class="mon">' || TO_CHAR(m, 'Mon', 'NLS_DATE_LANGUAGE=ENGLISH')
           || CASE WHEN TO_CHAR(m, 'MM') = '01' THEN ' &rsquo;' || TO_CHAR(m, 'YY') END || '</text>');
       END IF;
@@ -1056,6 +1056,16 @@ DECLARE
   END panel;
 
 BEGIN
+  -- The AWR database name(s) in scope, not the session's: a PDB session or a
+  -- warehouse owner would otherwise title the page with its own name.
+  BEGIN
+    SELECT NVL(LISTAGG(db_name, ', ') WITHIN GROUP (ORDER BY db_name), cap_db)
+    INTO   cap_db
+    FROM  (SELECT DISTINCT db_name FROM capr_container
+           WHERE (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con));
+  EXCEPTION
+    WHEN OTHERS THEN NULL;
+  END;
   p('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">');
   p('<title>Capacity briefing, ' || esc(cap_db) || '</title><style>');
   p(':root{--paper:#f6f7f9;--sheet:#fff;--ink:#16243b;--ink-2:#41506a;--mute:#6c778a;--rule:#dfe3ea;');
@@ -1068,8 +1078,8 @@ BEGIN
   p('.mast{display:flex;justify-content:space-between;align-items:baseline;border-bottom:2px solid var(--ink);padding-bottom:10px;font-size:13px;color:var(--mute)}');
   p('.mast b{color:var(--ink);font-size:15px;letter-spacing:.01em}');
   p('.gen{color:var(--mute);font-size:12px;margin:8px 0 0}');
-  p('h1{font:400 44px/1.12 var(--serif);margin:34px 0 10px;max-width:26ch;letter-spacing:-.01em}');
-  p('.lede{font:17px/1.6 var(--serif);color:var(--ink-2);max-width:62ch;margin:0 0 30px}');
+  p('h1{font:400 44px/1.12 var(--serif);margin:34px 0 10px;max-width:26ch;letter-spacing:-.01em;text-wrap:balance}');
+  p('.lede{font:17px/1.6 var(--serif);color:var(--ink-2);max-width:62ch;margin:0 0 30px;text-wrap:pretty}');
   p('.runway{width:100%;height:auto;display:block}');
   p('.runway .win{font:12px var(--sans);fill:var(--mute)} .runway .tick{stroke:var(--rule)}');
   p('.runway .axis{stroke:var(--ink);stroke-width:1.2} .runway .mon{font:12px var(--sans);fill:var(--mute)}');
@@ -1153,15 +1163,10 @@ BEGIN
 
   -- Masthead
   DECLARE
-    v_dbn  VARCHAR2(1000);
     v_ncon PLS_INTEGER;
     v_hist NUMBER;
     v_nesm PLS_INTEGER := 0;
   BEGIN
-    SELECT LISTAGG(db_name, ', ') WITHIN GROUP (ORDER BY db_name)
-    INTO   v_dbn
-    FROM  (SELECT DISTINCT db_name FROM capr_container
-           WHERE (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con));
     SELECT COUNT(*) INTO v_ncon FROM capr_container
     WHERE (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con);
     SELECT MAX(history_days) INTO v_hist FROM capr_coverage WHERE (s_dbid IS NULL OR dbid = s_dbid);
@@ -1171,7 +1176,7 @@ BEGIN
       WHERE  esm IS NOT NULL
         AND  (s_dbid IS NULL OR dbid = s_dbid) AND (s_con IS NULL OR con_dbid = s_con);
     END IF;
-    p('<div class="mast"><span><b>' || esc(NVL(v_dbn, cap_db)) || '</b> &nbsp;' || esc(cap_host)
+    p('<div class="mast"><span><b>' || esc(cap_db) || '</b> &nbsp;' || esc(cap_host)
       || ', ' || words(v_ncon) || CASE WHEN v_ncon = 1 THEN ' container' ELSE ' containers' END
       || CASE WHEN v_hist IS NOT NULL THEN ', ' || fx0(v_hist) || ' days of AWR' END
       || '</span><span>Capacity briefing for ' || TO_CHAR(v_today, 'FMDD Month YYYY', 'NLS_DATE_LANGUAGE=ENGLISH') || '</span></div>');
@@ -1408,7 +1413,7 @@ BEGIN
          AND NOT (t_fit(i).kind = 'CPU' AND t_fit(i).series NOT IN ('BUSY_P95', 'DB_CPU_P95')) THEN
         n_all := n_all + 1;
         IF n_all <= 12 THEN
-          nm(n_all) := lbl_h(i) || CASE WHEN t_fit(i).days_to_full <= 365
+          nm(n_all) := esc(lbl_t(i)) || CASE WHEN t_fit(i).days_to_full <= 365
                                         THEN '&nbsp;(' || fx0(t_fit(i).days_to_full) || '&nbsp;d)' END;
         END IF;
       END IF;
