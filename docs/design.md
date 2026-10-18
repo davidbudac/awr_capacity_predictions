@@ -886,8 +886,9 @@ day of the *dbid*, so a dead PDB compares against the live CDB) and
 does. `CAPR_FRESHNESS` is per dbid, so a PDB whose time model stopped
 (unplugged, dropped) raises no `DATA_STALE`; `is_current = 'N'` is what stops
 its last shift from staying an OPEN `CPU_SHIFT` alert until AWR retention
-purges the rows. `CAPR_ALERTS` passes it through and `cap_results` merges
-only `is_current = 'Y'`, so a stale shift resolves after `resolve_grace_runs`.
+purges the rows. `CAPR_ALERTS` drops a stale shift (as `CAPR_SEVERITY` gates a
+stale forecast kind to OK), so it leaves ORDS, the ELK export and the CSV at
+once and `cap_results` resolves it after `resolve_grace_runs`.
 
 ### Downstream
 
@@ -1128,7 +1129,7 @@ M8.2, for the bundled reports themselves:
   same on every severity; `direction` says how `value` relates to it on an
   alert: `LE` (the countdowns), `GE` (levels, HIGH anomalies, `DATA_STALE`,
   `MODEL_HEALTH`), `ABS` (`CPU_SHIFT`, `|value| > alarm_threshold`), and `LE`
-  on a LOW anomaly. `is_current` is `'N'` only on a forecast kind or a `CPU_SHIFT` whose series stopped, and `cap_results` merges the `'Y'` rows. So a poller can
+  on a LOW anomaly. `is_current` is `'Y'` on every row (a forecast kind or `CPU_SHIFT` whose series stopped is no alert); the column stays for the contract and `cap_results` merges the `'Y'` rows. So a poller can
   key, de-duplicate and alarm without parsing `message`. Both reports'
   at-a-glance blocks read this view (DATA_STALE first), and the section
   severities come from the same `CAPR_SEVERITY` rows, so paging and reporting

@@ -1842,8 +1842,9 @@ BEGIN
         chk_int('partial day is a non-gap incomplete DB_CPU_PCT day (the case the rule drops)', v_n, 1);
         -- Negative case: stale_days = -1 puts every series behind "newest",
         -- standing in for a PDB whose time model stopped. The shift stays in
-        -- CAPA_CPU_SHIFT but reads is_current N, and so does its CAPR_ALERTS
-        -- row (cap_results merges only is_current Y). Uncommitted, then reset.
+        -- CAPA_CPU_SHIFT but reads is_current N, and CAPR_ALERTS drops it (so
+        -- ORDS / ELK / CSV and cap_results all stop seeing it). Uncommitted,
+        -- then reset.
         BEGIN
             UPDATE cap_config SET cfg_value = -1 WHERE cfg_name = 'stale_days';
             SELECT COUNT(*) INTO v_n FROM capa_cpu_shift
@@ -1851,9 +1852,9 @@ BEGIN
                 AND shift_flag = 'UP' AND is_current = 'N';
             chk_int('stale series: CAPA_CPU_SHIFT is_current N', v_n, 1);
             SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SHIFT';
-            chk_int('stale series: CPU_SHIFT alert row still listed', v_n, 1);
-            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SHIFT' AND is_current = 'N';
-            chk_int('stale series: CPU_SHIFT alert is_current N (not merged)', v_n, 1);
+            chk_int('stale series: no CPU_SHIFT alert', v_n, 0);
+            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE is_current = 'N';
+            chk_int('stale series: no CAPR_ALERTS row is_current N', v_n, 0);
             UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'stale_days';
         EXCEPTION
             WHEN OTHERS THEN
