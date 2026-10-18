@@ -1197,8 +1197,10 @@ The tables are created with their key columns and then gain every other
 column one `ALTER TABLE ... ADD` at a time (ORA-01430 ignored), so a later
 column reaches an older install on the next `@install.sql`.
 
-**`CAP_RESULTS.refresh(p_as_of)`** inserts the `CAP_RUN` row as `RUNNING` and
-commits it at once (a hung run stays visible), copies `CAPR_FIT` into
+**`CAP_RESULTS.refresh(p_as_of)`** first takes an exclusive lock on the state
+table, then inserts the `CAP_RUN` row as `RUNNING` and commits it at once from
+an autonomous transaction (a hung run stays visible, and the lock stays
+held), copies `CAPR_FIT` into
 `CAP_FIT_HIST`, merges `CAPR_ALERTS` into the state table, marks the run `OK`
 with its counts and commits. On any error it rolls the run's work back,
 marks it `FAILED` with the error stack in `error_text` and re-raises, so the
@@ -1206,8 +1208,14 @@ scheduler log says FAILED too. `CAPR_ALERTS` is read once: one row per
 `state_key` (worst severity, then latest day; an anomaly key can carry
 several episodes). A `p_as_of` before today records a backdated run: the
 fits as the views show them now, labelled with that day, and no alert state,
-because the state machine runs in real time. A `LOCK TABLE` on the state
-table serialises two refreshes.
+because the state machine runs in real time (it still takes the lock). That
+`LOCK TABLE` on `CAP_ALERT_STATE` is held from `run_id` allocation to the
+final COMMIT or ROLLBACK, so refreshes are serialised for their whole
+lifetime: `run_id` order equals commit order, and the poller recipe below
+(`run_id > :last_seen_run_id`) cannot skip a run whose events commit after a
+higher id's. A second refresh waits at the lock and shows no `RUNNING` row
+until it holds it. `purge` and `reset` lock the state table first and
+`CAP_RUN` second, the same order, so none of the three can deadlock.
 
 The state machine, per `state_key`, on each live run:
 

@@ -241,7 +241,8 @@ WHERE  s.state = 'OPEN'
 -- remembers the highest event_id (or run_id) it has seen and asks
 --   SELECT * FROM capr_alert_events WHERE run_id > :last_run_id
 -- as_of_day is the run's. prev_severity is the severity before the event
--- (NULL on NEW).
+-- (NULL on NEW). Refreshes are serialised for their whole lifetime, so
+-- run_id order equals commit order and the poller never skips a run.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capr_alert_events AS
 SELECT e.event_id,
@@ -581,13 +582,19 @@ WHERE  a.last_day > h.last_day
 -- CAP_RESULTS -- the only code in the suite that writes. See the spec.
 -- --------------------------------------------------------------------
 CREATE OR REPLACE PACKAGE cap_results AUTHID DEFINER AS
-    -- Snapshot the live views. Inserts a CAP_RUN row (RUNNING, committed at
-    -- once so a hung run is visible), copies CAPR_FIT into CAP_FIT_HIST,
-    -- merges CAPR_ALERTS into CAP_ALERT_STATE with events, keeps the
-    -- CAPR_COVERAGE roll-up on the run row, marks the run OK and COMMITs. On any error the run's work is rolled back, the run is
+    -- Snapshot the live views. Takes an exclusive lock on CAP_ALERT_STATE
+    -- first and holds it to the final COMMIT / ROLLBACK, so refreshes are
+    -- serialised for their whole lifetime: run_id order equals commit order
+    -- (a poller on run_id > :last_seen never skips a run). Then inserts a
+    -- CAP_RUN row (RUNNING, committed at once by an autonomous transaction,
+    -- so a hung run is visible and the lock stays held), copies CAPR_FIT
+    -- into CAP_FIT_HIST, merges CAPR_ALERTS into CAP_ALERT_STATE with events,
+    -- keeps the CAPR_COVERAGE roll-up on the run row, marks the run OK and
+    -- COMMITs. A second refresh waits at the lock and shows no RUNNING row
+    -- until it has it. On any error the run's work is rolled back, the run is
     -- marked FAILED with the error stack, and the error is re-raised (so a
     -- scheduler run ends FAILED too). It commits: call it with no pending
-    -- work of your own.
+    -- work of your own. Lock order everywhere: CAP_ALERT_STATE, then CAP_RUN.
     --   p_as_of  the run's as_of_day, default today. A day before today
     --            records a backdated run: the fits as the views show them
     --            now, labelled with that day, and no alert state (the state
@@ -688,7 +695,9 @@ CREATE OR REPLACE PACKAGE BODY cap_results AS
         END add_event;
     BEGIN
         SELECT resolve_grace_runs INTO l_grace FROM cap_cfg;
-        -- Serialises concurrent refreshes; held until the caller's COMMIT.
+        -- refresh already holds this lock (taken before run_id allocation);
+        -- re-locking in the same transaction is a no-op, kept so merge_alerts
+        -- stays safe on its own.
         LOCK TABLE cap_alert_state IN EXCLUSIVE MODE;
 
         OPEN c_cur;
@@ -785,6 +794,18 @@ CREATE OR REPLACE PACKAGE BODY cap_results AS
         o_event := l_n;
     END merge_alerts;
 
+    -- The RUNNING row, committed in its own transaction so refresh's lock on
+    -- CAP_ALERT_STATE survives it. Nothing else touches CAP_RUN rows here, so
+    -- the lock the main transaction holds cannot block this insert.
+    PROCEDURE insert_running(p_run IN NUMBER, p_asof IN DATE, p_back IN CHAR) IS
+        PRAGMA AUTONOMOUS_TRANSACTION;
+    BEGIN
+        INSERT INTO cap_run (run_id, as_of_day, seam_mode, started_at, status, backdated, run_by)
+        VALUES (p_run, p_asof, seam_mode, SYSTIMESTAMP, 'RUNNING', p_back,
+                SYS_CONTEXT('USERENV', 'SESSION_USER'));
+        COMMIT;
+    END insert_running;
+
     PROCEDURE refresh(p_as_of IN DATE DEFAULT NULL) IS
         l_run   NUMBER;
         l_asof  DATE := TRUNC(NVL(p_as_of, SYSDATE));
@@ -800,13 +821,14 @@ CREATE OR REPLACE PACKAGE BODY cap_results AS
         l_err   VARCHAR2(4000);
     BEGIN
         l_back := CASE WHEN l_asof < TRUNC(l_now) THEN 'Y' ELSE 'N' END;
+        -- Serialise first, backdated runs included: the lock is held from
+        -- run_id allocation to the final COMMIT, so run_id order is commit
+        -- order. Waits here (no CAP_RUN row yet) while another refresh runs.
+        LOCK TABLE cap_alert_state IN EXCLUSIVE MODE;
         SELECT GREATEST(TO_NUMBER(TO_CHAR(SYSTIMESTAMP, 'YYYYMMDDHH24MISSFF3')), NVL(MAX(run_id), 0) + 1)
         INTO   l_run
         FROM   cap_run;
-        INSERT INTO cap_run (run_id, as_of_day, seam_mode, started_at, status, backdated, run_by)
-        VALUES (l_run, l_asof, seam_mode, SYSTIMESTAMP, 'RUNNING', l_back,
-                SYS_CONTEXT('USERENV', 'SESSION_USER'));
-        COMMIT;
+        insert_running(l_run, l_asof, l_back);
 
         BEGIN
             IF l_asof > TRUNC(l_now) THEN
@@ -892,7 +914,9 @@ CREATE OR REPLACE PACKAGE BODY cap_results AS
         l_last_ok NUMBER;
         l_cut     TIMESTAMP := SYSTIMESTAMP - NUMTODSINTERVAL(p_keep_days, 'DAY');
     BEGIN
-        -- A refresh waits at its CAP_RUN insert until this commits.
+        -- A refresh waits at its first LOCK until this commits. Same lock
+        -- order as refresh: CAP_ALERT_STATE, then CAP_RUN.
+        LOCK TABLE cap_alert_state IN EXCLUSIVE MODE;
         LOCK TABLE cap_run IN EXCLUSIVE MODE;
         SELECT MAX(run_id), MAX(CASE WHEN status = 'OK' AND backdated = 'N' THEN run_id END)
         INTO   l_last, l_last_ok
@@ -912,6 +936,7 @@ CREATE OR REPLACE PACKAGE BODY cap_results AS
 
     PROCEDURE reset IS
     BEGIN
+        LOCK TABLE cap_alert_state IN EXCLUSIVE MODE;
         LOCK TABLE cap_run IN EXCLUSIVE MODE;
         DELETE FROM cap_alert_event;
         DELETE FROM cap_alert_state;

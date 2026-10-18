@@ -3443,6 +3443,15 @@ BEGIN
         chk_true('3 CAP_RUN rows, all OK, one backdated (got ' || v_n || '/' || v_a || '/' || v_b || ')',
                  v_n = 3 AND v_a = 3 AND v_b = 1);
         chk_true('run_id grows: R0 < R1 < R2', run_0 < run_1 AND run_1 < run_2);
+        -- Refreshes are serialised for their whole lifetime (lock before run_id
+        -- allocation), so run_id order is commit order: no pair of runs, and
+        -- no pair of events, is ordered one way by run_id and the other by time.
+        SELECT COUNT(*) INTO v_n
+          FROM cap_run a JOIN cap_run b ON a.run_id < b.run_id AND a.started_at > b.started_at;
+        chk_int ('run_id order = started_at order (inverted CAP_RUN pairs)', v_n, 0);
+        SELECT COUNT(*) INTO v_n
+          FROM cap_alert_event a JOIN cap_alert_event b ON a.run_id < b.run_id AND a.at_time > b.at_time;
+        chk_int ('run_id order = at_time order for CAP_ALERT_EVENT (inverted event pairs)', v_n, 0);
         SELECT as_of_day, backdated, n_alert, n_event, seam_mode, n_fit INTO v_dt, v_c1, v_a, v_b, v_str, v_c
           FROM cap_run WHERE run_id = run_0;
         chk_true('R0: as_of_day TRUNC(SYSDATE) - 7, backdated Y, no alert state (n_alert, n_event NULL), seam fixture (got '
