@@ -523,8 +523,14 @@ fixture harness and both reports.
       "generated" claims. (branch rf/u10-docs)
 - [ ] **M21.5 Follow-ups.** `suite_version` is 16 while the latest milestone
       is M21 (bump it with its `CAP_CFG_CHECK` rule). Tier 2 still trains on
-      incomplete days (`is_complete` not applied in ml/, `CAPF_BACKTEST`
-      input, `CAPF_ESM_CANDIDATE`, `CAPF_ESM_HEALTH`).
+      incomplete days (`is_complete` not applied in ml/ or `CAPF_ESM_HEALTH`).
+      Done since: `CAPF_BACKTEST` CPU rows use complete days only and anchor at
+      the median of the last `shift_days` training days like the live fit
+      (new `anchor_val` column, cutoff still from all days so it matches the
+      twins), and `CAPF_ESM_CANDIDATE` scores CPU holdout actuals on complete
+      days. Left: the ml/ training input and the `CAPF_ESM_HEALTH` last_day
+      (a complete-only filter there would give negative ages while the twins
+      train through an incomplete last day).
       `test/fixture_remove.sql` does not drop `CAP_FIXTURE_SEG_STAT`.
       `CAP_TBSPC_OVERRIDE` does not apply to the TEMP / UNDO peak series;
       PDB-level `cpu_count` is unused. ELK forecast doc ids hash

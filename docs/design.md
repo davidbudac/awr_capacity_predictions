@@ -975,7 +975,16 @@ no partitioned ESM) via `DBMS_DATA_MINING.CREATE_MODEL2(mining_function =>
   the report's forecasts. `CAPF_BACKTEST` then scores both engines over the
   holdout — REGR is re-fit in pure SQL on the same truncated window (works
   with zero models trained) — as `mape_pct` / `bias_pct` per series per
-  engine, surfaced as report section 6c ("which engine was right"). ESM may
+  engine, surfaced as report section 6c ("which engine was right"). The REGR
+  replay uses production's inputs: a tablespace line starts at the last
+  training day's value, a CPU line at the median of the last `shift_days`
+  complete training days (the live `anc` anchor, exposed as `anchor_val`), and
+  CPU days count only when `is_complete = 'Y'`, both as training rows and as
+  holdout actuals (so a partial day is neither fitted nor scored). The cutoff
+  still comes from every day with a value, which is what the twins train
+  through. CPU deseasoning is not replayed: it changes the slope input, not
+  the anchor. `CAPF_ESM_CANDIDATE` applies the same complete-day rule to its
+  CPU actuals; the twins and `CAPF_ESM_HEALTH` still read every day. ESM may
   cover fewer than holdout_days days (30-step cap + the rows/4 floor);
   `n_days` records actual coverage. `train_all(p_top_n, p_backtest => TRUE)`
   refreshes the twins of every series it trains, the CPU ones included, so
