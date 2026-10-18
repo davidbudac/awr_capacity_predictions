@@ -2,8 +2,9 @@
 #
 # report/run_report.sh -- run the report drivers non-interactively (cron).
 # =====================================================================
-# Runs report/report.sql (always), plus report/report_html.sql (--html) and
-# report/report_csv.sql (--csv), from the repo root so the @@ includes
+# Runs report/report.sql (always), plus report/report_html.sql (--html),
+# report/report_brief.sql (--brief) and report/report_csv.sql (--csv), from
+# the repo root so the @@ includes
 # resolve, and checks each run: the script exits non-zero when sqlplus exits
 # non-zero (a failed --container / --schema ALTER SESSION aborts the session),
 # when the session output has any ORA- or SP2- line, or when a spool is
@@ -11,17 +12,18 @@
 # Read-only against the database, like the drivers.
 #
 # Usage:
-#   report/run_report.sh [connect] [--html] [--csv] [--scope dbid[:con_dbid]]
+#   report/run_report.sh [connect] [--html] [--brief] [--csv] [--scope dbid[:con_dbid]]
 #                        [--snapshot] [--keep N] [--container PDB]
 #                        [--schema OWNER]
 #     connect        sqlplus connect string, default "/ as sysdba" (quote it)
 #     --html         also write the HTML report
+#     --brief        also write the one-page HTML briefing
 #     --csv          also write the CSV directory
 #     --scope D[:C]  only dbid D (and con_dbid C); C alone: --scope -:C
 #     --snapshot     read the alert list and the section 1 / 7 fits from the
 #                    last refresh run (CAP_RESULTS.refresh) instead of live
 #     --keep N       after a good run, keep only the newest N reports of each
-#                    kind in reports/ (text, HTML, CSV directories)
+#                    kind in reports/ (text, HTML, briefing, CSV directories)
 #     --container P  ALTER SESSION SET CONTAINER = P first (SYSDBA runs)
 #     --schema O     ALTER SESSION SET CURRENT_SCHEMA = O first (an install
 #                    owned by another schema, read as SYSDBA)
@@ -36,6 +38,7 @@ cd "$(dirname "$0")/.." || exit 2
 
 conn="/ as sysdba"
 do_html=0
+do_brief=0
 do_csv=0
 keep=""
 sdbid="-"
@@ -51,6 +54,7 @@ fi
 while [ $# -gt 0 ]; do
     case "$1" in
         --html)      do_html=1 ;;
+        --brief)     do_brief=1 ;;
         --csv)       do_csv=1 ;;
         --snapshot)  source="SNAPSHOT" ;;
         --keep)      shift; keep="${1:-}" ;;
@@ -126,12 +130,13 @@ SQL
 
 run_driver "text" "Report written to:" "@report/report.sql - - - $sdbid $scon $source"
 [ $do_html -eq 1 ] && run_driver "html" "Report written to:" "@report/report_html.sql - - - $sdbid $scon $source"
+[ $do_brief -eq 1 ] && run_driver "brief" "Report written to:" "@report/report_brief.sql - - - $sdbid $scon $source"
 [ $do_csv  -eq 1 ] && run_driver "csv"  "CSV written to:"    "@report/report_csv.sql $sdbid $scon"
 
 # Rotation only after a clean run, so a failing job never deletes the last
 # good reports.
 if [ $rc -eq 0 ] && [ -n "$keep" ]; then
-    for pat in 'cap_report_*.txt' 'cap_report_*.html' 'cap_csv_*'; do
+    for pat in 'cap_report_*.txt' 'cap_report_*.html' 'cap_brief_*.html' 'cap_csv_*'; do
         # names carry a sortable timestamp, newest last
         ls -1d reports/$pat 2>/dev/null | sort | head -n -"$keep" | while read -r old; do
             rm -rf -- "$old"
