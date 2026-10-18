@@ -170,8 +170,10 @@ Read-only: the report only SELECTs; it creates/modifies no database object.
 view (every column, every row in the scope) into
 `reports/cap_csv_<db>_<ts>/`. For cron, `report/run_report.sh [connect]
 [--html] [--csv] [--scope D[:C]] [--snapshot] [--keep N] [--container PDB]
-[--schema OWNER]` runs the drivers from the repo root and exits non-zero when a
-spool is missing or holds an ORA- or SP2- line.
+[--schema OWNER]` runs the drivers from the repo root and exits non-zero when
+sqlplus exits non-zero (a failed `--container` / `--schema` aborts the run),
+when the session output has an ORA- or SP2- line, or when a spool is missing or
+holds one.
 
 ### Drill-down
 
