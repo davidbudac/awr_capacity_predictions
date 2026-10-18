@@ -1623,6 +1623,8 @@ BEGIN
     DECLARE
         d_gap   DATE := meta_d('CPUGAP_DAY');
         d_gnext DATE := meta_d('CPUGAP_NEXT');
+        d_last  DATE := meta_d('LAST_DAY');
+        d_part  DATE := meta_d('PARTIAL_DAY');
         n_pdb   NUMBER := meta_n('PDB_CON_DBID');
         v_gflag VARCHAR2(1);
         v_lbl   VARCHAR2(100);
@@ -1723,7 +1725,11 @@ BEGIN
           FROM capa_cpu_shift
           WHERE dbid = v_dbid AND con_dbid = n_pdb AND metric = 'DB_CPU_PCT';
         chk_int  ('PDB shift n_recent (full window)', v_n, 7);
-        chk_int  ('PDB shift n_base', v_num, 28);
+        -- 4 weeks of baseline days minus the fixture's partial day (a weekday
+        -- 14..20 days back, always inside the baseline window): an incomplete
+        -- day is dropped from both windows. The sawtooth medians are unchanged
+        -- (any one day removed from 4 whole weeks leaves median 40, MAD 4).
+        chk_int  ('PDB shift n_base (28 days minus the partial day)', v_num, 27);
         chk_int  ('PDB shift n_above (N-of-M: all 7)', v_num2, 7);
         chk_close('PDB shift base_mad_sigma', v_num3, meta_n('SHIFT_BASE_SIGMA'), 0.0001);
 
@@ -1739,6 +1745,42 @@ BEGIN
         SELECT COUNT(*) INTO v_n FROM capa_cpu_shift
           WHERE dbid = v_dbid AND con_dbid = v_dbid AND shift_flag IS NOT NULL;
         chk_int('root container raises no level shift', v_n, 0);
+
+        -- Completeness + freshness (CAPA_CPU_SHIFT carries newest_day /
+        -- is_current like every CAPF view). Every fixture CPU series ends on
+        -- the same day, so all five rows are current.
+        SELECT COUNT(*) INTO v_n FROM capa_cpu_shift
+          WHERE dbid = v_dbid AND is_current = 'Y' AND newest_day = d_last;
+        chk_int('CAPA_CPU_SHIFT: all rows is_current Y, newest_day = last day', v_n, 5);
+        SELECT COUNT(*) INTO v_n FROM capa_cpu_shift WHERE dbid = v_dbid AND last_day <> newest_day;
+        chk_int('CAPA_CPU_SHIFT: every series ends on the dbid newest day', v_n, 0);
+        -- The partial day (is_complete N) feeds neither window.
+        SELECT COUNT(*) INTO v_n FROM capd_dbtime_daily
+          WHERE dbid = v_dbid AND con_dbid = n_pdb AND is_complete = 'N'
+            AND gap_flag = 'N' AND day_dt = d_part;
+        chk_int('partial day is a non-gap incomplete DB_CPU_PCT day (the case the rule drops)', v_n, 1);
+        -- Negative case: stale_days = -1 puts every series behind "newest",
+        -- standing in for a PDB whose time model stopped. The shift stays in
+        -- CAPA_CPU_SHIFT but reads is_current N, and so does its CAPR_ALERTS
+        -- row (cap_results merges only is_current Y). Uncommitted, then reset.
+        BEGIN
+            UPDATE cap_config SET cfg_value = -1 WHERE cfg_name = 'stale_days';
+            SELECT COUNT(*) INTO v_n FROM capa_cpu_shift
+              WHERE dbid = v_dbid AND con_dbid = n_pdb AND metric = 'DB_CPU_PCT'
+                AND shift_flag = 'UP' AND is_current = 'N';
+            chk_int('stale series: CAPA_CPU_SHIFT is_current N', v_n, 1);
+            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SHIFT';
+            chk_int('stale series: CPU_SHIFT alert row still listed', v_n, 1);
+            SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SHIFT' AND is_current = 'N';
+            chk_int('stale series: CPU_SHIFT alert is_current N (not merged)', v_n, 1);
+            UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'stale_days';
+        EXCEPTION
+            WHEN OTHERS THEN
+                UPDATE cap_config SET cfg_value = cfg_default WHERE cfg_name = 'stale_days';
+                RAISE;
+        END;
+        SELECT COUNT(*) INTO v_n FROM capr_alerts WHERE kind = 'CPU_SHIFT' AND is_current = 'Y';
+        chk_int('fresh again: CPU_SHIFT alert is_current Y', v_n, 1);
 
         -- Alert + report view.
         snap_alerts;

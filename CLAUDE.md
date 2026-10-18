@@ -297,7 +297,7 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
   bands = the OLS half-widths around that anchor, so +30 and days_to_full
   agree. TBSPC days_to_full / _lo / _hi clamp at 0 and `limit_below_used`
   flags a ceiling under usage. Every CAPF view carries `newest_day` /
-  `is_current` (`stale_days` 3); forecast alert kinds need `is_current = 'Y'`.
+  `is_current` (`stale_days` 3); forecast alert kinds and `CPU_SHIFT` need `is_current = 'Y'` (`CAPA_CPU_SHIFT` carries `newest_day` / `is_current` per dbid and reads complete, non-gap days only).
 - **CYCLIC:** `cyclic_min_cliffs` (2) or more M9.3 shrink cliffs in the
   training window grade a tablespace CYCLIC instead of resetting; it is judged
   on its per-cycle peaks (`cycle_peak_pct`, `peak_slope_bpd`), and TBSPC_FULL

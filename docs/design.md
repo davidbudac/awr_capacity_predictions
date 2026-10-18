@@ -300,7 +300,9 @@ the series — it is still data, and the forecast layer wants it — but:
   day; the daily totals (`db_cpu_sec`, `host_busy_sec`, `REDO_GB_DAY`) do
   carry more than a day, and `gap_flag` is the column that says so.
 - `CAPA_ANOM` (in every mode) and `CAPA_CPU_SHIFT` (Layer 4) drop gap days
-  from their baselines and never flag one.
+  from their baselines and never flag one. `CAPA_CPU_SHIFT` also drops
+  incomplete days (`is_complete = 'N'`), the rule `CAPA_ANOM`'s history and the
+  CPU trend fit already follow.
 
 Why 12 hours and not something tighter: `gap_flag` *suppresses* anomaly
 scoring, so an over-sensitive default would silence the whole CPU anomaly layer
@@ -849,7 +851,7 @@ month ago. So this view compares **windows, not days**, per
 `shift_pct = recent_med − base_med` in percentage **points**. `UP` requires
 all four of: `shift_pct > shift_min_pct` (15); a full recent window
 (`n_recent ≥ shift_days` — gap days are excluded from the source, so a window
-with a gap in it cannot flag); enough baseline (`n_base ≥ shift_days`); and
+with a gap or an incomplete day in it cannot flag); enough baseline (`n_base ≥ shift_days`); and
 the **N-of-M confirmation** `n_above ≥ shift_days`, i.e. *every* day of the
 recent window sits above `base_med + max(base_mad_sigma, cpu_min_mad_pct)`.
 That last clause is what separates a genuine step from one loud day dragging
@@ -862,6 +864,19 @@ every input (`recent_med`, `base_med`, `base_mad_sigma`, `n_recent`,
 re-derivable by hand. `BUSY_PEAK` is deliberately not covered: it is already
 a same-window average of `BUSY_PCT`'s busiest hours, so it shifts with them
 and would only duplicate the alert.
+
+Gap-flagged **and** incomplete days (`is_complete = 'N'`: `covered_sec` below
+`complete_day_pct`, e.g. a restart day) leave both windows (M10.5). Without
+the second half, seven partial days could produce an UP or DOWN while the
+CPU trend fit and `CAPA_ANOM`'s history, which read complete days only,
+ignored the same days. The view also carries `newest_day` (the newest source
+day of the *dbid*, so a dead PDB compares against the live CDB) and
+`is_current` (`last_day >= newest_day − stale_days`), as every `CAPF_*` view
+does. `CAPR_FRESHNESS` is per dbid, so a PDB whose time model stopped
+(unplugged, dropped) raises no `DATA_STALE`; `is_current = 'N'` is what stops
+its last shift from staying an OPEN `CPU_SHIFT` alert until AWR retention
+purges the rows. `CAPR_ALERTS` passes it through and `cap_results` merges
+only `is_current = 'Y'`, so a stale shift resolves after `resolve_grace_runs`.
 
 ### Downstream
 
@@ -1093,7 +1108,7 @@ M8.2, for the bundled reports themselves:
   same on every severity; `direction` says how `value` relates to it on an
   alert: `LE` (the countdowns), `GE` (levels, HIGH anomalies, `DATA_STALE`,
   `MODEL_HEALTH`), `ABS` (`CPU_SHIFT`, `|value| > alarm_threshold`), and `LE`
-  on a LOW anomaly. `is_current` is `'Y'` on every row today. So a poller can
+  on a LOW anomaly. `is_current` is `'N'` only on a forecast kind or a `CPU_SHIFT` whose series stopped, and `cap_results` merges the `'Y'` rows. So a poller can
   key, de-duplicate and alarm without parsing `message`. Both reports'
   at-a-glance blocks read this view (DATA_STALE first), and the section
   severities come from the same `CAPR_SEVERITY` rows, so paging and reporting
