@@ -238,6 +238,9 @@ WHERE  m.status IN ('OK', 'FAILED')
 -- fall inside the holdout window, where the real daily value exists -- but
 -- grouped by model_type instead of collapsed to one row per series.
 -- CPU series have a single candidate, so they appear here with one row.
+-- Like CAPF_BACKTEST's REGR row, CPU holdout actuals count only on complete
+-- days (is_complete = 'Y'), so both engines are scored on the same days. The
+-- twins themselves still train on every day (ml/ package, PLAN.md M21.5).
 -- --------------------------------------------------------------------
 CREATE OR REPLACE VIEW capf_esm_candidate AS
 WITH act AS (
@@ -246,10 +249,10 @@ WITH act AS (
         FROM   capd_tbspc_daily
         UNION ALL
         SELECT dbid, con_dbid, 'CPU', 'BUSY_PCT', day_dt, busy_pct
-        FROM   capd_cpu_daily WHERE busy_pct IS NOT NULL
+        FROM   capd_cpu_daily WHERE busy_pct IS NOT NULL AND is_complete = 'Y'
         UNION ALL
         SELECT dbid, con_dbid, 'CPU', 'DB_CPU_SEC', day_dt, db_cpu_sec
-        FROM   capd_dbtime_daily WHERE db_cpu_sec IS NOT NULL
+        FROM   capd_dbtime_daily WHERE db_cpu_sec IS NOT NULL AND is_complete = 'Y'
      )
 SELECT h.dbid,
        h.con_dbid,
@@ -416,14 +419,28 @@ WHERE  e.step_days = e.esm_horizon_days
 -- held-out actuals:
 --   engine REGR : the linear fit is recomputed here in pure SQL on the
 --                 truncated window -- always available, no models needed.
---                 Like the live CAPF_* projections it is anchored at the
---                 last training day's actual value:
---                 pred = anchor_val + slope * (day_n - anchor_day_n).
+--                 Like the live CAPF_* projections it is anchored, and the
+--                 anchor follows the live rule of each series kind:
+--                 TBSPC  the last training day's actual value,
+--                 CPU    the MEDIAN of the training days in the last
+--                        shift_days days ending at the cutoff, as the live
+--                        CPU fit anchors (ddl/30 `anc`), because a single
+--                        hot or cold day is a poor line start.
+--                 pred = anchor_val + slope * (day_n - anchor_day_n), with
+--                 anchor_day_n the last training day for both kinds.
+--                 CPU days count only when is_complete = 'Y' (the live CPU
+--                 fit's rule), in the training window AND as holdout
+--                 actuals; a partial day (restart, first day) is neither
+--                 fitted nor scored. last_day / cutoff_day still come from
+--                 ALL days with a value, so the cutoff matches the ESM
+--                 twins', which train on every day. anchor_val is exposed on
+--                 the REGR row (NULL on the ESM row).
 --                 The slope follows slope_method, as the live fits do: OLS
 --                 (0), Theil-Sen over the window's pairs (1), or DRIFT, the
 --                 median day-over-day rate of the window (2). slope_method
 --                 says which one a row used, so the estimators can be
---                 compared by flipping the knob. No CPU deseasoning here.
+--                 compared by flipping the knob. No CPU deseasoning here
+--                 (it changes the slope input, not the anchor).
 --   engine ESM  : rows appear after EXEC cap_forecast_ml.train_backtest
 --                 (or train_all, which refreshes the twins of the series it
 --                 trains), which trains purpose=BACKTEST models through the
@@ -447,22 +464,25 @@ WHERE  e.step_days = e.esm_horizon_days
 CREATE OR REPLACE VIEW capf_backtest AS
 WITH act AS (
         SELECT dbid, con_dbid, 'TBSPC' AS series_kind, tablespace_name AS series_key,
-               day_dt, used_bytes AS val
+               day_dt, used_bytes AS val, 'Y' AS is_complete
         FROM   capd_tbspc_daily
         UNION ALL
-        SELECT dbid, con_dbid, 'CPU', 'BUSY_PCT', day_dt, busy_pct
+        SELECT dbid, con_dbid, 'CPU', 'BUSY_PCT', day_dt, busy_pct, is_complete
         FROM   capd_cpu_daily WHERE busy_pct IS NOT NULL
         UNION ALL
-        SELECT dbid, con_dbid, 'CPU', 'DB_CPU_SEC', day_dt, db_cpu_sec
+        SELECT dbid, con_dbid, 'CPU', 'DB_CPU_SEC', day_dt, db_cpu_sec, is_complete
         FROM   capd_dbtime_daily WHERE db_cpu_sec IS NOT NULL
      ),
-     b AS (
+     -- b0 takes last_day over ALL days with a value (the ESM twins' cutoff
+     -- basis) and b then keeps the complete days every fit and score uses.
+     b0 AS (
         SELECT a.*,
                a.day_dt - DATE '2020-01-01' AS day_n,
                MAX(a.day_dt) OVER (PARTITION BY a.dbid, a.con_dbid,
                                    a.series_kind, a.series_key) AS last_day
         FROM   act a
      ),
+     b AS (SELECT * FROM b0 WHERE is_complete = 'Y'),
      -- The training window: the train_days days ending at the cutoff.
      tw AS (
         SELECT b.*,
@@ -483,10 +503,24 @@ WITH act AS (
                REGR_SLOPE(tw.val, tw.day_n)                AS slope,
                REGR_COUNT(tw.val, tw.day_n)                AS n_train,
                MEDIAN(tw.rate)                             AS drift,
-               MAX(tw.val) KEEP (DENSE_RANK LAST ORDER BY tw.day_n) AS anchor_val,
+               MAX(tw.val) KEEP (DENSE_RANK LAST ORDER BY tw.day_n) AS last_val,
                MAX(tw.day_n)                               AS anchor_day_n
         FROM   tw
         GROUP  BY tw.dbid, tw.con_dbid, tw.series_kind, tw.series_key
+     ),
+     -- CPU anchor: the median of the training days in the last shift_days
+     -- days ending at the last training day (ddl/30 `anc`, same window).
+     anc AS (
+        SELECT t.dbid, t.con_dbid, t.series_kind, t.series_key,
+               MEDIAN(t.val) AS median_val
+        FROM  (SELECT tw.*,
+                      MAX(tw.day_n) OVER (PARTITION BY tw.dbid, tw.con_dbid,
+                                          tw.series_kind, tw.series_key) AS last_n
+               FROM   tw) t
+        CROSS  JOIN cap_cfg cfg
+        WHERE  t.series_kind = 'CPU'
+          AND  t.day_n > t.last_n - GREATEST(cfg.shift_days, 1)
+        GROUP  BY t.dbid, t.con_dbid, t.series_kind, t.series_key
      ),
      -- Theil-Sen pairs, only when slope_method = 1 (as in ddl/30).
      tws AS (
@@ -508,12 +542,16 @@ WITH act AS (
                                    WHEN 'DRIFT'    THEN q.drift
                                    ELSE q.slope END AS use_slope
         FROM  (SELECT o.*, s.ts_slope,
+                      CASE o.series_kind WHEN 'CPU' THEN NVL(an.median_val, o.last_val)
+                                         ELSE o.last_val END AS anchor_val,
                       CASE WHEN cfg.slope_method = 1 AND s.ts_slope IS NOT NULL THEN 'THEILSEN'
                            WHEN cfg.slope_method = 2 AND o.drift    IS NOT NULL THEN 'DRIFT'
                            ELSE 'OLS' END AS slope_method
                FROM   ols o
                LEFT   JOIN tss s ON s.dbid = o.dbid AND s.con_dbid = o.con_dbid
                                 AND s.series_kind = o.series_kind AND s.series_key = o.series_key
+               LEFT   JOIN anc an ON an.dbid = o.dbid AND an.con_dbid = o.con_dbid
+                                 AND an.series_kind = o.series_kind AND an.series_key = o.series_key
                CROSS  JOIN cap_cfg cfg) q
      )
 -- ---- REGR: score the truncated linear fit over the holdout actuals ----
@@ -528,7 +566,8 @@ SELECT h.dbid, h.con_dbid, h.series_kind, h.series_key,
        AVG((f.anchor_val + f.use_slope * (h.day_n - f.anchor_day_n) - h.val)
            / NULLIF(ABS(h.val), 0)) * 100            AS bias_pct,
        CAST(NULL AS VARCHAR2(20))                    AS model_type,
-       f.slope_method
+       f.slope_method,
+       f.anchor_val
 FROM   b h
 JOIN   fit f
   ON   f.dbid = h.dbid AND f.con_dbid = h.con_dbid
@@ -536,7 +575,7 @@ JOIN   fit f
 WHERE  h.day_dt > f.cutoff_day
   AND  f.use_slope IS NOT NULL
 GROUP  BY h.dbid, h.con_dbid, h.series_kind, h.series_key,
-          f.cutoff_day, f.holdout_days, f.n_train, f.slope_method
+          f.cutoff_day, f.holdout_days, f.n_train, f.slope_method, f.anchor_val
 UNION ALL
 -- ---- ESM: the SELECTED candidate's holdout score (M9.4 / M10.4) ----
 -- CAPF_ESM_CANDIDATE already did the per-twin scoring; the pick is the twin
@@ -551,7 +590,8 @@ SELECT c.dbid, c.con_dbid, c.series_kind, c.series_key,
        c.mape_pct,
        c.bias_pct,
        c.model_type,
-       CAST(NULL AS VARCHAR2(8))                     AS slope_method
+       CAST(NULL AS VARCHAR2(8))                     AS slope_method,
+       CAST(NULL AS NUMBER)                          AS anchor_val
 FROM   (SELECT cc.*,
                ROW_NUMBER() OVER (PARTITION BY cc.dbid, cc.con_dbid,
                                                cc.series_kind, cc.series_key

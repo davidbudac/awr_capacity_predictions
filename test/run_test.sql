@@ -1834,6 +1834,29 @@ BEGIN
         chk_int  ('CPU partial day n_intervals', v_n, 1);
         chk_close('CPU partial day busy_pct (night interval only)',
                   v_num3, meta_n('PARTIAL_BUSY_PCT'), 0.000001);
+        -- CAPF_BACKTEST CPU row (root BUSY_PCT): complete days only, anchored at
+        -- the median of the last shift_days training days (not the last value).
+        -- The partial day sits 14..20 days back, inside the 28-day holdout, so
+        -- it must neither be fitted nor scored: n_days = complete holdout days.
+        SELECT n_days, anchor_val, cutoff_day INTO v_n, v_num, v_ts
+          FROM capf_backtest
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND series_kind = 'CPU'
+            AND series_key = 'BUSY_PCT' AND engine = 'REGR';
+        chk_true('CPU backtest: partial day lies inside the holdout', d_part > v_ts);
+        SELECT COUNT(*) INTO v_num2 FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND busy_pct IS NOT NULL
+            AND is_complete = 'Y' AND day_dt > v_ts;
+        chk_int('CPU backtest n_days = complete holdout days', v_n, v_num2);
+        SELECT COUNT(*) INTO v_num2 FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND busy_pct IS NOT NULL
+            AND day_dt > v_ts;
+        chk_true('CPU backtest n_days excludes the partial day', v_n < v_num2);
+        SELECT MEDIAN(busy_pct) INTO v_num2 FROM capd_cpu_daily
+          WHERE dbid = v_dbid AND con_dbid = v_dbid AND busy_pct IS NOT NULL
+            AND is_complete = 'Y' AND day_dt <= v_ts
+            AND day_dt > v_ts - (SELECT shift_days FROM cap_cfg);
+        chk_close('CPU backtest anchor_val = median of the last shift_days training days',
+                  v_num, v_num2, 0.000001);
         SELECT covered_sec, is_complete, db_cpu_pct INTO v_num, v_c, v_num2
           FROM capd_dbtime_daily
           WHERE dbid = v_dbid AND con_dbid = v_dbid AND day_dt = d_part;
