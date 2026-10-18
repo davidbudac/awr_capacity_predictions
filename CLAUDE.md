@@ -254,7 +254,7 @@ Prefixes: `CAPV_` seam → `CAPD_` daily → `CAPF_` forecast → `CAPA_` anomal
   on `con_dbid`, not just `dbid`. The root's OSSTAT is **NUM_CPUS 8 /
   NUM_CPU_CORES 4** (SMT 2:1), so `db_cpu_pct` closed forms divide by 8
   logical CPUs.
-- **Fixture partial day:** one weekday in 14..20 days back restarts at noon
+- **Fixture partial day:** one weekday at fixture index 14..20 (about 100 days back, far outside the 35-day shift windows) restarts at noon
   and keeps only its 06:00 interval: `covered_sec` 43200, `is_complete = 'N'`
   (below `complete_day_pct` 80). CPU and REDO fits read complete days only.
 - **Other fixture series** (closed forms in run_test.sql): `FIX_CYCLIC` /

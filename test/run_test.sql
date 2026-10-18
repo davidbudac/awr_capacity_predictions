@@ -1807,11 +1807,10 @@ BEGIN
           FROM capa_cpu_shift
           WHERE dbid = v_dbid AND con_dbid = n_pdb AND metric = 'DB_CPU_PCT';
         chk_int  ('PDB shift n_recent (full window)', v_n, 7);
-        -- 4 weeks of baseline days minus the fixture's partial day (a weekday
-        -- 14..20 days back, always inside the baseline window): an incomplete
-        -- day is dropped from both windows. The sawtooth medians are unchanged
-        -- (any one day removed from 4 whole weeks leaves median 40, MAD 4).
-        chk_int  ('PDB shift n_base (28 days minus the partial day)', v_num, 27);
+        -- 4 whole baseline days: the fixture's partial day is ~100 days back,
+        -- far outside the 7 + 28 day shift windows, so the rule that drops
+        -- incomplete days from them is not exercised by a count here.
+        chk_int  ('PDB shift n_base', v_num, 28);
         chk_int  ('PDB shift n_above (N-of-M: all 7)', v_num2, 7);
         chk_close('PDB shift base_mad_sigma', v_num3, meta_n('SHIFT_BASE_SIGMA'), 0.0001);
 
