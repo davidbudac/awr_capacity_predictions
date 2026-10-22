@@ -1,0 +1,842 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AWR capacity predictions: one-minute tour</title>
+<style>
+  :root{
+    --bg:#0c1017; --surface:#121722; --surface-2:#171d29; --surface-3:#1f2634;
+    --text:#e6e9ef; --muted:#a3acbb; --faint:#6b7585; --border:#222a38; --border-strong:#303a4b;
+    --accent:#6f8dff; --accent-soft:#182142; --accent-text:#8ea4ff;
+    --ok:#5cc58c; --warn:#e0b34a; --crit:#f07d74; --crit-bg:#2e1715; --warn-bg:#2a2410; --ok-bg:#12271c;
+    --code-bg:#0a0e16; --code-bar:#10151f;
+    --mono:"DejaVu Sans Mono","Liberation Mono",monospace;
+    --sans:"Noto Sans","Liberation Sans","DejaVu Sans",sans-serif;
+  }
+  html,body{margin:0;background:#000;overflow:hidden}
+  #stage{position:relative;width:1920px;height:1080px;background:var(--bg);color:var(--text);
+    font-family:var(--sans);overflow:hidden;transform-origin:0 0}
+  #stage *{box-sizing:border-box}
+  #grid{position:absolute;inset:-80px;background-image:radial-gradient(rgba(160,180,255,.09) 1.6px,transparent 1.8px);
+    background-size:44px 44px}
+  .glow{position:absolute;width:900px;height:900px;border-radius:50%;filter:blur(150px);opacity:.33;left:0;top:0}
+  .top{position:absolute;left:120px;right:120px;top:50px;display:flex;justify-content:space-between;align-items:center;
+    font-family:var(--mono);font-size:22px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+  .top .chip{color:var(--accent-text);background:var(--accent-soft);border:1px solid var(--border-strong);
+    border-radius:999px;padding:8px 22px;letter-spacing:.04em;text-transform:none}
+  .dots{display:flex;gap:8px;margin-left:24px}
+  .dots i{width:10px;height:10px;border-radius:50%;background:var(--surface-3);display:block}
+  .dots i.on{background:var(--accent)}
+  .scene{position:absolute;left:120px;right:120px;top:120px;height:780px;opacity:0;transform-origin:50% 40%}
+  h1{font-size:96px;line-height:1.05;font-weight:800;margin:0;letter-spacing:-.025em}
+  h1 .w{display:inline-block;margin-right:.24em}
+  h2{font-size:54px;line-height:1.1;font-weight:800;margin:0 0 6px;letter-spacing:-.015em}
+  h2 small{color:var(--faint);font-weight:400;font-size:34px;letter-spacing:0}
+  .kicker{font-family:var(--mono);font-size:23px;color:var(--accent-text);letter-spacing:.1em;text-transform:uppercase;margin-bottom:16px}
+  .mono{font-family:var(--mono)}
+  .acc{color:var(--accent-text)} .crit{color:var(--crit)} .ok{color:var(--ok)} .warn{color:var(--warn)}
+  .grad{background:linear-gradient(90deg,#8ea4ff,#c39bff 55%,#f07d74);-webkit-background-clip:text;background-clip:text;color:transparent}
+
+  #cap{position:absolute;left:120px;right:120px;top:930px;height:96px;display:flex;align-items:center;
+    justify-content:center;text-align:center;font-size:36px;line-height:1.3;color:var(--text);font-weight:500}
+  #cap b{color:var(--accent-text);font-weight:800}
+  #barbg{position:absolute;left:0;right:0;bottom:0;height:8px;background:var(--surface-2)}
+  #bar{position:absolute;left:0;bottom:0;height:8px;width:0;background:linear-gradient(90deg,#6f8dff,#c39bff,#f07d74)}
+
+  .pill{display:inline-block;font-family:var(--mono);font-size:26px;border:2px solid var(--border-strong);
+    background:var(--surface);border-radius:999px;padding:10px 26px;margin-right:16px}
+
+  /* pipeline */
+  .pipe{display:grid;grid-template-columns:1fr 70px 1fr 70px 1fr 70px 1fr 70px 1fr;align-items:center;margin-top:90px}
+  .box{border:2px solid var(--border-strong);background:var(--surface);border-radius:18px;padding:26px 24px;min-height:230px}
+  .box .tag{font-family:var(--mono);font-size:32px;font-weight:700;color:var(--accent-text)}
+  .box .nm{font-size:28px;font-weight:700;margin:10px 0 10px}
+  .box .ds{font-size:22px;color:var(--muted);line-height:1.4}
+  .stack{display:grid;gap:20px}
+  .stack .box{min-height:0;padding:18px 22px}
+  .arrow{height:4px;background:var(--border-strong);position:relative;margin:0 8px}
+  .arrow i{position:absolute;left:0;top:0;height:4px;background:var(--accent);width:0}
+  .arrow b{position:absolute;top:-5px;width:14px;height:14px;border-radius:50%;background:#c9d4ff;box-shadow:0 0 14px #8ea4ff;opacity:0}
+  .box.on{border-color:var(--accent);background:var(--accent-soft);box-shadow:0 0 50px rgba(111,141,255,.25)}
+
+  /* terminal */
+  .term{background:var(--code-bg);border:1px solid var(--border-strong);border-radius:16px;overflow:hidden;box-shadow:0 30px 80px rgba(0,0,0,.45)}
+  .term .bar{background:var(--code-bar);height:46px;display:flex;align-items:center;gap:10px;padding:0 20px;
+    font-family:var(--mono);font-size:19px;color:var(--faint)}
+  .term .bar i{width:14px;height:14px;border-radius:50%;background:var(--surface-3);display:inline-block}
+  .term pre{margin:0;padding:22px 30px;font-family:var(--mono);font-size:21px;line-height:1.6;color:#d6deea;white-space:pre}
+  .term pre span.l{display:block;border-radius:6px;margin:0 -12px;padding:0 12px}
+  .term pre span.l.hl{background:var(--crit-bg);box-shadow:inset 5px 0 0 var(--crit)}
+  .cursor{display:inline-block;width:13px;height:28px;background:var(--accent);vertical-align:-5px;margin-left:2px}
+  .steps{margin-top:34px;display:grid;gap:18px}
+  .step{display:grid;grid-template-columns:70px 400px 1fr;align-items:center;font-size:31px;opacity:0}
+  .step .n{width:52px;height:52px;border-radius:50%;background:var(--accent-soft);color:var(--accent-text);
+    border:2px solid var(--accent);display:grid;place-items:center;font-family:var(--mono);font-size:25px;font-weight:700}
+  .step .f{font-family:var(--mono);color:var(--accent-text);font-size:29px}
+  .step .d{color:var(--muted)}
+  .note{margin-top:36px;border-left:5px solid var(--warn);background:var(--warn-bg);border-radius:10px;
+    padding:18px 28px;font-size:26px;color:var(--text);opacity:0;line-height:1.45}
+  .note code{font-family:var(--mono);color:var(--warn)}
+
+  /* KPI tiles */
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:24px;margin:26px 0 26px}
+  .kpi{background:var(--surface);border:2px solid var(--border-strong);border-radius:16px;padding:18px 26px;opacity:0}
+  .kpi .k{font-family:var(--mono);font-size:19px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+  .kpi .v{font-size:72px;font-weight:800;line-height:1.05;font-variant-numeric:tabular-nums}
+  .kpi .s{font-size:21px;color:var(--muted)}
+  .kpi.c{border-color:var(--crit);background:var(--crit-bg)} .kpi.c .v{color:var(--crit)}
+  .kpi.w .v{color:var(--warn)}
+
+  /* charts */
+  svg{overflow:visible}
+  svg text{font-family:var(--sans)}
+  .g-grid{stroke:var(--border);stroke-width:1.5}
+  .g-axis{stroke:var(--border-strong);stroke-width:2}
+  .g-txt{fill:var(--faint);font-size:20px}
+  .g-acc{fill:var(--accent-text);font-size:23px;font-weight:700}
+  .g-crit{fill:var(--crit);font-size:25px;font-weight:800}
+  .g-warn{fill:var(--warn);font-size:23px;font-weight:700}
+  .g-lbl{fill:var(--muted);font-size:21px}
+  .g-dot{fill:var(--accent)}
+  .g-dot.hot{fill:var(--crit)}
+  .g-ring{fill:none;stroke:var(--crit);stroke-width:3}
+  .g-fit{stroke:var(--muted);stroke-width:3;stroke-dasharray:10 8}
+  .g-proj{stroke:var(--accent);stroke-width:5}
+  .g-fast{stroke:var(--warn);stroke-width:5;stroke-dasharray:14 8}
+  .g-band{fill:var(--accent);fill-opacity:.2}
+  .g-ceil{stroke:var(--crit);stroke-width:3;stroke-dasharray:4 6}
+  .g-mark{stroke:var(--crit);stroke-width:5}
+  .g-win{fill:var(--accent);fill-opacity:.07}
+  .g-win2{fill:var(--accent);fill-opacity:.15}
+  .g-med{stroke:var(--accent-text);stroke-width:3}
+  .g-arrow{stroke:var(--crit);stroke-width:4}
+  .readout{position:absolute;right:0;top:0;text-align:right;font-size:26px;color:var(--muted);line-height:1.55}
+  .readout b{color:var(--text)}
+  .action{position:absolute;right:30px;top:470px;width:640px;background:var(--surface);border:2px solid var(--crit);
+    border-radius:16px;padding:20px 28px;opacity:0;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  .action .k{font-family:var(--mono);font-size:19px;letter-spacing:.08em;color:var(--crit);text-transform:uppercase}
+  .action .r{display:grid;grid-template-columns:220px 1fr;align-items:baseline;margin-top:8px}
+  .action .v{font-family:var(--mono);font-size:34px;font-weight:700}
+  .action .d{font-size:21px;color:var(--muted)}
+
+  /* quality */
+  .q-wrap{display:grid;grid-template-columns:620px 1fr;gap:70px;margin-top:50px;align-items:start}
+  .cells{display:grid;grid-template-columns:repeat(6,90px);gap:14px}
+  .cells i{height:90px;border-radius:14px;background:var(--surface-2);border:2px solid var(--border-strong);display:block}
+  .cells i.OK{background:var(--ok-bg);border-color:var(--ok)}
+  .cells i.FLAT{background:var(--surface-3);border-color:var(--faint)}
+  .cells i.CYCLIC{background:var(--warn-bg);border-color:var(--warn)}
+  .grades{display:grid;gap:16px}
+  .grade{display:grid;grid-template-columns:400px 90px 1fr;align-items:center;font-size:27px;opacity:0}
+  .grade .g{font-family:var(--mono);font-size:25px;font-weight:700}
+  .grade .n{font-family:var(--mono);font-size:32px;font-weight:800;text-align:right;padding-right:26px}
+  .grade .d{color:var(--muted);font-size:24px}
+
+  /* anomaly side cards */
+  .modes{position:absolute;right:0;top:4px;display:flex;gap:10px}
+  .modes span{font-family:var(--mono);font-size:20px;border:2px solid var(--border-strong);border-radius:8px;padding:6px 14px;color:var(--faint)}
+  .modes span.on{border-color:var(--accent);color:var(--accent-text);background:var(--accent-soft)}
+  .side{position:absolute;left:110px;top:176px;width:1290px;display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+  .side .h{grid-column:1/-1;margin-bottom:-8px}
+  .side .c{background:rgba(18,23,34,.92);border:2px solid var(--border-strong);border-left:6px solid var(--warn);border-radius:12px;
+    padding:16px 22px;opacity:0}
+  .side .t{font-family:var(--mono);font-size:22px;color:var(--text);font-weight:700}
+  .side .z{float:right;font-family:var(--mono);font-size:26px;color:var(--warn);font-weight:800}
+  .side .d{font-size:20px;color:var(--muted);margin-top:6px}
+  .side .h{font-family:var(--mono);font-size:19px;letter-spacing:.08em;color:var(--faint);text-transform:uppercase;opacity:0}
+
+  /* limits */
+  .lims{display:grid;gap:56px;margin-top:56px}
+  .lim{opacity:0}
+  .lim .hd{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:12px}
+  .lim .nm{font-size:31px;font-weight:700}
+  .lim .nm small{font-family:var(--mono);color:var(--faint);font-size:21px;font-weight:400;margin-left:14px}
+  .lim .rt{font-size:28px;color:var(--muted)}
+  .lim .rt b{font-family:var(--mono);color:var(--warn);font-size:34px}
+  .track{position:relative;height:46px;background:var(--surface-2);border:2px solid var(--border-strong);border-radius:12px;overflow:visible}
+  .track .f{position:absolute;left:0;top:0;bottom:0;border-radius:10px 0 0 10px;background:linear-gradient(90deg,#3d5bd6,#6f8dff)}
+  .track .gst{position:absolute;top:0;bottom:0;background:repeating-linear-gradient(45deg,rgba(224,179,74,.45) 0 10px,rgba(224,179,74,.15) 10px 20px)}
+  .track .m{position:absolute;top:-12px;bottom:-12px;width:4px;background:var(--crit)}
+  .track .m.w{background:var(--warn)}
+  .track .ml{position:absolute;top:52px;font-family:var(--mono);font-size:18px;transform:translateX(-50%);white-space:nowrap}
+  .track .pct{position:absolute;top:6px;font-family:var(--mono);font-size:24px;font-weight:700;color:#fff;transform:translateX(-110%)}
+
+  /* lifecycle */
+  .runs{display:grid;grid-template-columns:repeat(5,1fr);gap:28px;margin-top:80px;position:relative}
+  .run{background:var(--surface);border:2px solid var(--border-strong);border-radius:16px;padding:22px;min-height:290px;opacity:.35}
+  .run.on{opacity:1;border-color:var(--accent)}
+  .run .k{font-family:var(--mono);font-size:20px;color:var(--faint);letter-spacing:.08em;text-transform:uppercase}
+  .run .ev{display:inline-block;margin-top:18px;font-family:var(--mono);font-size:26px;font-weight:800;border-radius:8px;padding:6px 14px;opacity:0}
+  .run .sv{margin-top:14px;font-family:var(--mono);font-size:22px;opacity:0}
+  .run .d{margin-top:10px;font-size:21px;color:var(--muted);line-height:1.4;opacity:0}
+  .ev.NEW{background:var(--warn-bg);color:var(--warn)} .ev.ESC{background:var(--crit-bg);color:var(--crit)}
+  .ev.MISS{background:var(--surface-3);color:var(--muted)} .ev.RES{background:var(--ok-bg);color:var(--ok)}
+  .ev.REO{background:var(--warn-bg);color:var(--warn)}
+  .track2{position:absolute;left:0;right:0;top:-34px;height:4px;background:var(--border-strong)}
+  .track2 i{position:absolute;left:0;top:0;height:4px;background:var(--accent)}
+  .token{position:absolute;top:-46px;width:28px;height:28px;border-radius:50%;background:var(--accent);box-shadow:0 0 26px #8ea4ff;margin-left:-14px}
+  .acknote{margin-top:40px;font-size:27px;color:var(--muted);opacity:0}
+  .acknote code{font-family:var(--mono);color:var(--accent-text)}
+
+  /* outputs */
+  .outs{position:relative;height:640px;margin-top:24px}
+  .card{position:absolute;width:500px;height:250px;border-radius:14px;overflow:hidden;border:2px solid var(--border-strong);
+    background:var(--surface);box-shadow:0 30px 70px rgba(0,0,0,.55)}
+  .card img{width:100%;height:100%;object-fit:cover;object-position:top left;display:block}
+  .card pre{margin:0;padding:18px;font-family:var(--mono);font-size:10.5px;line-height:1.5;color:#d6deea;background:var(--code-bg);height:100%}
+  .clabel{position:absolute;width:500px;font-size:23px;color:var(--muted);opacity:0}
+  .clabel b{font-family:var(--mono);color:var(--accent-text);font-weight:700;font-size:22px;display:block}
+
+  /* outro */
+  .big{font-size:110px;line-height:1.02;font-weight:800;letter-spacing:-.03em}
+  .big span{display:inline-block}
+  .cta{margin-top:56px;display:flex;gap:22px;opacity:0}
+  .cta div{border:2px solid var(--accent);background:var(--accent-soft);border-radius:14px;padding:18px 30px;font-size:28px}
+  .cta b{font-family:var(--mono);color:var(--accent-text)}
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="grid"></div>
+  <div class="glow" id="glow1"></div><div class="glow" id="glow2"></div>
+  <div class="top"><span>AWR capacity predictions · Oracle 19c</span>
+    <span style="display:flex;align-items:center"><span class="chip" id="chip"></span><span class="dots" id="dots"></span></span></div>
+
+  <!-- title -->
+  <div class="scene" id="s-title" style="top:230px">
+    <div class="kicker" id="t-k">Sixty-second tour</div>
+    <h1 id="t-h"><span class="w">Know</span><span class="w">which</span><span class="w">tablespace</span><span class="w">fills</span><span class="w grad">first.</span><br><span class="w">Before</span><span class="w">it</span><span class="w grad">does.</span></h1>
+    <div style="margin-top:56px" id="t-p"><span class="pill">Oracle 19c+</span><span class="pill">read-only on AWR</span><span class="pill">plain SQL views</span><span class="pill">no agent</span></div>
+  </div>
+
+  <!-- pipeline -->
+  <div class="scene" id="s-pipe">
+    <div class="kicker">How it works</div>
+    <h2>AWR in, alerts out. Five layers of views.</h2>
+    <div class="pipe">
+      <div class="box" data-k="0"><div class="tag">DBA_HIST_*</div><div class="nm">AWR snapshots</div><div class="ds">what Oracle already collects</div></div>
+      <div class="arrow"><i></i><b></b><b></b><b></b></div>
+      <div class="box" data-k="1"><div class="tag">CAPV_</div><div class="nm">Seam</div><div class="ds">local, warehouse or test fixture</div></div>
+      <div class="arrow"><i></i><b></b><b></b><b></b></div>
+      <div class="box" data-k="2"><div class="tag">CAPD_</div><div class="nm">Daily series</div><div class="ds">one row per series per day</div></div>
+      <div class="arrow"><i></i><b></b><b></b><b></b></div>
+      <div class="stack">
+        <div class="box" data-k="3"><div class="tag">CAPF_</div><div class="nm">Forecast</div><div class="ds">trend, band, days to full</div></div>
+        <div class="box" data-k="3"><div class="tag">CAPA_</div><div class="nm">Anomaly</div><div class="ds">robust z per day</div></div>
+      </div>
+      <div class="arrow"><i></i><b></b><b></b><b></b></div>
+      <div class="box" data-k="4"><div class="tag">CAPR_</div><div class="nm">Alerts &amp; report</div><div class="ds">what to act on</div></div>
+    </div>
+  </div>
+
+  <!-- install -->
+  <div class="scene" id="s-install">
+    <div class="kicker">Install</div>
+    <h2>One command, three scripts</h2>
+    <div class="term" style="margin-top:28px"><div class="bar"><i></i><i></i><i></i>&nbsp; repo root</div>
+      <pre id="typed"></pre></div>
+    <div class="steps">
+      <div class="step"><span class="n">1</span><span class="f">doctor.sql</span><span class="d">preflight: grants, AWR history, readiness</span></div>
+      <div class="step"><span class="n">2</span><span class="f">install.sql</span><span class="d">creates the views and packages (idempotent)</span></div>
+      <div class="step"><span class="n">3</span><span class="f">report/report.sql</span><span class="d">writes the first report to reports/</span></div>
+    </div>
+    <div class="note">Production: <code>@create_owner.sql</code> as SYSDBA once (owner <code>C##AWRCAP</code>), then install as that user.</div>
+  </div>
+
+  <!-- report -->
+  <div class="scene" id="s-report">
+    <div class="kicker">The report · section 0</div>
+    <h2>The to-do list comes first</h2>
+    <div class="kpis">
+      <div class="kpi c"><div class="k">Critical</div><div class="v" data-n="1">0</div><div class="s">AUDIT_TRAIL, 17 days</div></div>
+      <div class="kpi w"><div class="k">Warnings</div><div class="v" data-n="10">0</div><div class="s">capacity and behaviour</div></div>
+      <div class="kpi"><div class="k">Series watched</div><div class="v" data-n="24">0</div><div class="s">19 OK · 4 flat · 1 cyclic</div></div>
+      <div class="kpi"><div class="k">Days of AWR</div><div class="v" data-n="151">0</div><div class="s">ECOMPRD, 2 containers</div></div>
+    </div>
+    <div class="term"><div class="bar"><i></i><i></i><i></i>&nbsp; reports/cap_report_ECOMPRD_….txt</div><pre id="rep"></pre></div>
+  </div>
+
+  <!-- forecast -->
+  <div class="scene" id="s-fc">
+    <div class="kicker">Forecast</div>
+    <h2>AUDIT_TRAIL <small>· ECOMPRD/SHOP_PDB · GiB used</small></h2>
+    <div class="readout" id="fc-read"></div>
+    <svg id="fc" width="1680" height="640" viewBox="0 0 1680 640"><g id="fc-cam"></g></svg>
+    <div class="action" id="fc-act"><div class="k">The report's advice</div>
+      <div class="r"><span class="v">54.40 GiB</span><span class="d">NEED_90_GIB: keeps the upper band under the limit for 90 days</span></div>
+      <div class="r"><span class="v crit">2026-11-02</span><span class="d">ADD_BY: the worst-case fill date</span></div></div>
+  </div>
+
+  <!-- quality -->
+  <div class="scene" id="s-q">
+    <div class="kicker">Forecast quality</div>
+    <h2>Every fit gets a grade</h2>
+    <div class="q-wrap">
+      <div class="cells" id="cells"></div>
+      <div class="grades">
+        <div class="grade"><span class="g ok">OK</span><span class="n ok">19</span><span class="d">good fit, may count down</span></div>
+        <div class="grade"><span class="g" style="color:var(--muted)">FLAT</span><span class="n" style="color:var(--muted)">4</span><span class="d">no growth</span></div>
+        <div class="grade"><span class="g warn">CYCLIC</span><span class="n warn">1</span><span class="d">fills and purges: judged on peaks</span></div>
+        <div class="grade"><span class="g" style="color:var(--faint)">LOW_CONFIDENCE</span><span class="n" style="color:var(--faint)">0</span><span class="d">too noisy to count down</span></div>
+        <div class="grade"><span class="g" style="color:var(--faint)">INSUFFICIENT_HISTORY</span><span class="n" style="color:var(--faint)">0</span><span class="d">too few days yet</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- anomaly -->
+  <div class="scene" id="s-an">
+    <div class="kicker">Anomalies</div>
+    <h2>Host CPU % busy <small>· 8 Fridays, then 2026-10-09</small></h2>
+    <div class="modes"><span>TRAILING</span><span class="on">SAME_DOW</span><span>HOUR_OF_WEEK</span></div>
+    <svg id="an" width="1680" height="640" viewBox="0 0 1680 640"><g id="an-cam"></g></svg>
+    <div class="side">
+      <div class="h">Same engine, other series</div>
+      <div class="c"><span class="z">z +11.8</span><div class="t">REDO_GB_DAY</div><div class="d">73.71 GiB/day vs usual 50.53</div></div>
+      <div class="c"><span class="z">z +147.7</span><div class="t">DB_SIZE_GB</div><div class="d">grew 44.13 GiB in a day vs usual 6.44</div></div>
+      <div class="c"><span class="z">z +295.9</span><div class="t">ANALYTICS_STAGE</div><div class="d">grew 39.07 GiB in a day vs usual ~1 GiB</div></div>
+    </div>
+  </div>
+
+  <!-- shift -->
+  <div class="scene" id="s-sh">
+    <div class="kicker">Level shifts</div>
+    <h2>DB CPU % <small>· ECOMPRD/SHOP_PDB · 35 days</small></h2>
+    <svg id="sh" width="1680" height="640" viewBox="0 0 1680 640"></svg>
+  </div>
+
+  <!-- limits -->
+  <div class="scene" id="s-lim">
+    <div class="kicker">Everything with a ceiling</div>
+    <h2>Countdowns and levels</h2>
+    <div class="lims">
+      <div class="lim" data-cur="95.0" data-to="95.0">
+        <div class="hd"><span class="nm">CUSTOMER_DATA<small>152.02 of 160.00 GiB</small></span><span class="rt">full <b>now</b> · TBSPC_NEARFULL</span></div>
+        <div class="track"><div class="f"></div><div class="gst"></div><div class="pct"></div>
+          <div class="m w" style="left:90%"></div><div class="ml warn" style="left:90%">warn 90%</div>
+          <div class="m" style="left:97%"></div><div class="ml crit" style="left:97%">crit 97%</div></div></div>
+      <div class="lim" data-cur="83.9" data-to="90">
+        <div class="hd"><span class="nm">SESSIONS<small>1091 of 1300</small></span><span class="rt">90% of limit in <b>36 days</b> · SERIES_LIMIT</span></div>
+        <div class="track"><div class="f"></div><div class="gst"></div><div class="pct"></div>
+          <div class="m w" style="left:90%"></div><div class="ml warn" style="left:90%">90% of limit</div></div></div>
+      <div class="lim" data-cur="65.0" data-to="80">
+        <div class="hd"><span class="nm">Host CPU<small>busy-hour p95</small></span><span class="rt">80% busy in <b>51 days</b> · CPU_SAT</span></div>
+        <div class="track"><div class="f"></div><div class="gst"></div><div class="pct"></div>
+          <div class="m w" style="left:80%"></div><div class="ml warn" style="left:80%">cpu_sat_pct 80%</div></div></div>
+    </div>
+  </div>
+
+  <!-- lifecycle -->
+  <div class="scene" id="s-life">
+    <div class="kicker">Alert lifecycle · cap_results.refresh</div>
+    <h2>One alert, five runs</h2>
+    <div class="runs" id="runs">
+      <div class="track2"><i></i></div><div class="token" id="token"></div>
+      <div class="run"><div class="k">run 1</div><div class="ev NEW">NEW</div><div class="sv warn">WARN</div><div class="d">inside dtf_warn (90 days)</div></div>
+      <div class="run"><div class="k">run 2</div><div class="ev ESC">ESCALATED</div><div class="sv crit">WARN → CRIT</div><div class="d">inside dtf_crit (30); clears an ack</div></div>
+      <div class="run"><div class="k">run 3</div><div class="ev MISS">missed 1</div><div class="sv" style="color:var(--muted)">still OPEN</div><div class="d">space added, alert gone</div></div>
+      <div class="run"><div class="k">run 4</div><div class="ev RES">RESOLVED</div><div class="sv ok">closed</div><div class="d">missing 2 runs = resolve_grace_runs</div></div>
+      <div class="run"><div class="k">run 5</div><div class="ev REO">REOPENED</div><div class="sv warn">WARN</div><div class="d">same state_key is back</div></div>
+    </div>
+    <div class="acknote"><code>cap_results.ack</code> silences an alert until it escalates or reopens. Pollable views: <code>CAPR_ALERTS_LATEST</code>, <code>CAPR_ALERT_EVENTS</code>.</div>
+  </div>
+
+  <!-- outputs -->
+  <div class="scene" id="s-out">
+    <div class="kicker">Same views, many outputs</div>
+    <h2>Pick your screen</h2>
+    <div class="outs" id="outs">
+      <div class="card"><pre id="txtcard"></pre></div>
+      <div class="card"><img src="img/html_report.png" alt=""></div>
+      <div class="card"><img src="img/brief.png" alt=""></div>
+      <div class="card"><img src="img/grafana-tablespaces.png" alt=""></div>
+      <div class="card"><img src="img/kibana-fleet-anomalies.png" alt=""></div>
+      <div class="card"><img src="img/apex-overview.png" alt=""></div>
+      <div class="clabel"><b>report/report.sql</b>text report</div>
+      <div class="clabel"><b>report/report_html.sql</b>HTML dashboard, one file</div>
+      <div class="clabel"><b>report/report_brief.sql</b>one-page briefing</div>
+      <div class="clabel"><b>grafana/</b>Grafana over ORDS</div>
+      <div class="clabel"><b>elk/</b>Kibana via the ELK export</div>
+      <div class="clabel"><b>apex/</b>Oracle APEX app, all in-database</div>
+    </div>
+  </div>
+
+  <!-- outro -->
+  <div class="scene" id="s-end" style="top:250px">
+    <div class="big"><span>Forecast it.</span> <span class="grad">Then fix it</span> <span>in time.</span></div>
+    <div class="cta"><div><b>./quickstart.sh</b> to try it</div><div><b>docs/tutorial.html</b> 15-minute walkthrough</div></div>
+  </div>
+
+  <div id="cap"></div>
+  <div id="barbg"></div><div id="bar"></div>
+</div>
+
+<script>
+"use strict";
+var NS = "http://www.w3.org/2000/svg";
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function ease(x) { return x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; }
+function easeOut(x) { return 1 - Math.pow(1 - x, 3); }
+function back(x) { var c = 1.7; return 1 + (c + 1) * Math.pow(x - 1, 3) + c * Math.pow(x - 1, 2); }
+function ph(t, a, b) { return ease(clamp((t - a) / (b - a), 0, 1)); }
+function lin(t, a, b) { return clamp((t - a) / (b - a), 0, 1); }
+function el(tag, attrs, parent) {
+  var e = document.createElementNS(NS, tag);
+  for (var k in attrs) e.setAttribute(k, attrs[k]);
+  parent.appendChild(e); return e;
+}
+function txt(parent, x, y, s, cls, anchor) {
+  var e = el("text", { x: x, y: y, "class": cls, "text-anchor": anchor || "start" }, parent);
+  e.textContent = s; return e;
+}
+function op(e, v) { e.style.opacity = v; }
+function attr(e, o) { for (var k in o) e.setAttribute(k, o[k]); }
+function $(s) { return document.querySelector(s); }
+function $$(s) { return Array.prototype.slice.call(document.querySelectorAll(s)); }
+// pop-in: opacity + rise + slight scale
+function pop(e, p, dy) { op(e, clamp(p * 1.4, 0, 1)); e.style.transform = "translateY(" + ((dy || 24) * (1 - p)) + "px) scale(" + (0.94 + 0.06 * p) + ")"; }
+// expanding, fading ring; period in seconds
+function ring(c, t, r0, grow, period) {
+  if (t < 0) { op(c, 0); return; }
+  var f = (t / period) % 1; c.setAttribute("r", r0 + grow * f); op(c, 1 - f);
+}
+
+// ---------------------------------------------------------------- timeline
+var SCENES = [
+  { id: "s-title",   t0: 0,    t1: 4,    chip: "Intro",        glow: [[300, 200, "#6f8dff"], [1400, 600, "#c39bff"]] },
+  { id: "s-pipe",    t0: 4,    t1: 8.5,  chip: "How it works", glow: [[200, 500, "#6f8dff"], [1500, 100, "#3fb6c9"]] },
+  { id: "s-install", t0: 8.5,  t1: 12.5, chip: "Install",      glow: [[1500, 500, "#6f8dff"], [100, 0, "#5cc58c"]] },
+  { id: "s-report",  t0: 12.5, t1: 18.5, chip: "Report",       glow: [[100, 300, "#f07d74"], [1500, 300, "#e0b34a"]] },
+  { id: "s-fc",      t0: 18.5, t1: 28,   chip: "Forecast",     glow: [[1500, 0, "#f07d74"], [200, 600, "#6f8dff"]] },
+  { id: "s-q",       t0: 28,   t1: 31.5, chip: "Quality",      glow: [[300, 400, "#5cc58c"], [1400, 200, "#6f8dff"]] },
+  { id: "s-an",      t0: 31.5, t1: 38,   chip: "Anomalies",    glow: [[1300, 100, "#f07d74"], [200, 500, "#e0b34a"]] },
+  { id: "s-sh",      t0: 38,   t1: 42.5, chip: "Level shifts", glow: [[1300, 400, "#e0b34a"], [100, 100, "#6f8dff"]] },
+  { id: "s-lim",     t0: 42.5, t1: 47.5, chip: "Limits",       glow: [[1500, 300, "#e0b34a"], [100, 500, "#f07d74"]] },
+  { id: "s-life",    t0: 47.5, t1: 52.5, chip: "Lifecycle",    glow: [[500, 0, "#6f8dff"], [1300, 500, "#5cc58c"]] },
+  { id: "s-out",     t0: 52.5, t1: 58.5, chip: "Outputs",      glow: [[200, 200, "#c39bff"], [1400, 500, "#6f8dff"]] },
+  { id: "s-end",     t0: 58.5, t1: 62,   chip: "Go",           glow: [[400, 300, "#6f8dff"], [1300, 300, "#f07d74"]] }
+];
+var DUR = SCENES[SCENES.length - 1].t1;
+var CAPS = [
+  [0, 4,      "Capacity forecasts and anomaly alerts, built from the AWR your database already keeps."],
+  [4, 8.5,    "Snapshots become daily series, then forecasts and anomaly scores, then alerts. All in SQL."],
+  [8.5, 12.5, "<b>./quickstart.sh</b>: a preflight check, the install, and your first report."],
+  [12.5, 15.5, "The report opens with the to-do list: <b>1 critical</b>, <b>10 warnings</b>."],
+  [15.5, 18.5, "The critical one: tablespace <b>AUDIT_TRAIL</b>, forecast full in <b>17 days</b>."],
+  [18.5, 21,  "90 days of history, one least-squares line: <b>613.664 MiB/day</b>, R² <b>0.916</b>."],
+  [21, 23.3,  "Projected from today with a 95% band, it hits the 130 GiB ceiling in <b>17 days</b>."],
+  [23.3, 25.6, "But growth sped up <b>1.92×</b>. At the recent rate it is closer to <b>9 days</b>."],
+  [25.6, 28,  "So the report tells you what to do: <b>add 54.40 GiB by 2026-11-02</b>."],
+  [28, 31.5,  "Every fit is graded. Only an <b>OK</b> fit can raise a countdown alert."],
+  [31.5, 34.7, "Anomalies: each day against its own history, using the median and a robust spread."],
+  [34.7, 38,  "Friday 10-09: <b>69.8%</b> busy against a usual 46.8%: <b>z +7.7</b>. Redo, DB size and tablespaces too."],
+  [38, 40.3,  "Level shifts: the last 7 days against the 28 before."],
+  [40.3, 42.5, "A <b>10.98</b>-point gap is under the 15-point knob: no CPU_SHIFT, an anomaly episode instead."],
+  [42.5, 47.5, "Anything with a ceiling gets a countdown. Anything already near it gets flagged now."],
+  [47.5, 52.5, "Alerts keep state: <b>NEW</b>, <b>ESCALATED</b>, <b>RESOLVED</b>, <b>REOPENED</b>. An ack holds until it gets worse."],
+  [52.5, 58.5, "Same views, every screen: text, HTML, a one-page brief, CSV, Grafana, Kibana and APEX."],
+  [58.5, 62,  "Start here: <b>docs/tutorial.html</b>"]
+];
+var stage = $("#stage"), capEl = $("#cap"), chipEl = $("#chip"), barEl = $("#bar");
+var sceneEls = SCENES.map(function (s) { return document.getElementById(s.id); });
+var dotsEl = $("#dots");
+SCENES.forEach(function () { dotsEl.appendChild(document.createElement("i")); });
+var dotEls = $$("#dots i");
+
+// ---------------------------------------------------------------- title
+var tWords = $$("#t-h .w"), tPills = $$("#t-p .pill");
+function drawTitle(t) {
+  op($("#t-k"), ph(t, 0, 0.4));
+  tWords.forEach(function (w, k) {
+    var p = clamp((t - 0.15 - k * 0.12) / 0.45, 0, 1);
+    op(w, clamp(p * 2, 0, 1));
+    w.style.transform = "translateY(" + (50 * (1 - easeOut(p))) + "px) rotate(" + (4 * (1 - easeOut(p))) + "deg)";
+  });
+  tPills.forEach(function (e, k) { var p = clamp((t - 1.5 - k * 0.15) / 0.4, 0, 1); op(e, p); e.style.transform = "scale(" + (p > 0 ? back(p) : 0.6) + ")"; });
+}
+
+// ---------------------------------------------------------------- pipeline
+var pipeBoxes = $$("#s-pipe .box"), pipeArrows = $$("#s-pipe .arrow");
+function drawPipe(t) {
+  pipeBoxes.forEach(function (b) {
+    var k = +b.dataset.k, at = 0.3 + k * 0.6;
+    b.classList.toggle("on", t >= at);
+    var p = clamp((t - at + 0.3) / 0.4, 0, 1);
+    b.style.opacity = 0.25 + 0.75 * p;
+    b.style.transform = "translateY(" + (30 * (1 - easeOut(p))) + "px) scale(" + (p > 0 ? 0.92 + 0.08 * back(p) : 0.92) + ")";
+  });
+  pipeArrows.forEach(function (a, k) {
+    var s = 0.45 + k * 0.6, p = ph(t, s, s + 0.4);
+    a.querySelector("i").style.width = (100 * p) + "%";
+    a.querySelectorAll("b").forEach(function (b, j) {
+      var f = (((t - s) * 1.6 + j / 3) % 1 + 1) % 1;
+      b.style.left = "calc(" + (f * 100) + "% - 7px)";
+      op(b, p >= 1 ? Math.sin(f * Math.PI) : 0);
+    });
+  });
+}
+
+// ---------------------------------------------------------------- install
+var typedEl = $("#typed");
+var CMD = "$ ./quickstart.sh                # sqlplus / as sysdba, CDB$ROOT";
+var steps = $$("#s-install .step"), note = $("#s-install .note");
+function drawInstall(t) {
+  var n = Math.round(CMD.length * lin(t, 0.2, 1.0));
+  var s = CMD.slice(0, n).replace(/(#.*)$/, '<span style="color:#6b7585">$1</span>');
+  typedEl.innerHTML = s + (t < 1.3 || Math.floor(t * 3) % 2 ? '<span class="cursor"></span>' : "");
+  steps.forEach(function (e, k) {
+    var p = ph(t, 1.1 + k * 0.35, 1.45 + k * 0.35);
+    op(e, p); e.style.transform = "translateX(" + (-40 * (1 - p)) + "px)";
+  });
+  pop(note, ph(t, 2.4, 2.8), 20);
+}
+
+// ---------------------------------------------------------------- report (rows of docs/demo/cap_report_demo.txt)
+var REP = [
+  "SEV  KIND             DB/PDB               MESSAGE",
+  "CRIT TBSPC_FULL       ECOMPRD/SHOP_PDB     Tablespace AUDIT_TRAIL forecast full in 17 days (92.0% used, 613.7 MiB/day)",
+  "WARN CPU_ANOM         ECOMPRD              Host CPU 69.8% busy on 2026-10-09 vs usual 46.8% for that weekday, robust z +7.7",
+  "WARN CPU_SAT          ECOMPRD              Host CPU (busy-hour p95) forecast to reach 80% busy in 51 days (now 65.0% busy)",
+  "WARN DBCPU_ANOM       ECOMPRD/SHOP_PDB     13 consecutive days, latest 2026-10-17, peak robust z +6.0: DB CPU 21.6% ...",
+  "WARN SERIES_LIMIT     ECOMPRD/SHOP_PDB     SESSIONS forecast to reach 90% of its limit (1300 COUNT) in 36 days ...",
+  "WARN TBSPC_NEARFULL   ECOMPRD/SHOP_PDB     Tablespace CUSTOMER_DATA is 95.0% full now (152.02 of 160.00 GiB) ...",
+  "... 5 more WARN rows"
+];
+var repEl = $("#rep");
+repEl.innerHTML = REP.map(function (l) {
+  var h = l.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  h = h.replace(/^CRIT/, '<span style="color:var(--crit);font-weight:700">CRIT</span>')
+       .replace(/^WARN/, '<span style="color:var(--warn)">WARN</span>')
+       .replace(/^SEV.*/, '<span style="color:#6b7585">$&</span>');
+  return '<span class="l">' + h + "</span>";
+}).join("");
+var repLines = $$("#rep .l"), kpis = $$("#s-report .kpi"), repTerm = $("#s-report .term");
+repTerm.style.transformOrigin = "20% 20%";
+function drawReport(t) {
+  kpis.forEach(function (e, k) {
+    var p = clamp((t - 0.15 - k * 0.15) / 0.4, 0, 1);
+    op(e, p); e.style.transform = "translateY(" + (30 * (1 - easeOut(p))) + "px)";
+    var v = e.querySelector(".v"), n = +v.dataset.n;
+    v.textContent = Math.round(n * easeOut(lin(t, 0.3 + k * 0.15, 1.3 + k * 0.15)));
+  });
+  kpis[0].style.boxShadow = t > 1.2 ? "0 0 " + (20 + 30 * (0.5 + 0.5 * Math.sin(t * 6))) + "px rgba(240,125,116,.35)" : "none";
+  repLines.forEach(function (e, k) {
+    var p = clamp((t - 1.0 - k * 0.1) / 0.3, 0, 1);
+    var dim = k >= 2 ? 1 - 0.65 * ph(t, 3.0, 3.4) : 1;
+    op(e, p * dim); e.style.transform = "translateX(" + (60 * (1 - easeOut(p))) + "px)";
+  });
+  repLines[1].classList.toggle("hl", t >= 3.0);
+  repTerm.style.transform = "scale(" + (1 + 0.06 * ph(t, 3.0, 5.5)) + ")";
+}
+
+// ---------------------------------------------------------------- forecast (AUDIT_TRAIL daily GiB, as in docs/tutorial.html)
+var D = [62.02,62.39,62.71,63.03,63.39,63.79,64.18,64.5,64.88,65.26,65.66,66.04,66.38,66.7,67.01,67.37,67.75,68.06,68.4,68.74,69.04,69.41,69.8,70.14,70.46,70.78,71.09,71.41,71.81,72.17,72.58,72.9,73.29,73.61,73.95,74.33,74.69,75.04,75.42,75.72,76.13,76.42,76.76,77.08,77.4,77.71,78.08,78.4,78.72,79.08,79.44,79.74,80.1,80.5,80.88,81.23,81.55,82.72,83.86,84.97,86.17,87.28,88.44,89.63,90.83,91.99,93.08,94.23,95.4,96.57,97.73,98.93,100.11,101.27,102.45,103.55,104.73,105.92,107.02,108.14,109.28,110.4,111.53,112.7,113.79,114.91,116.07,117.26,118.39,119.6];
+var FC = (function () {
+  var N = D.length, LAST = N - 1, H = 30, CEIL = 130, RECENT = 28;
+  function ols(lo, hi) {
+    var n = hi - lo + 1, mx = 0, my = 0, sxy = 0, sxx = 0, i;
+    for (i = lo; i <= hi; i++) { mx += i; my += D[i]; }
+    mx /= n; my /= n;
+    for (i = lo; i <= hi; i++) { sxy += (i - mx) * (D[i] - my); sxx += (i - mx) * (i - mx); }
+    var b = sxy / sxx; return { b: b, a: my - b * mx, mx: mx, sxx: sxx };
+  }
+  var f = ols(0, LAST), sse = 0, i;
+  for (i = 0; i < N; i++) sse += Math.pow(D[i] - (f.a + f.b * i), 2);
+  var se = Math.sqrt(sse / (N - 2)), tv = 1.96 + 2.4 / (N - 2);   // M9.1 band
+  function half(h) { return tv * se * Math.sqrt(1 + 1 / N + Math.pow(LAST + h - f.mx, 2) / f.sxx); }
+  var r = ols(LAST - RECENT + 1, LAST), cur = D[LAST];
+  return { N: N, LAST: LAST, H: H, CEIL: CEIL, f: f, half: half, cur: cur, rb: r.b, RECENT: RECENT,
+           dtf: (CEIL - cur) / f.b, dtfFast: (CEIL - cur) / r.b };
+})();
+var fcCam = $("#fc-cam"), fcRead = $("#fc-read"), fcAct = $("#fc-act");
+var fcG = (function () {
+  var L = 90, R = 1650, T = 30, B = 580, X1 = FC.LAST + FC.H, Y0 = 55, Y1 = 150, S = fcCam;
+  function x(v) { return L + v / X1 * (R - L); }
+  function y(v) { return B - (v - Y0) / (Y1 - Y0) * (B - T); }
+  [60, 80, 100, 120, 140].forEach(function (v) {
+    el("line", { x1: L, x2: R, y1: y(v), y2: y(v), "class": "g-grid" }, S);
+    txt(S, L - 14, y(v) + 7, String(v), "g-txt", "end");
+  });
+  el("line", { x1: L, x2: R, y1: B, y2: B, "class": "g-axis" }, S);
+  [["2026-07-20", 0], ["2026-08-19", 30], ["2026-09-18", 60]].forEach(function (d) { txt(S, x(d[1]), B + 34, d[0], "g-txt", "middle"); });
+  txt(S, x(FC.LAST), B + 34, "2026-10-17 today", "g-acc", "middle");
+  txt(S, x(X1), B + 34, "+30 days", "g-txt", "end");
+  el("line", { x1: x(FC.LAST), x2: x(FC.LAST), y1: T, y2: B, "class": "g-grid" }, S);
+  el("line", { x1: L, x2: R, y1: y(FC.CEIL), y2: y(FC.CEIL), "class": "g-ceil" }, S);
+  txt(S, L + 10, y(FC.CEIL) - 12, "maxsize 130.00 GiB", "g-crit");
+  var g = { x: x, y: y };
+  g.band = el("path", { "class": "g-band", d: "" }, S);
+  g.fit = el("line", { "class": "g-fit" }, S);
+  g.fast = el("line", { "class": "g-fast" }, S);
+  g.proj = el("line", { "class": "g-proj" }, S);
+  g.dots = D.map(function (v, k) { return el("circle", { cx: x(k), cy: y(v), r: 4.5, "class": "g-dot" }, S); });
+  g.head = el("circle", { r: 9, "class": "g-dot", style: "filter:drop-shadow(0 0 8px #8ea4ff)" }, S);
+  var xd = x(FC.LAST + FC.dtf);
+  g.ring = el("circle", { cx: xd, cy: y(FC.CEIL), r: 10, "class": "g-ring" }, S);
+  g.mark = el("g", {}, S);
+  el("line", { x1: xd, x2: xd, y1: y(FC.CEIL) - 18, y2: y(FC.CEIL) + 18, "class": "g-mark" }, g.mark);
+  txt(g.mark, xd, y(FC.CEIL) - 30, "full in 17 days", "g-crit", "middle");
+  txt(g.mark, xd, y(FC.CEIL) + 46, "worst 16 · best 18", "g-lbl", "middle");
+  g.fmark = el("g", {}, S);
+  var xf = x(FC.LAST + FC.dtfFast);
+  el("line", { x1: xf, x2: xf, y1: y(FC.CEIL) - 18, y2: y(FC.CEIL) + 18, style: "stroke:var(--warn);stroke-width:5" }, g.fmark);
+  txt(g.fmark, xf - 14, y(FC.CEIL) - 30, "~9 days at the recent rate", "g-warn", "end");
+  return g;
+})();
+function drawFc(t) {
+  var p1 = lin(t, 0.2, 1.6), p2 = ph(t, 1.7, 2.4), p3 = ph(t, 2.6, 3.6), p4 = ph(t, 3.7, 4.1), p5 = ph(t, 5.0, 6.0);
+  var shown = Math.max(1, Math.round(p1 * FC.N));
+  fcG.dots.forEach(function (c, k) { op(c, k < shown ? 1 : 0); });
+  attr(fcG.head, { cx: fcG.x(shown - 1), cy: fcG.y(D[shown - 1]) }); op(fcG.head, p1 > 0 && p1 < 1 ? 1 : 0);
+  var f = FC.f, xe = FC.LAST * p2, x = fcG.x, y = fcG.y;
+  attr(fcG.fit, { x1: x(0), y1: y(f.a), x2: x(xe), y2: y(f.a + f.b * xe) }); op(fcG.fit, p2 > 0 ? 1 - 0.5 * ph(t, 4.8, 5.2) : 0);
+  var he = FC.H * p3;
+  attr(fcG.proj, { x1: x(FC.LAST), y1: y(FC.cur), x2: x(FC.LAST + he), y2: y(FC.cur + f.b * he) }); op(fcG.proj, p3 > 0 ? 1 : 0);
+  var up = [], lo = [];
+  for (var s = 0; s <= 30; s++) {
+    var hh = he * s / 30;
+    up.push(x(FC.LAST + hh).toFixed(1) + "," + y(FC.cur + f.b * hh + FC.half(hh)).toFixed(1));
+    lo.unshift(x(FC.LAST + hh).toFixed(1) + "," + y(FC.cur + f.b * hh - FC.half(hh)).toFixed(1));
+  }
+  fcG.band.setAttribute("d", p3 > 0 ? "M" + up.concat(lo).join("L") + "Z" : "");
+  op(fcG.mark, p4); ring(fcG.ring, t - 3.8, 10, 50, 0.9);
+  var hf = FC.dtfFast * p5;
+  attr(fcG.fast, { x1: x(FC.LAST - FC.RECENT + 1), y1: y(FC.cur - FC.rb * (FC.RECENT - 1)), x2: x(FC.LAST + hf), y2: y(FC.cur + FC.rb * hf) });
+  op(fcG.fast, p5 > 0 ? 1 : 0); op(fcG.fmark, ph(t, 5.8, 6.2));
+  // camera: push in on today and the ceiling, then ease back for the advice card
+  var z = 1 + 0.45 * ph(t, 4.4, 5.3) - 0.45 * ph(t, 7.0, 7.7), ox = 1420, oy = 160;
+  fcCam.setAttribute("transform", "translate(" + ox + "," + oy + ") scale(" + z + ") translate(" + (-ox) + "," + (-oy) + ")");
+  pop(fcAct, ph(t, 7.4, 7.9), 40);
+  var r = [];
+  if (p2 > 0) r.push("slope <b>613.664 MiB/day</b> · R² <b>0.916</b>");
+  if (p3 > 0.5) r.push("+30 days <b>137.58 GiB</b>");
+  if (p5 > 0) r.push('accel_ratio <b style="color:var(--warn)">1.92</b>');
+  fcRead.innerHTML = r.join("<br>");
+}
+
+// ---------------------------------------------------------------- quality (coverage line of the sample report)
+var cellsEl = $("#cells"), GR = [];
+for (var i = 0; i < 24; i++) { GR.push(i < 19 ? "OK" : i < 23 ? "FLAT" : "CYCLIC"); cellsEl.appendChild(document.createElement("i")); }
+var cells = $$("#cells i"), grades = $$("#s-q .grade");
+var ORDER = [3, 17, 8, 21, 0, 12, 23, 5, 14, 19, 1, 10, 6, 20, 15, 2, 9, 22, 13, 4, 18, 7, 16, 11];
+function drawQ(t) {
+  cells.forEach(function (c, k) {
+    var at = 0.2 + ORDER.indexOf(k) * 0.045, p = clamp((t - at) / 0.25, 0, 1);
+    c.className = p >= 1 ? GR[k] : "";
+    c.style.transform = "scale(" + (p > 0 ? back(p) : 0.4) + ")"; op(c, p > 0 ? 1 : 0.2);
+  });
+  grades.forEach(function (g, k) { var p = ph(t, 0.9 + k * 0.22, 1.3 + k * 0.22); op(g, p); g.style.transform = "translateX(" + (40 * (1 - p)) + "px)"; });
+}
+
+// ---------------------------------------------------------------- anomaly (SAME_DOW, as in docs/tutorial.html)
+var F = [["08-14", 43.83], ["08-21", 44.87], ["08-28", 45.54], ["09-04", 46.55],
+         ["09-11", 47.08], ["09-18", 47.89], ["09-25", 48.33], ["10-02", 49.65]];
+var TODAY = 69.80, MED = 46.82, THR = 9.00;
+var anCam = $("#an-cam");
+var anG = (function () {
+  var L = 90, R = 1650, T = 30, B = 580, Y0 = 30, Y1 = 80, S = anCam;
+  function x(k) { return L + 60 + k * (R - L - 120) / 8; }
+  function y(v) { return B - (v - Y0) / (Y1 - Y0) * (B - T); }
+  [30, 40, 50, 60, 70, 80].forEach(function (v) {
+    el("line", { x1: L, x2: R, y1: y(v), y2: y(v), "class": "g-grid" }, S);
+    txt(S, L - 14, y(v) + 7, v + "%", "g-txt", "end");
+  });
+  el("line", { x1: L, x2: R, y1: B, y2: B, "class": "g-axis" }, S);
+  F.forEach(function (f, k) { txt(S, x(k), B + 34, f[0], "g-txt", "middle"); });
+  txt(S, x(8), B + 34, "10-09", "g-crit", "middle");
+  var g = { L: L, R: R };
+  g.band = el("rect", { x: L, width: R - L, y: y(MED + THR), height: y(MED - THR) - y(MED + THR), "class": "g-win2" }, S);
+  g.bandL = txt(S, L + 12, y(MED + THR) - 12, "normal: median ± 3 × MAD σ (σ floored to 3.00)", "g-acc");
+  g.med = el("line", { "class": "g-med", x1: L, x2: L, y1: y(MED), y2: y(MED) }, S);
+  g.medL = txt(S, L + 12, y(MED) - 12, "median 46.82", "g-acc");
+  g.dots = F.map(function (f, k) { return el("circle", { cx: x(k), cy: y(f[1]), r: 11, "class": "g-dot" }, S); });
+  g.arrow = el("line", { "class": "g-arrow", x1: x(8) - 40, x2: x(8) - 40, y1: y(MED), y2: y(MED) }, S);
+  g.arrowL = txt(S, x(8) - 56, y((MED + TODAY) / 2) + 8, "+22.98 points · robust z +7.7", "g-crit", "end");
+  g.ring = el("circle", { cx: x(8), cy: y(TODAY), r: 14, "class": "g-ring" }, S);
+  g.dot = el("circle", { cx: x(8), cy: y(TODAY), r: 14, "class": "g-dot hot", style: "filter:drop-shadow(0 0 12px #f07d74)" }, S);
+  g.dotL = txt(S, x(8), y(TODAY) - 30, "69.80% HIGH", "g-crit", "middle");
+  g.yMed = y(MED); g.yTop = y(TODAY);
+  return g;
+})();
+var sideCards = $$("#s-an .side .c"), sideH = $("#s-an .side .h");
+function drawAn(t) {
+  anG.dots.forEach(function (d, k) { var p = clamp((t - 0.2 - k * 0.1) / 0.3, 0, 1); op(d, p); d.setAttribute("r", 11 * (p > 0 ? back(p) : 0)); });
+  var pm = ph(t, 1.0, 1.5);
+  anG.med.setAttribute("x2", anG.L + (anG.R - anG.L) * pm); op(anG.medL, pm);
+  var pb = ph(t, 1.4, 1.8); op(anG.band, pb); op(anG.bandL, pb);
+  var pd = clamp((t - 2.1) / 0.35, 0, 1); op(anG.dot, pd > 0 ? 1 : 0); anG.dot.setAttribute("r", 14 * (pd > 0 ? back(pd) : 0)); op(anG.dotL, pd);
+  ring(anG.ring, t - 2.4, 14, 46, 0.8);
+  var pa = ph(t, 2.5, 3.0); anG.arrow.setAttribute("y2", anG.yMed + (anG.yTop - anG.yMed) * pa); op(anG.arrow, pa > 0 ? 1 : 0); op(anG.arrowL, ph(t, 2.9, 3.2));
+  op(sideH, ph(t, 3.6, 3.9));
+  sideCards.forEach(function (c, k) { var p = ph(t, 3.7 + k * 0.25, 4.1 + k * 0.25); op(c, p); c.style.transform = "translateY(" + (-40 * (1 - p)) + "px)"; });
+}
+
+// ---------------------------------------------------------------- shift (CAPA_CPU_SHIFT, as in docs/tutorial.html)
+var P = [10.88,11.85,11.73,11.74,12.01,11.97,11.21,11.14,11.96,11.87,11.98,11.97,12.08,11.28,11.18,12.18,12.27,12.28,12.25,12.41,11.51,11.43,22.71,22.86,22.82,22.85,29.66,21.48,21.42,22.9,22.96,23.24,23.12,23.18,21.63];
+var shSvg = $("#sh");
+var shG = (function () {
+  var L = 90, R = 1650, T = 30, B = 580, Y0 = 0, Y1 = 35, N = P.length;
+  function x(k) { return L + 22 + k * (R - L - 44) / (N - 1); }
+  function y(v) { return B - (v - Y0) / (Y1 - Y0) * (B - T); }
+  var xb = (x(27) + x(28)) / 2, g = {};
+  g.wb = el("rect", { x: L, y: T, width: xb - L, height: B - T, "class": "g-win" }, shSvg);
+  g.wr = el("rect", { x: xb, y: T, width: R - xb, height: B - T, "class": "g-win2" }, shSvg);
+  [0, 10, 20, 30].forEach(function (v) {
+    el("line", { x1: L, x2: R, y1: y(v), y2: y(v), "class": "g-grid" }, shSvg);
+    txt(shSvg, L - 14, y(v) + 7, v + "%", "g-txt", "end");
+  });
+  el("line", { x1: L, x2: R, y1: B, y2: B, "class": "g-axis" }, shSvg);
+  txt(shSvg, x(0), B + 34, "2026-09-13", "g-txt", "start");
+  txt(shSvg, x(N - 1), B + 34, "2026-10-17", "g-txt", "end");
+  g.wbL = txt(shSvg, (L + xb) / 2, T + 34, "baseline: 28 days", "g-lbl", "middle");
+  g.wrL = txt(shSvg, (xb + R) / 2, T + 34, "recent: 7 days", "g-lbl", "middle");
+  g.path = el("polyline", { fill: "none", stroke: "#6f8dff", "stroke-opacity": .45, "stroke-width": 3, points: "" }, shSvg);
+  g.pts = P.map(function (v, k) { return [x(k), y(v)]; });
+  g.dots = P.map(function (v, k) { return el("circle", { cx: x(k), cy: y(v), r: 8, "class": "g-dot" }, shSvg); });
+  g.mb = el("line", { x1: L, x2: xb, y1: y(11.98), y2: y(11.98), "class": "g-med" }, shSvg);
+  g.mbL = txt(shSvg, L + 12, y(11.98) + 48, "median 11.98", "g-acc");
+  g.mr = el("line", { x1: xb, x2: R, y1: y(22.96), y2: y(22.96), "class": "g-med" }, shSvg);
+  g.mrL = txt(shSvg, R - 12, y(22.96) - 50, "median 22.96", "g-acc", "end");
+  var xg = xb + 40;
+  g.gap = el("g", {}, shSvg);
+  el("line", { x1: xg, x2: xg, y1: y(11.98), y2: y(22.96), "class": "g-arrow", style: "stroke:var(--warn)" }, g.gap);
+  txt(g.gap, xg - 18, y(17.47) + 8, "gap 10.98 < 15 (shift_min_pct): no CPU_SHIFT", "g-warn", "end");
+  return g;
+})();
+function drawSh(t) {
+  var n = Math.round(lin(t, 0.1, 1.2) * P.length);
+  shG.dots.forEach(function (d, k) { op(d, k < n ? 1 : 0); });
+  shG.path.setAttribute("points", shG.pts.slice(0, Math.max(n, 1)).map(function (p) { return p.join(","); }).join(" "));
+  var pw = ph(t, 1.3, 1.7);
+  [shG.wb, shG.wr, shG.wbL, shG.wrL].forEach(function (e) { op(e, pw); });
+  var pm = ph(t, 1.7, 2.1);
+  [shG.mb, shG.mbL, shG.mr, shG.mrL].forEach(function (e) { op(e, pm); });
+  op(shG.gap, ph(t, 2.3, 2.7));
+}
+
+// ---------------------------------------------------------------- limits (sample report, sections 0 / 4 / 7)
+var lims = $$("#s-lim .lim");
+function drawLim(t) {
+  lims.forEach(function (e, k) {
+    var s = 0.2 + k * 0.35;
+    op(e, ph(t, s, s + 0.3));
+    var cur = +e.dataset.cur, to = +e.dataset.to, pf = easeOut(lin(t, s + 0.2, s + 1.2));
+    var f = e.querySelector(".f"), g = e.querySelector(".gst"), pc = e.querySelector(".pct");
+    f.style.width = (cur * pf) + "%";
+    pc.style.left = (cur * pf) + "%"; pc.textContent = (cur * pf).toFixed(1) + "%";
+    var pg = ph(t, s + 1.4, s + 2.1);
+    g.style.left = cur + "%"; g.style.width = ((to - cur) * pg) + "%";
+    if (to === cur) f.style.boxShadow = t > s + 1.3 ? "0 0 " + (14 + 14 * Math.sin(t * 7)) + "px rgba(224,179,74,.7)" : "none";
+  });
+}
+
+// ---------------------------------------------------------------- lifecycle (the tutorial's example sequence)
+var runs = $$("#s-life .run"), token = $("#token"), trackFill = $("#s-life .track2 i");
+function drawLife(t) {
+  var STEP = 0.75, t0 = 0.3;
+  var pos = clamp((t - t0) / STEP, 0, runs.length - 1);
+  var k0 = Math.floor(pos), fr = ease(pos - k0);
+  var centers = runs.map(function (r) { return r.offsetLeft + r.offsetWidth / 2; });
+  var cx = k0 >= runs.length - 1 ? centers[runs.length - 1] : centers[k0] + (centers[k0 + 1] - centers[k0]) * fr;
+  token.style.left = cx + "px"; trackFill.style.width = cx + "px"; op(token, ph(t, 0, 0.3));
+  runs.forEach(function (r, k) {
+    var at = t0 + k * STEP;
+    r.classList.toggle("on", t >= at);
+    var pe = clamp((t - at) / 0.3, 0, 1);
+    var ev = r.querySelector(".ev"); op(ev, pe); ev.style.transform = "scale(" + (pe > 0 ? back(pe) : 0.5) + ")";
+    op(r.querySelector(".sv"), ph(t, at + 0.15, at + 0.4));
+    op(r.querySelector(".d"), ph(t, at + 0.25, at + 0.5));
+  });
+  pop($("#s-life .acknote"), ph(t, 3.7, 4.1), 20);
+}
+
+// ---------------------------------------------------------------- outputs
+$("#txtcard").textContent = REP.slice(0, 7).map(function (l) { return l.slice(0, 92); }).join("\n");
+var cards = $$("#outs .card"), labels = $$("#outs .clabel");
+var GRID = cards.map(function (c, k) { return [(k % 3) * 590, Math.floor(k / 3) * 320]; });
+var STACK = [[-14, -40], [-7, 60], [3, -30], [9, 40], [-3, 10], [14, -20]];
+function drawOut(t) {
+  cards.forEach(function (c, k) {
+    var pin = clamp((t - 0.1 - k * 0.12) / 0.4, 0, 1);              // fly in to a fanned stack
+    var pg = ph(t, 1.6 + k * 0.06, 2.4 + k * 0.06);                 // spread into the grid
+    var sx = 580 + STACK[k][1], sy = 190 + (1 - easeOut(pin)) * 700;
+    var x = sx + (GRID[k][0] - sx) * pg, y = sy + (GRID[k][1] - sy) * pg;
+    var rot = STACK[k][0] * (1 - pg), sc = 1.12 - 0.12 * pg;
+    c.style.left = x + "px"; c.style.top = y + "px"; c.style.zIndex = k;
+    c.style.transform = "rotate(" + rot + "deg) scale(" + sc + ")"; op(c, pin > 0 ? 1 : 0);
+    labels[k].style.left = GRID[k][0] + "px"; labels[k].style.top = (GRID[k][1] + 258) + "px";
+    op(labels[k], ph(t, 2.4 + k * 0.08, 2.7 + k * 0.08));
+  });
+}
+
+// ---------------------------------------------------------------- outro
+var bigWords = $$("#s-end .big span");
+function drawEnd(t) {
+  bigWords.forEach(function (w, k) {
+    var p = clamp((t - 0.1 - k * 0.3) / 0.5, 0, 1);
+    op(w, p); w.style.transform = "translateY(" + (60 * (1 - easeOut(p))) + "px) scale(" + (p > 0 ? 0.9 + 0.1 * back(p) : 0.9) + ")";
+  });
+  pop($("#s-end .cta"), ph(t, 1.2, 1.6), 30);
+}
+
+var DRAW = { "s-title": drawTitle, "s-pipe": drawPipe, "s-install": drawInstall, "s-report": drawReport, "s-fc": drawFc,
+             "s-q": drawQ, "s-an": drawAn, "s-sh": drawSh, "s-lim": drawLim, "s-life": drawLife, "s-out": drawOut, "s-end": drawEnd };
+
+// ---------------------------------------------------------------- frame
+function hex(c) { return [1, 3, 5].map(function (i) { return parseInt(c.substr(i, 2), 16); }); }
+function mix(a, b, p) { return a.map(function (v, i) { return v + (b[i] - v) * p; }); }
+var glows = [$("#glow1"), $("#glow2")], gridEl = $("#grid");
+var lastCap = -1;
+function seek(t) {
+  var cur = 0;
+  SCENES.forEach(function (s, i) {
+    var e = sceneEls[i];
+    var pin = s.t0 === 0 ? 1 : ph(t, s.t0, s.t0 + 0.4), pout = s.t1 === DUR ? 0 : ph(t, s.t1 - 0.3, s.t1);
+    var vis = t >= s.t0 - 0.01 && t < s.t1 + 0.01;
+    var v = vis ? pin * (1 - pout) : 0;
+    e.style.opacity = v; e.style.visibility = v > 0 ? "visible" : "hidden";
+    if (vis) {
+      var drift = 1 + 0.025 * lin(t, s.t0, s.t1);                 // slow push-in across the scene
+      e.style.transform = "translateX(" + (80 * (1 - pin) - 80 * pout) + "px) scale(" + (drift * (0.97 + 0.03 * pin)) + ")";
+      e.style.filter = pin < 1 || pout > 0 ? "blur(" + (6 * (1 - pin) + 6 * pout) + "px)" : "none";
+      if (DRAW[s.id]) DRAW[s.id](t - s.t0);
+    }
+    if (t >= s.t0 && t < s.t1) cur = i;
+  });
+  if (t >= DUR) cur = SCENES.length - 1;
+  chipEl.textContent = SCENES[cur].chip;
+  dotEls.forEach(function (d, i) { d.classList.toggle("on", i <= cur); });
+  // background: drifting dot grid, glows gliding to each scene's position and colour
+  gridEl.style.transform = "translate(" + (-(t * 9) % 44) + "px," + (-(t * 5) % 44) + "px)";
+  var prev = SCENES[Math.max(0, cur - 1)], now = SCENES[cur], pg = cur === 0 ? 1 : ph(t, now.t0 - 0.2, now.t0 + 1.0);
+  glows.forEach(function (g, j) {
+    var a = prev.glow[j], b = now.glow[j];
+    var wob = 40 * Math.sin(t * 0.8 + j * 2);
+    g.style.transform = "translate(" + (a[0] + (b[0] - a[0]) * pg - 450 + wob) + "px," + (a[1] + (b[1] - a[1]) * pg - 300 - wob) + "px)";
+    g.style.background = "rgb(" + mix(hex(a[2]), hex(b[2]), pg).map(Math.round).join(",") + ")";
+  });
+  var ci = -1;
+  CAPS.forEach(function (c, i) { if (t >= c[0] && t < c[1]) ci = i; });
+  if (t >= DUR) ci = CAPS.length - 1;
+  if (ci !== lastCap) { capEl.innerHTML = ci >= 0 ? "<span>" + CAPS[ci][2] + "</span>" : ""; lastCap = ci; }
+  var c = CAPS[ci];
+  if (c) {
+    var cin = ph(t, c[0], c[0] + 0.25), cout = c[1] === DUR ? 0 : ph(t, c[1] - 0.15, c[1]);
+    capEl.style.opacity = cin * (1 - cout);
+    capEl.style.transform = "translateY(" + (16 * (1 - cin)) + "px)";
+  }
+  barEl.style.width = (100 * clamp(t / DUR, 0, 1)) + "%";
+}
+window.__seek = seek;
+window.__dur = DUR;
+
+if (!/[?&]render/.test(location.search)) {
+  var fit = function () { stage.style.transform = "scale(" + Math.min(innerWidth / 1920, innerHeight / 1080) + ")"; };
+  fit(); addEventListener("resize", fit);
+  var start = performance.now();
+  (function loop(now) { seek(((now - start) / 1000) % (DUR + 2)); requestAnimationFrame(loop); })(start);
+} else {
+  seek(0);
+}
+</script>
+</body>
+</html>

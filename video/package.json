@@ -1,0 +1,10 @@
+{
+  "name": "awrcap-video",
+  "private": true,
+  "description": "Builds docs/assets/awrcap_tour.mp4 from video.html (see README.md)",
+  "type": "module",
+  "devDependencies": {
+    "ffmpeg-static": "^5.3.0",
+    "playwright-core": "^1.64.1"
+  }
+}

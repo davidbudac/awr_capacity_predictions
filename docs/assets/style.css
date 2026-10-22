@@ -382,3 +382,10 @@ hr.soft{border:none;border-top:1px solid var(--border);margin:40px 0}
 .figure { margin: 1.25rem 0; }
 .figure img { display: block; width: 100%; height: auto; border: 1px solid var(--line, rgba(128,128,128,.35)); border-radius: 10px; }
 .figure figcaption { margin-top: .5rem; font-size: .85rem; opacity: .75; }
+
+/* The one-minute video tour (Introduction) */
+.tour{margin:30px 0 34px}
+.tour video{display:block;width:100%;aspect-ratio:16/9;height:auto;background:#0c1017;
+  border:1px solid var(--border);border-radius:var(--r)}
+.tour figcaption{margin-top:10px;font-size:13.5px;color:var(--muted);line-height:1.5}
+.tour figcaption strong{color:var(--text)}
